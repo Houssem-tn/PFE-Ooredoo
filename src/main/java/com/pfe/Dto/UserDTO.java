@@ -9,22 +9,20 @@ public record UserDTO(
         String id,
         String fullName,
         String email,
+        String phone,
 
-        // ✅ final role after approval (can be null while pending)
         UserRole role,
-
-        // ✅ role requested at registration
         UserRole roleRequested,
 
-        // ✅ approval status
         AccountStatus status,
-
         boolean enabled,
 
-        // audit (optional but useful)
         Instant validatedAt,
         String validatedBy,
         String rejectionReason,
 
-        Instant createdAt
+        Instant createdAt,
+
+        String assignedSttId,
+        String assignedSttEmail
 ) {}

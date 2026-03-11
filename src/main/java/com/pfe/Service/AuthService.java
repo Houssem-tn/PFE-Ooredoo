@@ -44,6 +44,10 @@ public class AuthService {
 
     public UserDTO register(RegisterRequest req) {
         String email = req.email().trim().toLowerCase();
+        String firstName = req.firstName().trim();
+        String lastName = req.lastName().trim();
+        String fullName = firstName + " " + lastName;
+        String phone = (req.phone() != null && !req.phone().isBlank()) ? req.phone().trim() : null;
 
         if (repo.existsByEmail(email)) {
             throw new IllegalArgumentException("Email already used");
@@ -55,19 +59,40 @@ public class AuthService {
             throw new IllegalArgumentException("Role not allowed for public registration");
         }
 
+        String assignedSttId = null;
+        String assignedSttEmail = null;
+
+        if (requested == UserRole.ROLE_TECH) {
+            if (req.sttId() == null || req.sttId().isBlank()) {
+                throw new IllegalArgumentException("STT selection is required for TECH registration");
+            }
+
+            AppUser selectedStt = repo.findByIdAndRoleAndStatusAndEnabled(
+                    req.sttId().trim(),
+                    UserRole.ROLE_STT,
+                    AccountStatus.APPROVED,
+                    true
+            ).orElseThrow(() -> new IllegalArgumentException("Selected STT is invalid"));
+
+            assignedSttId = selectedStt.getId();
+            assignedSttEmail = selectedStt.getEmail();
+        }
+
         AppUser user = AppUser.builder()
-                .fullName(req.fullName().trim())
+                .fullName(fullName)
                 .email(email)
+                .phone(phone)
                 .password(encoder.encode(req.password()))
                 .role(null)
                 .roleRequested(requested)
+                .assignedSttId(assignedSttId)
+                .assignedSttEmail(assignedSttEmail)
                 .status(AccountStatus.PENDING)
                 .enabled(false)
                 .build();
 
         AppUser savedUser = repo.save(user);
 
-        // trigger notification event after successful save
         notificationEventService.onUserRegistered(savedUser);
 
         return userMapper.toDto(savedUser);

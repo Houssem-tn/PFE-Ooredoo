@@ -32,8 +32,21 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     @Override
     public void onUserRegistered(AppUser user) {
         NotificationMessageDto payload = payloadFactory.buildNewPendingRegistration(user);
-        List<UserRole> targets = destinationResolver.resolveRolesForNewRegistration(user);
 
+        if (user != null
+                && user.getRoleRequested() == UserRole.ROLE_TECH
+                && user.getAssignedSttEmail() != null
+                && !user.getAssignedSttEmail().isBlank()) {
+
+            Notification saved = notificationService.createForRecipient(user.getAssignedSttEmail(), payload);
+            if (saved != null) {
+                sender.sendToUser(user.getAssignedSttEmail(), saved);
+            }
+
+            return;
+        }
+
+        List<UserRole> targets = destinationResolver.resolveRolesForNewRegistration(user);
         List<Notification> savedNotifications = notificationService.createForRoles(targets, payload);
 
         for (Notification notification : savedNotifications) {

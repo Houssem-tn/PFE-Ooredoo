@@ -35,7 +35,7 @@ public class ApprovalController {
     @PreAuthorize("hasAnyAuthority('ROLE_ADMIN','ROLE_ZM','ROLE_STT')")
     public List<UserDTO> pending(Authentication auth) {
         UserRole approverRole = extractRole(auth);
-        List<AppUser> users = approvalService.listMyPending(approverRole);
+        List<AppUser> users = approvalService.listMyPending(auth.getName(), approverRole);
         return users.stream().map(userMapper::toDto).toList();
     }
 

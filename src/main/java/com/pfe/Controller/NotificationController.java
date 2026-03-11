@@ -7,7 +7,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Stream;
 
 @RestController
 @RequestMapping("/api/v1/notifications")
@@ -20,27 +22,56 @@ public class NotificationController {
     }
 
     @GetMapping("/my-role")
-    public ResponseEntity<List<Notification>> getMyRoleNotifications(Authentication authentication) {
+    public ResponseEntity<List<Notification>> getMyNotifications(Authentication authentication) {
         UserRole role = extractRole(authentication);
-        return ResponseEntity.ok(notificationService.getNotificationsForRole(role));
+        String email = authentication.getName();
+
+        List<Notification> roleNotifications = notificationService.getNotificationsForRole(role);
+        List<Notification> directNotifications = notificationService.getNotificationsForRecipient(email);
+
+        List<Notification> merged = Stream.concat(roleNotifications.stream(), directNotifications.stream())
+                .sorted(Comparator.comparing(Notification::getCreatedAt).reversed())
+                .toList();
+
+        return ResponseEntity.ok(merged);
     }
 
     @GetMapping("/my-role/unread-count")
     public ResponseEntity<Long> getUnreadCount(Authentication authentication) {
         UserRole role = extractRole(authentication);
-        return ResponseEntity.ok(notificationService.countUnreadForRole(role));
+        String email = authentication.getName();
+
+        long total = notificationService.countUnreadForRole(role)
+                + notificationService.countUnreadForRecipient(email);
+
+        return ResponseEntity.ok(total);
     }
 
     @PatchMapping("/{id}/read")
     public ResponseEntity<Notification> markAsRead(@PathVariable String id, Authentication authentication) {
         UserRole role = extractRole(authentication);
-        return ResponseEntity.ok(notificationService.markAsReadForRole(id, role));
+        String email = authentication.getName();
+
+        try {
+            return ResponseEntity.ok(notificationService.markAsReadForRole(id, role));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.ok(notificationService.markAsReadForRecipient(id, email));
+        }
     }
 
     @PatchMapping("/my-role/read-all")
     public ResponseEntity<List<Notification>> markAllAsRead(Authentication authentication) {
         UserRole role = extractRole(authentication);
-        return ResponseEntity.ok(notificationService.markAllAsReadForRole(role));
+        String email = authentication.getName();
+
+        List<Notification> roleUpdated = notificationService.markAllAsReadForRole(role);
+        List<Notification> directUpdated = notificationService.markAllAsReadForRecipient(email);
+
+        List<Notification> merged = Stream.concat(roleUpdated.stream(), directUpdated.stream())
+                .sorted(Comparator.comparing(Notification::getCreatedAt).reversed())
+                .toList();
+
+        return ResponseEntity.ok(merged);
     }
 
     private UserRole extractRole(Authentication authentication) {

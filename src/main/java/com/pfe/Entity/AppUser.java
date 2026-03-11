@@ -31,16 +31,20 @@ public class AppUser {
     // requested role at registration (STT / TECH / ZM)
     private UserRole roleRequested;
 
+    // for TECH registration: chosen parent STT
+    @Indexed
+    private String assignedSttId;
+
+    private String assignedSttEmail;
+
     @Builder.Default
     private AccountStatus status = AccountStatus.PENDING;
 
-    // disable login until approved
     @Builder.Default
     private boolean enabled = false;
 
-    // audit
     private Instant validatedAt;
-    private String validatedBy;      // approver email
+    private String validatedBy;
     private String rejectionReason;
 
     private String password;

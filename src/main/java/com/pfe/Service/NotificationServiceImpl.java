@@ -48,8 +48,23 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     @Override
+    public Notification createForRecipient(String recipientEmail, NotificationMessageDto payload) {
+        if (recipientEmail == null || recipientEmail.isBlank() || payload == null) {
+            return null;
+        }
+
+        Notification notification = buildRecipientNotification(recipientEmail.trim().toLowerCase(), payload);
+        return notificationRepository.save(notification);
+    }
+
+    @Override
     public List<Notification> getNotificationsForRole(UserRole role) {
         return notificationRepository.findByTargetRoleOrderByCreatedAtDesc(role.name());
+    }
+
+    @Override
+    public List<Notification> getNotificationsForRecipient(String recipientEmail) {
+        return notificationRepository.findByRecipientEmailOrderByCreatedAtDesc(recipientEmail.trim().toLowerCase());
     }
 
     @Override
@@ -58,11 +73,36 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     @Override
+    public long countUnreadForRecipient(String recipientEmail) {
+        return notificationRepository.countByRecipientEmailAndReadFalse(recipientEmail.trim().toLowerCase());
+    }
+
+    @Override
     public Notification markAsReadForRole(String notificationId, UserRole role) {
         Notification notification = notificationRepository.findById(notificationId)
                 .orElseThrow(() -> new IllegalArgumentException("Notification not found"));
 
         if (!role.name().equals(notification.getTargetRole())) {
+            throw new IllegalArgumentException("You cannot modify this notification");
+        }
+
+        if (!notification.isRead()) {
+            notification.setRead(true);
+            notification = notificationRepository.save(notification);
+        }
+
+        return notification;
+    }
+
+    @Override
+    public Notification markAsReadForRecipient(String notificationId, String recipientEmail) {
+        Notification notification = notificationRepository.findById(notificationId)
+                .orElseThrow(() -> new IllegalArgumentException("Notification not found"));
+
+        String normalizedEmail = recipientEmail.trim().toLowerCase();
+
+        if (notification.getRecipientEmail() == null ||
+                !normalizedEmail.equals(notification.getRecipientEmail().trim().toLowerCase())) {
             throw new IllegalArgumentException("You cannot modify this notification");
         }
 
@@ -88,6 +128,20 @@ public class NotificationServiceImpl implements NotificationService {
         return notificationRepository.saveAll(notifications);
     }
 
+    @Override
+    public List<Notification> markAllAsReadForRecipient(String recipientEmail) {
+        List<Notification> notifications =
+                notificationRepository.findByRecipientEmailOrderByCreatedAtDesc(recipientEmail.trim().toLowerCase());
+
+        for (Notification notification : notifications) {
+            if (!notification.isRead()) {
+                notification.setRead(true);
+            }
+        }
+
+        return notificationRepository.saveAll(notifications);
+    }
+
     private Notification buildRoleNotification(UserRole role, NotificationMessageDto payload) {
         return Notification.builder()
                 .eventType(payload.getEventType())
@@ -98,6 +152,23 @@ public class NotificationServiceImpl implements NotificationService {
                 .status(payload.getStatus())
                 .targetRole(role.name())
                 .recipientEmail(null)
+                .triggeredBy(payload.getTriggeredBy())
+                .read(false)
+                .createdAt(payload.getCreatedAt() != null ? payload.getCreatedAt() : Instant.now())
+                .data(payload.getData())
+                .build();
+    }
+
+    private Notification buildRecipientNotification(String recipientEmail, NotificationMessageDto payload) {
+        return Notification.builder()
+                .eventType(payload.getEventType())
+                .title(payload.getTitle())
+                .message(payload.getMessage())
+                .entityType(payload.getEntityType())
+                .entityId(payload.getEntityId())
+                .status(payload.getStatus())
+                .targetRole(null)
+                .recipientEmail(recipientEmail)
                 .triggeredBy(payload.getTriggeredBy())
                 .read(false)
                 .createdAt(payload.getCreatedAt() != null ? payload.getCreatedAt() : Instant.now())

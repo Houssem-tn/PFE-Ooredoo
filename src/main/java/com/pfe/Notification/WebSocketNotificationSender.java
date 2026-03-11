@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 public class WebSocketNotificationSender {
 
     private static final String ROLE_TOPIC_PREFIX = "/topic/notifications/";
+    private static final String USER_TOPIC_PREFIX = "/topic/notifications/user/";
 
     private final SimpMessagingTemplate messagingTemplate;
 
@@ -22,5 +23,13 @@ public class WebSocketNotificationSender {
         }
 
         messagingTemplate.convertAndSend(ROLE_TOPIC_PREFIX + role.name(), notification);
+    }
+
+    public void sendToUser(String email, Notification notification) {
+        if (email == null || email.isBlank() || notification == null) {
+            return;
+        }
+
+        messagingTemplate.convertAndSend(USER_TOPIC_PREFIX + email.trim().toLowerCase(), notification);
     }
 }

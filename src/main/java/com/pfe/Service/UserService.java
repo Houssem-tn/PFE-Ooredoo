@@ -8,6 +8,7 @@ import com.pfe.mapper.UserMapper;
 import com.pfe.Repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import com.pfe.Dto.PublicSttOptionDTO;
 
 import java.util.List;
 
@@ -65,6 +66,20 @@ public class UserService {
         if (req.password() != null && !req.password().isBlank()) u.setPassword(encoder.encode(req.password()));
 
         return mapper.toDto(repo.save(u));
+    }
+
+    public List<PublicSttOptionDTO> findPublicStts() {
+        return repo.findByRoleAndStatusAndEnabled(
+                        com.pfe.Entity.UserRole.ROLE_STT,
+                        com.pfe.Entity.AccountStatus.APPROVED,
+                        true
+                ).stream()
+                .map(u -> new PublicSttOptionDTO(
+                        u.getId(),
+                        u.getFullName(),
+                        u.getEmail()
+                ))
+                .toList();
     }
 
     public void delete(String id) {

@@ -12,11 +12,21 @@ public interface NotificationService {
 
     List<Notification> createForRoles(List<UserRole> roles, NotificationMessageDto payload);
 
+    Notification createForRecipient(String recipientEmail, NotificationMessageDto payload);
+
     List<Notification> getNotificationsForRole(UserRole role);
+
+    List<Notification> getNotificationsForRecipient(String recipientEmail);
 
     long countUnreadForRole(UserRole role);
 
+    long countUnreadForRecipient(String recipientEmail);
+
     Notification markAsReadForRole(String notificationId, UserRole role);
 
+    Notification markAsReadForRecipient(String notificationId, String recipientEmail);
+
     List<Notification> markAllAsReadForRole(UserRole role);
+
+    List<Notification> markAllAsReadForRecipient(String recipientEmail);
 }
