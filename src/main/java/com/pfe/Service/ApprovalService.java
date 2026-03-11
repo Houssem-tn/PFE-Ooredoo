@@ -17,22 +17,25 @@ public class ApprovalService {
         this.userRepo = userRepo;
     }
 
-    /**
-     * ✅ Recommended:
-     * - ADMIN sees all pending
-     * - ZM sees only pending STT registrations
-     * - STT sees only pending TECH registrations
-     */
-    public List<AppUser> listMyPending(UserRole approverRole) {
+    public List<AppUser> listMyPending(String approverEmail, UserRole approverRole) {
         if (approverRole == UserRole.ROLE_ADMIN) {
             return userRepo.findByStatus(AccountStatus.PENDING);
         }
+
         if (approverRole == UserRole.ROLE_ZM) {
             return userRepo.findByStatusAndRoleRequested(AccountStatus.PENDING, UserRole.ROLE_STT);
         }
+
         if (approverRole == UserRole.ROLE_STT) {
-            return userRepo.findByStatusAndRoleRequested(AccountStatus.PENDING, UserRole.ROLE_TECH);
+            AppUser approver = loadApprovedUserByEmail(approverEmail);
+
+            return userRepo.findByStatusAndRoleRequestedAndAssignedSttId(
+                    AccountStatus.PENDING,
+                    UserRole.ROLE_TECH,
+                    approver.getId()
+            );
         }
+
         throw new AccessDeniedException("You are not allowed to view approvals");
     }
 
@@ -49,11 +52,10 @@ public class ApprovalService {
             throw new IllegalStateException("User has no requested role");
         }
 
-        if (!isAllowed(approverRole, requested)) {
+        if (!isAllowed(approverEmail, approverRole, u)) {
             throw new AccessDeniedException("Not allowed to approve role: " + requested);
         }
 
-        // ✅ Approve: set final role and enable login
         u.setRole(requested);
         u.setStatus(AccountStatus.APPROVED);
         u.setEnabled(true);
@@ -77,11 +79,10 @@ public class ApprovalService {
             throw new IllegalStateException("User has no requested role");
         }
 
-        if (!isAllowed(approverRole, requested)) {
+        if (!isAllowed(approverEmail, approverRole, u)) {
             throw new AccessDeniedException("Not allowed to reject role: " + requested);
         }
 
-        // ✅ Reject: keep disabled
         u.setStatus(AccountStatus.REJECTED);
         u.setEnabled(false);
         u.setValidatedAt(Instant.now());
@@ -91,16 +92,34 @@ public class ApprovalService {
         return userRepo.save(u);
     }
 
-    /**
-     * ✅ Approval chain:
-     * - ADMIN approves الجميع
-     * - ZM approves STT
-     * - STT approves TECH
-     */
-    private boolean isAllowed(UserRole approverRole, UserRole requestedRole) {
-        if (approverRole == UserRole.ROLE_ADMIN) return true;
-        if (approverRole == UserRole.ROLE_ZM) return requestedRole == UserRole.ROLE_STT;
-        if (approverRole == UserRole.ROLE_STT) return requestedRole == UserRole.ROLE_TECH;
+    private boolean isAllowed(String approverEmail, UserRole approverRole, AppUser targetUser) {
+        if (approverRole == UserRole.ROLE_ADMIN) {
+            return true;
+        }
+
+        if (approverRole == UserRole.ROLE_ZM) {
+            return targetUser.getRoleRequested() == UserRole.ROLE_STT;
+        }
+
+        if (approverRole == UserRole.ROLE_STT) {
+            AppUser approver = loadApprovedUserByEmail(approverEmail);
+
+            return targetUser.getRoleRequested() == UserRole.ROLE_TECH
+                    && targetUser.getAssignedSttId() != null
+                    && targetUser.getAssignedSttId().equals(approver.getId());
+        }
+
         return false;
+    }
+
+    private AppUser loadApprovedUserByEmail(String email) {
+        AppUser user = userRepo.findByEmail(email)
+                .orElseThrow(() -> new IllegalArgumentException("Approver not found"));
+
+        if (user.getStatus() != AccountStatus.APPROVED || !user.isEnabled() || user.getRole() == null) {
+            throw new AccessDeniedException("Approver account is not active");
+        }
+
+        return user;
     }
 }
