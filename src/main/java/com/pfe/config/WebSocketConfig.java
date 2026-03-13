@@ -40,7 +40,15 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // Native WebSocket endpoint
         registry.addEndpoint("/ws-notifications")
+                .setAllowedOriginPatterns(
+                        "http://localhost:4200",
+                        "http://127.0.0.1:4200"
+                );
+
+        // Optional: keep SockJS fallback on a separate endpoint
+        registry.addEndpoint("/ws-notifications-sockjs")
                 .setAllowedOriginPatterns(
                         "http://localhost:4200",
                         "http://127.0.0.1:4200"

@@ -16,6 +16,9 @@ import java.util.function.Supplier;
 @Configuration
 public class WebSocketAuthorizationConfig {
 
+    private static final String ROLE_TOPIC_PREFIX = "/topic/notifications/";
+    private static final String USER_TOPIC_PREFIX = "/topic/notifications/user/";
+
     @Bean
     public AuthorizationManager<Message<?>> messageAuthorizationManager() {
         return new AuthorizationManager<>() {
@@ -66,27 +69,45 @@ public class WebSocketAuthorizationConfig {
 
                 String destination = accessor.getDestination();
 
-                if (destination != null &&
-                        (destination.startsWith("/user/") || destination.startsWith("/queue/"))) {
+                if (destination == null) {
+                    return new AuthorizationDecision(false);
+                }
+
+                // allow default user/queue destinations if used later
+                if (destination.startsWith("/user/") || destination.startsWith("/queue/")) {
                     return new AuthorizationDecision(true);
                 }
 
-                if (destination != null) {
-                    if (destination.equals("/topic/notifications/ROLE_ADMIN")) {
-                        return new AuthorizationDecision(hasAuthority(authentication, "ROLE_ADMIN"));
-                    }
-                    if (destination.equals("/topic/notifications/ROLE_STT")) {
-                        return new AuthorizationDecision(hasAuthority(authentication, "ROLE_STT"));
-                    }
-                    if (destination.equals("/topic/notifications/ROLE_TECH")) {
-                        return new AuthorizationDecision(hasAuthority(authentication, "ROLE_TECH"));
-                    }
-                    if (destination.equals("/topic/notifications/ROLE_ZM")) {
-                        return new AuthorizationDecision(hasAuthority(authentication, "ROLE_ZM"));
-                    }
-                    if (destination.equals("/topic/notifications/ROLE_CRM_BOUTIQUE")) {
-                        return new AuthorizationDecision(hasAuthority(authentication, "ROLE_CRM_BOUTIQUE"));
-                    }
+                // allow direct user notification topic only for the same authenticated user
+                if (destination.startsWith(USER_TOPIC_PREFIX)) {
+                    String requestedEmail = destination.substring(USER_TOPIC_PREFIX.length()).trim().toLowerCase();
+                    String authenticatedEmail = authentication.getName() != null
+                            ? authentication.getName().trim().toLowerCase()
+                            : "";
+
+                    boolean granted = requestedEmail.equals(authenticatedEmail);
+
+                    System.out.println("[WS AUTHZ] user topic requestedEmail=" + requestedEmail);
+                    System.out.println("[WS AUTHZ] user topic authenticatedEmail=" + authenticatedEmail);
+                    System.out.println("[WS AUTHZ] user topic granted=" + granted);
+
+                    return new AuthorizationDecision(granted);
+                }
+
+                if (destination.equals(ROLE_TOPIC_PREFIX + "ROLE_ADMIN")) {
+                    return new AuthorizationDecision(hasAuthority(authentication, "ROLE_ADMIN"));
+                }
+                if (destination.equals(ROLE_TOPIC_PREFIX + "ROLE_STT")) {
+                    return new AuthorizationDecision(hasAuthority(authentication, "ROLE_STT"));
+                }
+                if (destination.equals(ROLE_TOPIC_PREFIX + "ROLE_TECH")) {
+                    return new AuthorizationDecision(hasAuthority(authentication, "ROLE_TECH"));
+                }
+                if (destination.equals(ROLE_TOPIC_PREFIX + "ROLE_ZM")) {
+                    return new AuthorizationDecision(hasAuthority(authentication, "ROLE_ZM"));
+                }
+                if (destination.equals(ROLE_TOPIC_PREFIX + "ROLE_CRM_BOUTIQUE")) {
+                    return new AuthorizationDecision(hasAuthority(authentication, "ROLE_CRM_BOUTIQUE"));
                 }
 
                 return new AuthorizationDecision(false);
