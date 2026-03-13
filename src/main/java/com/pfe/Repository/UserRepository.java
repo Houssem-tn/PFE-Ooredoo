@@ -35,4 +35,9 @@ public interface UserRepository extends MongoRepository<AppUser, String> {
             AccountStatus status,
             boolean enabled
     );
+
+    List<AppUser> findByRoleAndAssignedSttIdOrderByCreatedAtDesc(
+            UserRole role,
+            String assignedSttId
+    );
 }
