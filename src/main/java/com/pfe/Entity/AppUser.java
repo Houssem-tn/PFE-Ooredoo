@@ -28,14 +28,17 @@ public class AppUser {
 
     private String phone;
 
-    // requested role at registration (STT / TECH / ZM)
     private UserRole roleRequested;
 
-    // for TECH registration: chosen parent STT
     @Indexed
     private String assignedSttId;
 
     private String assignedSttEmail;
+
+    @Indexed
+    private String assignedZmId;
+
+    private String assignedZmEmail;
 
     @Builder.Default
     private AccountStatus status = AccountStatus.PENDING;
@@ -55,6 +58,8 @@ public class AppUser {
     private SttProfile sttProfile;
     private TechnicianProfile technicianProfile;
     private ZmProfile zmProfile;
+
+    private Instant lastLoginAt;
 
     @CreatedDate
     private Instant createdAt;

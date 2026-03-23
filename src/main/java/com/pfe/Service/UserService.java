@@ -1,14 +1,13 @@
 package com.pfe.Service;
 
-
 import com.pfe.Dto.*;
 import com.pfe.Entity.AppUser;
+import com.pfe.Entity.UserRole;
 import com.pfe.exception.NotFoundException;
 import com.pfe.mapper.UserMapper;
 import com.pfe.Repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import com.pfe.Dto.PublicSttOptionDTO;
 
 import java.util.List;
 
@@ -78,6 +77,25 @@ public class UserService {
                         u.getId(),
                         u.getFullName(),
                         u.getEmail()
+                ))
+                .toList();
+    }
+
+    public List<UserAuditItemDTO> findAuditUsersByRole(UserRole role) {
+        if (role != UserRole.ROLE_ZM && role != UserRole.ROLE_STT && role != UserRole.ROLE_TECH) {
+            throw new IllegalArgumentException("Audit is allowed only for ZM, STT, and TECH");
+        }
+
+        return repo.findByRoleOrderByFullNameAsc(role).stream()
+                .map(u -> new UserAuditItemDTO(
+                        u.getId(),
+                        u.getFullName(),
+                        u.getEmail(),
+                        u.getRole(),
+                        u.getStatus(),
+                        u.isEnabled(),
+                        u.getCreatedAt(),
+                        u.getLastLoginAt()
                 ))
                 .toList();
     }

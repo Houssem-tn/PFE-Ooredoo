@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Optional;
 
 public interface UserRepository extends MongoRepository<AppUser, String> {
+
     Optional<AppUser> findByEmail(String email);
 
     boolean existsByEmail(String email);
@@ -21,6 +22,12 @@ public interface UserRepository extends MongoRepository<AppUser, String> {
             AccountStatus status,
             UserRole roleRequested,
             String assignedSttId
+    );
+
+    List<AppUser> findByStatusAndRoleRequestedAndAssignedZmId(
+            AccountStatus status,
+            UserRole roleRequested,
+            String assignedZmId
     );
 
     Optional<AppUser> findByIdAndRoleAndStatusAndEnabled(
@@ -40,4 +47,11 @@ public interface UserRepository extends MongoRepository<AppUser, String> {
             UserRole role,
             String assignedSttId
     );
+
+    List<AppUser> findByRoleAndAssignedZmIdOrderByFullNameAsc(
+            UserRole role,
+            String assignedZmId
+    );
+
+    List<AppUser> findByRoleOrderByFullNameAsc(UserRole role);
 }

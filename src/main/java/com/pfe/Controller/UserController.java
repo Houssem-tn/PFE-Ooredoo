@@ -1,7 +1,7 @@
 package com.pfe.Controller;
 
-
 import com.pfe.Dto.*;
+import com.pfe.Entity.UserRole;
 import com.pfe.Service.UserService;
 import jakarta.validation.Valid;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -43,5 +43,10 @@ public class UserController {
     @DeleteMapping("/{id}")
     public void delete(@PathVariable String id) {
         service.delete(id);
+    }
+
+    @GetMapping("/audit/by-role/{role}")
+    public List<UserAuditItemDTO> auditByRole(@PathVariable UserRole role) {
+        return service.findAuditUsersByRole(role);
     }
 }

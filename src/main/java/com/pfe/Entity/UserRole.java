@@ -8,7 +8,4 @@ public enum UserRole {
     ROLE_ZM,
     ROLE_CRM_BOUTIQUE;
 
-
-
-
 }

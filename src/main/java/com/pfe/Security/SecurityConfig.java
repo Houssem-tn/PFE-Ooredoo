@@ -51,6 +51,9 @@ public class SecurityConfig {
 
         http.authorizeHttpRequests(auth -> auth
                 .requestMatchers("/api/v1/auth/**", "/api/v1/public/**").permitAll()
+                .requestMatchers("/api/v1/tech-invitations/validate").permitAll()
+                .requestMatchers("/api/v1/tech-invitations/stt/**").hasRole("STT")
+                .requestMatchers("/api/v1/tech-invitations/zm/**").hasRole("ZM")
                 .requestMatchers("/ws-notifications/**").permitAll()
                 .requestMatchers(
                         "/swagger-ui/**",

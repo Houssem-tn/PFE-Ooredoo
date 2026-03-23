@@ -35,12 +35,12 @@ public class NotificationEventServiceImpl implements NotificationEventService {
 
         if (user != null
                 && user.getRoleRequested() == UserRole.ROLE_TECH
-                && user.getAssignedSttEmail() != null
-                && !user.getAssignedSttEmail().isBlank()) {
+                && user.getAssignedZmEmail() != null
+                && !user.getAssignedZmEmail().isBlank()) {
 
-            Notification saved = notificationService.createForRecipient(user.getAssignedSttEmail(), payload);
+            Notification saved = notificationService.createForRecipient(user.getAssignedZmEmail(), payload);
             if (saved != null) {
-                sender.sendToUser(user.getAssignedSttEmail(), saved);
+                sender.sendToUser(user.getAssignedZmEmail(), saved);
             }
 
             return;

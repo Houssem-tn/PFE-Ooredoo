@@ -1,6 +1,5 @@
 package com.pfe.Controller;
 
-
 import com.pfe.Dto.*;
 import com.pfe.Service.AuthService;
 import jakarta.validation.Valid;
@@ -25,5 +24,10 @@ public class AuthController {
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest req) {
         return ResponseEntity.ok(service.login(req));
+    }
+
+    @PostMapping("/register-tech-by-invitation")
+    public ResponseEntity<UserDTO> registerTechByInvitation(@Valid @RequestBody TechRegisterRequest req) {
+        return ResponseEntity.ok(service.registerTechInvitation(req));
     }
 }
