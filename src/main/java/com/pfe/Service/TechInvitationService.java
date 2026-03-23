@@ -47,14 +47,14 @@ public class TechInvitationService {
         }
 
         userRepo.findByEmail(normalizedEmail).ifPresent(user -> {
-            throw new IllegalStateException("A user with this email already exists");
+            throw new IllegalArgumentException("A user with this email already exists");
         });
 
         Optional<TechInvitation> existingInvitation =
                 repo.findFirstByEmailAndUsedFalseAndExpiresAtAfter(normalizedEmail, Instant.now());
 
         if (existingInvitation.isPresent()) {
-            throw new IllegalStateException("An active invitation already exists for this email");
+            throw new IllegalArgumentException("An active invitation already exists for this email");
         }
 
         AppUser zm = userRepo.findById(stt.getAssignedZmId())

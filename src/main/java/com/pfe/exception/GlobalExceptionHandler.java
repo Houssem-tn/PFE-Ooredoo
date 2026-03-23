@@ -10,6 +10,7 @@ import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
     @ExceptionHandler(NotFoundException.class)
     public ResponseEntity<ApiError> handleNotFound(NotFoundException ex, HttpServletRequest req) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
@@ -22,6 +23,12 @@ public class GlobalExceptionHandler {
                 .body(new ApiError(Instant.now(), 400, "BAD_REQUEST", ex.getMessage(), req.getRequestURI()));
     }
 
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<ApiError> handleConflict(IllegalStateException ex, HttpServletRequest req) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiError(Instant.now(), 409, "CONFLICT", ex.getMessage(), req.getRequestURI()));
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest req) {
         String msg = ex.getBindingResult().getFieldErrors().stream()
@@ -29,5 +36,17 @@ public class GlobalExceptionHandler {
                 .collect(Collectors.joining(", "));
         return ResponseEntity.badRequest()
                 .body(new ApiError(Instant.now(), 400, "VALIDATION_ERROR", msg, req.getRequestURI()));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ApiError> handleGeneric(Exception ex, HttpServletRequest req) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(new ApiError(
+                        Instant.now(),
+                        500,
+                        "INTERNAL_SERVER_ERROR",
+                        "An unexpected error occurred",
+                        req.getRequestURI()
+                ));
     }
 }
