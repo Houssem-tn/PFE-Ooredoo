@@ -1,0 +1,24 @@
+package com.pfe.Repository;
+
+import com.pfe.Entity.FileEntityType;
+import com.pfe.Entity.FileMetadata;
+import com.pfe.Entity.FileRole;
+import org.springframework.data.mongodb.repository.MongoRepository;
+
+import java.util.List;
+import java.util.Optional;
+
+public interface FileMetadataRepository extends MongoRepository<FileMetadata, String> {
+
+    Optional<FileMetadata> findByObjectKeyAndDeletedFalse(String objectKey);
+
+    Optional<FileMetadata> findByIdAndDeletedFalse(String id);
+
+    List<FileMetadata> findByEntityTypeAndEntityIdAndDeletedFalse(FileEntityType entityType, String entityId);
+
+    List<FileMetadata> findByEntityTypeAndEntityIdAndFileRoleAndDeletedFalse(
+            FileEntityType entityType,
+            String entityId,
+            FileRole fileRole
+    );
+}

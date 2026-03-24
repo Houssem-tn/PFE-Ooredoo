@@ -12,6 +12,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import com.pfe.Repository.TechInvitationRepository;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.time.Instant;
 import java.util.EnumSet;
@@ -26,8 +27,8 @@ public class AuthService {
     private final JwtService jwtService;
     private final UserMapper userMapper;
     private final NotificationEventService notificationEventService;
-
     private final TechInvitationRepository invitationRepo;
+    private final FileStorageService fileStorageService;
 
     private static final Set<UserRole> ALLOWED_PUBLIC_REQUESTED_ROLES =
             EnumSet.of(UserRole.ROLE_STT, UserRole.ROLE_ZM);
@@ -38,14 +39,16 @@ public class AuthService {
                        JwtService jwtService,
                        UserMapper userMapper,
                        NotificationEventService notificationEventService,
-                       TechInvitationRepository invitationRepo) {
+                       TechInvitationRepository invitationRepo,
+                       FileStorageService fileStorageService) {
         this.repo = repo;
         this.encoder = encoder;
         this.authManager = authManager;
         this.jwtService = jwtService;
         this.userMapper = userMapper;
         this.notificationEventService = notificationEventService;
-        this.invitationRepo=invitationRepo;
+        this.invitationRepo = invitationRepo;
+        this.fileStorageService = fileStorageService;
     }
 
     public UserDTO register(RegisterRequest req) {
@@ -123,8 +126,8 @@ public class AuthService {
         String token = jwtService.generateToken(savedUser.getEmail(), savedUser.getRole());
         return new AuthResponse(token, "Bearer", savedUser.getRole(), userMapper.toDto(savedUser));
     }
-    public UserDTO registerTechInvitation(TechRegisterRequest req) {
 
+    public UserDTO registerTechInvitation(TechRegisterRequest req) {
         String token = req.token().trim();
         String firstName = req.firstName().trim();
         String lastName = req.lastName().trim();
@@ -134,7 +137,6 @@ public class AuthService {
         TechInvitation invitation = invitationRepo.findByToken(token)
                 .orElseThrow(() -> new IllegalArgumentException("Invalid invitation"));
 
-        //  VALIDATIONS
         if (invitation.isUsed()) {
             throw new IllegalStateException("Invitation already used");
         }
@@ -155,7 +157,6 @@ public class AuthService {
             throw new IllegalArgumentException("Email already used");
         }
 
-        // GET STT
         AppUser stt = repo.findById(invitation.getSttId())
                 .orElseThrow(() -> new IllegalStateException("Assigned STT not found"));
 
@@ -175,7 +176,6 @@ public class AuthService {
             throw new IllegalStateException("Assigned STT has no responsible ZM");
         }
 
-        //  CREATE TECH USER
         AppUser user = AppUser.builder()
                 .fullName(fullName)
                 .email(invitedEmail)
@@ -193,7 +193,6 @@ public class AuthService {
 
         AppUser saved = repo.save(user);
 
-        // UPDATE INVITATION (IMPORTANT PART)
         invitation.setUsed(true);
         invitation.setRegisteredTechId(saved.getId());
         invitation.setRegisteredAt(Instant.now());
@@ -201,9 +200,42 @@ public class AuthService {
 
         invitationRepo.save(invitation);
 
-        // 🔔 NOTIFICATION
         notificationEventService.onUserRegistered(saved);
 
         return userMapper.toDto(saved);
+    }
+
+    public void uploadRegisterProfilePhoto(String email, MultipartFile photo) {
+        try {
+            String normalizedEmail = email == null ? "" : email.trim().toLowerCase();
+
+            if (normalizedEmail.isBlank()) {
+                throw new IllegalArgumentException("Email is required");
+            }
+
+            if (photo == null || photo.isEmpty()) {
+                throw new IllegalArgumentException("Photo is required");
+            }
+
+            AppUser user = repo.findByEmail(normalizedEmail)
+                    .orElseThrow(() -> new IllegalArgumentException("User not found"));
+
+            FileMetadata metadata = fileStorageService.upload(
+                    photo,
+                    FileEntityType.USER,
+                    user.getId(),
+                    FileRole.PROFILE_IMAGE,
+                    normalizedEmail
+            );
+
+            user.setProfileImageFileId(metadata.getId());
+            user.setProfileImageUrl(fileStorageService.buildViewUrl(metadata.getId()));
+            user.setProfileThumbnailUrl(fileStorageService.buildViewUrl(metadata.getId()));
+
+            repo.save(user);
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw e;
+        }
     }
 }

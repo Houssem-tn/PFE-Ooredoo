@@ -3,8 +3,10 @@ package com.pfe.Controller;
 import com.pfe.Dto.*;
 import com.pfe.Service.AuthService;
 import jakarta.validation.Valid;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -29,5 +31,14 @@ public class AuthController {
     @PostMapping("/register-tech-by-invitation")
     public ResponseEntity<UserDTO> registerTechByInvitation(@Valid @RequestBody TechRegisterRequest req) {
         return ResponseEntity.ok(service.registerTechInvitation(req));
+    }
+
+    @PostMapping(value = "/register-profile-photo", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Void> registerProfilePhoto(
+            @RequestParam("email") String email,
+            @RequestParam("photo") MultipartFile photo
+    ) {
+        service.uploadRegisterProfilePhoto(email, photo);
+        return ResponseEntity.ok().build();
     }
 }

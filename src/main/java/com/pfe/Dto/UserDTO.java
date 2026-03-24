@@ -28,5 +28,9 @@ public record UserDTO(
         String assignedSttEmail,
 
         String assignedZmId,
-        String assignedZmEmail
+        String assignedZmEmail,
+
+        String profileImageFileId,
+        String profileImageUrl,
+        String profileThumbnailUrl
 ) {}

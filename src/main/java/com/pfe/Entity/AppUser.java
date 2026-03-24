@@ -61,6 +61,9 @@ public class AppUser {
 
     private Instant lastLoginAt;
 
+    private String profileImageFileId;
+    private String profileImageUrl;
+    private String profileThumbnailUrl;
     @CreatedDate
     private Instant createdAt;
 
