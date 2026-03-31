@@ -31,24 +31,35 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                                     FilterChain chain)
             throws ServletException, IOException {
 
+        String path = request.getRequestURI();
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
 
+        System.out.println("=== JWT FILTER ===");
+        System.out.println("PATH = " + path);
+        System.out.println("AUTH HEADER = " + header);
+
         if (header == null || !header.startsWith("Bearer ")) {
+            System.out.println("NO BEARER TOKEN");
             chain.doFilter(request, response);
             return;
         }
 
         String token = header.substring(7);
+        System.out.println("TOKEN FOUND");
 
         if (!jwtService.isValid(token)) {
+            System.out.println("TOKEN INVALID");
             chain.doFilter(request, response);
             return;
         }
 
         String email = jwtService.extractSubject(token);
+        System.out.println("TOKEN SUBJECT = " + email);
 
         if (email != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             UserDetails userDetails = userDetailsService.loadUserByUsername(email);
+            System.out.println("USER LOADED = " + userDetails.getUsername());
+            System.out.println("AUTHORITIES = " + userDetails.getAuthorities());
 
             UsernamePasswordAuthenticationToken auth =
                     new UsernamePasswordAuthenticationToken(
@@ -59,6 +70,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
             auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
             SecurityContextHolder.getContext().setAuthentication(auth);
+
+            System.out.println("AUTH SET IN CONTEXT");
         }
 
         chain.doFilter(request, response);
@@ -73,4 +86,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 || path.startsWith("/ws-notifications")
                 || path.equals("/error");
     }
+
+
+
 }

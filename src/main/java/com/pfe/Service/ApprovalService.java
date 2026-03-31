@@ -6,6 +6,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -23,17 +24,28 @@ public class ApprovalService {
         }
 
         if (approverRole == UserRole.ROLE_ZM) {
-            return userRepo.findByStatusAndRoleRequested(AccountStatus.PENDING, UserRole.ROLE_STT);
-        }
-
-        if (approverRole == UserRole.ROLE_STT) {
             AppUser approver = loadApprovedUserByEmail(approverEmail);
 
-            return userRepo.findByStatusAndRoleRequestedAndAssignedSttId(
+            List<AppUser> pendingStt = userRepo.findByStatusAndRoleRequested(
+                    AccountStatus.PENDING,
+                    UserRole.ROLE_STT
+            );
+
+            List<AppUser> pendingTech = userRepo.findByStatusAndRoleRequestedAndAssignedZmId(
                     AccountStatus.PENDING,
                     UserRole.ROLE_TECH,
                     approver.getId()
             );
+
+            List<AppUser> result = new ArrayList<>();
+            result.addAll(pendingStt);
+            result.addAll(pendingTech);
+
+            return result;
+        }
+
+        if (approverRole == UserRole.ROLE_STT) {
+            return List.of();
         }
 
         throw new AccessDeniedException("You are not allowed to view approvals");
@@ -98,15 +110,22 @@ public class ApprovalService {
         }
 
         if (approverRole == UserRole.ROLE_ZM) {
-            return targetUser.getRoleRequested() == UserRole.ROLE_STT;
+            AppUser approver = loadApprovedUserByEmail(approverEmail);
+
+            if (targetUser.getRoleRequested() == UserRole.ROLE_STT) {
+                return true;
+            }
+
+            if (targetUser.getRoleRequested() == UserRole.ROLE_TECH) {
+                return targetUser.getAssignedZmId() != null
+                        && targetUser.getAssignedZmId().equals(approver.getId());
+            }
+
+            return false;
         }
 
         if (approverRole == UserRole.ROLE_STT) {
-            AppUser approver = loadApprovedUserByEmail(approverEmail);
-
-            return targetUser.getRoleRequested() == UserRole.ROLE_TECH
-                    && targetUser.getAssignedSttId() != null
-                    && targetUser.getAssignedSttId().equals(approver.getId());
+            return false;
         }
 
         return false;

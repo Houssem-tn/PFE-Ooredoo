@@ -1,0 +1,21 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ------------------------------< com:pfe >-------------------------------
+[INFO] Building PFE 0.0.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ pfe ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 0 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ pfe ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 124 source files with javac [debug parameters release 17] to target\classes
+[WARNING] /C:/Users/HassHouss/Desktop/Pfe/APPSTOCK/PFE-Ooredoo/src/main/java/com/pfe/Entity/ActIntervention.java:[425,21] @Builder will ignore the initializing expression entirely. If you want the initializing expression to serve as default, add @Builder.Default. If it is not supposed to be settable during building, make the field final.
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  14.001 s
+[INFO] Finished at: 2026-03-26T13:19:57+01:00
+[INFO] ------------------------------------------------------------------------

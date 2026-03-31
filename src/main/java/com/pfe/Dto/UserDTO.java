@@ -22,7 +22,15 @@ public record UserDTO(
         String rejectionReason,
 
         Instant createdAt,
+        Instant lastLoginAt,
 
         String assignedSttId,
-        String assignedSttEmail
+        String assignedSttEmail,
+
+        String assignedZmId,
+        String assignedZmEmail,
+
+        String profileImageFileId,
+        String profileImageUrl,
+        String profileThumbnailUrl
 ) {}
