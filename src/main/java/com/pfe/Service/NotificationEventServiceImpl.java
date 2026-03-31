@@ -7,9 +7,12 @@ import com.pfe.Entity.UserRole;
 import com.pfe.Notification.NotificationDestinationResolver;
 import com.pfe.Notification.NotificationPayloadFactory;
 import com.pfe.Notification.WebSocketNotificationSender;
+import com.pfe.case_management.entity.CaseEntity;
 import org.springframework.stereotype.Service;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @Service
 public class NotificationEventServiceImpl implements NotificationEventService {
@@ -53,5 +56,104 @@ public class NotificationEventServiceImpl implements NotificationEventService {
             UserRole role = UserRole.valueOf(notification.getTargetRole());
             sender.sendToRole(role, notification);
         }
+    }
+
+    @Override
+    public void onCaseAssignedToZm(CaseEntity caseEntity, String triggeredBy) {
+        if (caseEntity == null || isBlank(caseEntity.getZmEmail())) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildCaseAssignedToZm(caseEntity, triggeredBy);
+        sendToRecipient(caseEntity.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onCaseAssignedToStt(CaseEntity caseEntity, String triggeredBy) {
+        if (caseEntity == null || isBlank(caseEntity.getSttEmail())) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildCaseAssignedToStt(caseEntity, triggeredBy);
+        sendToRecipient(caseEntity.getSttEmail(), payload);
+    }
+
+    @Override
+    public void onCaseAssignedToTech(CaseEntity caseEntity, String triggeredBy) {
+        if (caseEntity == null || isBlank(caseEntity.getTechEmail())) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildCaseAssignedToTech(caseEntity, triggeredBy);
+        sendToRecipient(caseEntity.getTechEmail(), payload);
+    }
+
+    @Override
+    public void onSlaWarning(CaseEntity caseEntity) {
+        if (caseEntity == null) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildSlaWarning(caseEntity);
+        sendToRecipients(payload, caseEntity.getSttEmail(), caseEntity.getTechEmail(), caseEntity.getZmEmail());
+    }
+
+    @Override
+    public void onSlaBreached(CaseEntity caseEntity) {
+        if (caseEntity == null) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildSlaBreached(caseEntity);
+        sendToRecipients(payload, caseEntity.getSttEmail(), caseEntity.getTechEmail(), caseEntity.getZmEmail());
+    }
+
+    @Override
+    public void onSlaEscalated(CaseEntity caseEntity, long breachAgeMinutes) {
+        if (caseEntity == null) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildSlaEscalated(caseEntity, breachAgeMinutes);
+
+        sendToRecipients(payload, caseEntity.getSttEmail(), caseEntity.getZmEmail());
+        sendToRole(UserRole.ROLE_ADMIN, payload);
+    }
+
+    private void sendToRecipients(NotificationMessageDto payload, String... emails) {
+        if (emails == null || emails.length == 0) {
+            return;
+        }
+
+        Set<String> unique = new HashSet<>();
+
+        for (String email : emails) {
+            if (isBlank(email)) {
+                continue;
+            }
+
+            String normalized = email.trim().toLowerCase();
+            if (unique.add(normalized)) {
+                sendToRecipient(normalized, payload);
+            }
+        }
+    }
+
+    private void sendToRecipient(String email, NotificationMessageDto payload) {
+        Notification saved = notificationService.createForRecipient(email, payload);
+        if (saved != null) {
+            sender.sendToUser(email, saved);
+        }
+    }
+
+    private void sendToRole(UserRole role, NotificationMessageDto payload) {
+        Notification saved = notificationService.createForRole(role, payload);
+        if (saved != null) {
+            sender.sendToRole(role, saved);
+        }
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 }

@@ -5,5 +5,6 @@ public enum FileRole {
     ATTACHMENT,
     REPORT_IMAGE,
     BEFORE_IMAGE,
-    AFTER_IMAGE
+    AFTER_IMAGE,
+    WORK_PROOF
 }

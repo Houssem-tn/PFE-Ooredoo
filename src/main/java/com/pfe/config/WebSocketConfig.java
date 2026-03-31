@@ -1,6 +1,7 @@
 package com.pfe.config;
 
 import com.pfe.Security.WebSocketAuthChannelInterceptor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.Message;
@@ -15,6 +16,8 @@ import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBr
 import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
 
+import java.util.Arrays;
+
 @Configuration
 @EnableWebSocketMessageBroker
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
@@ -22,6 +25,9 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     private final WebSocketAuthChannelInterceptor webSocketAuthChannelInterceptor;
     private final AuthorizationManager<Message<?>> messageAuthorizationManager;
     private final ApplicationContext applicationContext;
+
+    @Value("${app.cors.allowed-origins:http://localhost:4200,http://127.0.0.1:4200,http://192.168.1.83:4200}")
+    private String allowedOrigins;
 
     public WebSocketConfig(WebSocketAuthChannelInterceptor webSocketAuthChannelInterceptor,
                            AuthorizationManager<Message<?>> messageAuthorizationManager,
@@ -42,17 +48,11 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         // Native WebSocket endpoint
         registry.addEndpoint("/ws-notifications")
-                .setAllowedOriginPatterns(
-                        "http://localhost:4200",
-                        "http://127.0.0.1:4200"
-                );
+                .setAllowedOriginPatterns(resolveAllowedOrigins());
 
         // Optional: keep SockJS fallback on a separate endpoint
         registry.addEndpoint("/ws-notifications-sockjs")
-                .setAllowedOriginPatterns(
-                        "http://localhost:4200",
-                        "http://127.0.0.1:4200"
-                )
+                .setAllowedOriginPatterns(resolveAllowedOrigins())
                 .withSockJS();
     }
 
@@ -71,5 +71,12 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 new SecurityContextChannelInterceptor(),
                 authz
         );
+    }
+
+    private String[] resolveAllowedOrigins() {
+        return Arrays.stream(allowedOrigins.split(","))
+                .map(String::trim)
+                .filter(origin -> !origin.isBlank())
+                .toArray(String[]::new);
     }
 }

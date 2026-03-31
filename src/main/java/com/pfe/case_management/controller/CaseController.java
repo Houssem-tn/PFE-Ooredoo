@@ -14,6 +14,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -77,6 +78,14 @@ public class CaseController {
             @Valid @RequestBody CompleteWorkRequest request
     ) {
         return ResponseEntity.ok(caseService.completeWork(id, request));
+    }
+
+    @PostMapping("/{id}/work-proof")
+    public ResponseEntity<CaseEntity> uploadWorkProof(
+            @PathVariable String id,
+            @RequestParam("file") MultipartFile file
+    ) {
+        return ResponseEntity.ok(caseService.uploadWorkProof(id, file));
     }
 
     @PostMapping("/{id}/validate-zm")

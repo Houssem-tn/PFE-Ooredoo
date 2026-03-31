@@ -10,18 +10,31 @@ import io.minio.BucketExistsArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Service
 public class FileStorageService {
+    private static final Logger log = LoggerFactory.getLogger(FileStorageService.class);
+    private static final String LOCAL_BUCKET = "LOCAL_FS";
 
     private final MinioClient minioClient;
     private final FileMetadataRepository fileMetadataRepository;
@@ -31,6 +44,9 @@ public class FileStorageService {
 
     @Value("${minio.public-base-url}")
     private String publicBaseUrl;
+
+    @Value("${app.storage.local-dir:${java.io.tmpdir}/pfe-files}")
+    private String localStorageDir;
 
     public FileStorageService(MinioClient minioClient, FileMetadataRepository fileMetadataRepository) {
         this.minioClient = minioClient;
@@ -46,49 +62,43 @@ public class FileStorageService {
     ) {
         validateImage(file);
 
+        String safeOriginalName = file.getOriginalFilename() != null
+                ? file.getOriginalFilename().replaceAll("\\s+", "_")
+                : "file";
+
+        String objectKey = buildObjectKey(entityType, entityId, fileRole, safeOriginalName);
+
         try {
             ensureBucketExists();
+            storeInMinio(file, objectKey);
+            return persistMetadata(bucket, objectKey, file, entityType, entityId, fileRole, uploadedBy);
 
-            String safeOriginalName = file.getOriginalFilename() != null
-                    ? file.getOriginalFilename().replaceAll("\\s+", "_")
-                    : "file";
-
-            String objectKey = entityType.name().toLowerCase()
-                    + "/" + entityId
-                    + "/" + fileRole.name().toLowerCase()
-                    + "/" + UUID.randomUUID()
-                    + "-" + safeOriginalName;
-
-            minioClient.putObject(
-                    PutObjectArgs.builder()
-                            .bucket(bucket)
-                            .object(objectKey)
-                            .stream(file.getInputStream(), file.getSize(), -1)
-                            .contentType(file.getContentType())
-                            .build()
-            );
-
-            FileMetadata metadata = FileMetadata.builder()
-                    .bucket(bucket)
-                    .objectKey(objectKey)
-                    .originalFilename(file.getOriginalFilename())
-                    .contentType(file.getContentType())
-                    .size(file.getSize())
-                    .entityType(entityType)
-                    .entityId(entityId)
-                    .fileRole(fileRole)
-                    .uploadedBy(uploadedBy)
-                    .createdAt(Instant.now())
-                    .build();
-
-            return fileMetadataRepository.save(metadata);
-
-        } catch (Exception e) {
+        } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Failed to upload file to MinIO",
+                    HttpStatus.BAD_REQUEST,
+                    e.getMessage(),
                     e
             );
+        } catch (Exception e) {
+            log.warn(
+                    "MinIO upload failed for entityType={}, entityId={}, fileRole={}, objectKey={}. Falling back to local storage.",
+                    entityType,
+                    entityId,
+                    fileRole,
+                    objectKey,
+                    e
+            );
+
+            try {
+                storeLocally(file, objectKey);
+                return persistMetadata(LOCAL_BUCKET, objectKey, file, entityType, entityId, fileRole, uploadedBy);
+            } catch (IOException localStorageException) {
+                throw new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Failed to store uploaded file",
+                        localStorageException
+                );
+            }
         }
     }
 
@@ -100,6 +110,10 @@ public class FileStorageService {
                 ));
 
         try {
+            if (isLocalStorage(metadata)) {
+                return new StoredFile(metadata, Files.newInputStream(resolveLocalPath(metadata.getObjectKey())));
+            }
+
             InputStream inputStream = minioClient.getObject(
                     GetObjectArgs.builder()
                             .bucket(metadata.getBucket())
@@ -132,6 +146,13 @@ public class FileStorageService {
         FileMetadata metadata = getMetadata(fileId);
 
         try {
+            if (isLocalStorage(metadata)) {
+                Files.deleteIfExists(resolveLocalPath(metadata.getObjectKey()));
+                metadata.setDeleted(true);
+                fileMetadataRepository.save(metadata);
+                return;
+            }
+
             minioClient.removeObject(
                     RemoveObjectArgs.builder()
                             .bucket(metadata.getBucket())
@@ -152,7 +173,96 @@ public class FileStorageService {
     }
 
     public String buildViewUrl(String fileId) {
-        return publicBaseUrl + "/" + fileId + "/view";
+        return resolvePublicBaseUrl() + "/" + fileId + "/view";
+    }
+
+    public String buildDownloadUrl(String fileId) {
+        return resolvePublicBaseUrl() + "/" + fileId + "/download";
+    }
+
+    public List<FileMetadata> listByEntityAndRole(
+            FileEntityType entityType,
+            String entityId,
+            FileRole fileRole
+    ) {
+        return fileMetadataRepository.findByEntityTypeAndEntityIdAndFileRoleAndDeletedFalseOrderByCreatedAtDesc(
+                entityType,
+                entityId,
+                fileRole
+        );
+    }
+
+    private String buildObjectKey(
+            FileEntityType entityType,
+            String entityId,
+            FileRole fileRole,
+            String safeOriginalName
+    ) {
+        return entityType.name().toLowerCase()
+                + "/" + entityId
+                + "/" + fileRole.name().toLowerCase()
+                + "/" + UUID.randomUUID()
+                + "-" + safeOriginalName;
+    }
+
+    private void storeInMinio(MultipartFile file, String objectKey) throws Exception {
+        minioClient.putObject(
+                PutObjectArgs.builder()
+                        .bucket(bucket)
+                        .object(objectKey)
+                        .stream(file.getInputStream(), file.getSize(), -1)
+                        .contentType(file.getContentType())
+                        .build()
+        );
+    }
+
+    private void storeLocally(MultipartFile file, String objectKey) throws IOException {
+        Path targetPath = resolveLocalPath(objectKey);
+        Files.createDirectories(targetPath.getParent());
+
+        try (InputStream inputStream = file.getInputStream()) {
+            Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private FileMetadata persistMetadata(
+            String bucketName,
+            String objectKey,
+            MultipartFile file,
+            FileEntityType entityType,
+            String entityId,
+            FileRole fileRole,
+            String uploadedBy
+    ) {
+        FileMetadata metadata = FileMetadata.builder()
+                .bucket(bucketName)
+                .objectKey(objectKey)
+                .originalFilename(file.getOriginalFilename())
+                .contentType(file.getContentType())
+                .size(file.getSize())
+                .entityType(entityType)
+                .entityId(entityId)
+                .fileRole(fileRole)
+                .uploadedBy(uploadedBy)
+                .createdAt(Instant.now())
+                .build();
+
+        return fileMetadataRepository.save(metadata);
+    }
+
+    private boolean isLocalStorage(FileMetadata metadata) {
+        return metadata != null && LOCAL_BUCKET.equals(metadata.getBucket());
+    }
+
+    private Path resolveLocalPath(String objectKey) {
+        Path basePath = Paths.get(localStorageDir).toAbsolutePath().normalize();
+        Path resolvedPath = basePath.resolve(objectKey.replace("/", java.io.File.separator)).normalize();
+
+        if (!resolvedPath.startsWith(basePath)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid file path");
+        }
+
+        return resolvedPath;
     }
 
     private void ensureBucketExists() throws Exception {
@@ -177,10 +287,27 @@ public class FileStorageService {
             throw new IllegalArgumentException("Only image files are allowed");
         }
 
-        long maxSize = 5L * 1024 * 1024;
+        long maxSize = 8L * 1024 * 1024;
         if (file.getSize() > maxSize) {
-            throw new IllegalArgumentException("Image must be <= 5 MB");
+            throw new IllegalArgumentException("Image must be <= 8 MB");
         }
+    }
+
+    private String resolvePublicBaseUrl() {
+        try {
+            ServletRequestAttributes attributes =
+                    (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+
+            if (attributes != null) {
+                return ServletUriComponentsBuilder.fromCurrentContextPath()
+                        .path("/api/v1/files")
+                        .toUriString();
+            }
+        } catch (IllegalStateException ignored) {
+            // Fall back to the configured base URL when there is no active HTTP request.
+        }
+
+        return publicBaseUrl;
     }
 
     public record StoredFile(FileMetadata metadata, InputStream inputStream) {}

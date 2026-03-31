@@ -89,7 +89,6 @@ public class TechInvitationService {
                         ". Click here to register:\n\n" + link
         );
     }
-
     // =============================
     // 🔹 VALIDATE TOKEN
     // =============================

@@ -3,14 +3,20 @@ package com.pfe.case_management.entity;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.model.RdvInfo;
+import com.pfe.case_management.model.SlaTrackingInfo;
+import com.pfe.case_management.model.CaseTimelineEvent;
 import com.pfe.case_management.model.TechnicalMetrics;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.model.ZmValidation;
 import lombok.*;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
+import java.util.List;
+
+import com.pfe.case_management.dto.CaseProofFileResponse;
 
 @Document(collection = "cases")
 @Getter
@@ -72,9 +78,14 @@ public class CaseEntity {
 
     // Business blocks
     private RdvInfo rdv;
+    private SlaTrackingInfo slaTracking;
+    private List<CaseTimelineEvent> timeline;
     private WorkInfo work;
     private ZmValidation zmValidation;
     private TechnicalMetrics metrics;
+
+    @Transient
+    private List<CaseProofFileResponse> workProofs;
 
     // Audit
     private Instant createdAt;

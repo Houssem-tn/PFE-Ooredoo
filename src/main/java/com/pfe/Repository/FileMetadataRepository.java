@@ -21,4 +21,10 @@ public interface FileMetadataRepository extends MongoRepository<FileMetadata, St
             String entityId,
             FileRole fileRole
     );
+
+    List<FileMetadata> findByEntityTypeAndEntityIdAndFileRoleAndDeletedFalseOrderByCreatedAtDesc(
+            FileEntityType entityType,
+            String entityId,
+            FileRole fileRole
+    );
 }
