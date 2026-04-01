@@ -493,6 +493,11 @@ public class CaseService {
         }
 
         ensureStatusIn(c, COMPLETE_WORK_ALLOWED_STATUSES, "Work completion is not allowed in current state");
+        validateLocationSnapshot(
+                request.locationLatitude(),
+                request.locationLongitude(),
+                "Work submission location is invalid"
+        );
 
         WorkInfo work = new WorkInfo();
         work.setRepTravauxStt(request.repTravauxStt());
@@ -500,6 +505,10 @@ public class CaseService {
         work.setCmtTrvStt(request.cmtTrvStt());
         work.setUpdatedAt(Instant.now());
         work.setUpdatedBy(getCurrentUsername());
+        work.setLocationLatitude(request.locationLatitude());
+        work.setLocationLongitude(request.locationLongitude());
+        work.setLocationCapturedAt(request.locationCapturedAt());
+        work.setLocationAccuracyMeters(request.locationAccuracyMeters());
 
         TechnicalMetrics metrics = new TechnicalMetrics();
         metrics.setMetrageCable(request.metrageCable());
@@ -527,7 +536,11 @@ public class CaseService {
                 "workResult", request.repTravauxStt(),
                 "dateFinTrv", request.dateFinTrv(),
                 "debitDl", request.debitDl(),
-                "debitUl", request.debitUl()
+                "debitUl", request.debitUl(),
+                "locationLatitude", request.locationLatitude(),
+                "locationLongitude", request.locationLongitude(),
+                "locationCapturedAt", request.locationCapturedAt(),
+                "locationAccuracyMeters", request.locationAccuracyMeters()
             )
         );
 
@@ -536,7 +549,15 @@ public class CaseService {
         return saved;
     }
 
-    public CaseEntity uploadWorkProof(String caseId, MultipartFile file) {
+    public CaseEntity uploadWorkProof(
+            String caseId,
+            MultipartFile file,
+            Double latitude,
+            Double longitude,
+            Instant locationCapturedAt,
+            Double locationAccuracyMeters,
+            String captureSource
+    ) {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
 
@@ -549,13 +570,19 @@ public class CaseService {
         }
 
         ensureStatusIn(c, WORK_PROOF_ALLOWED_STATUSES, "Work proof upload is not allowed in current state");
+        validateLocationSnapshot(latitude, longitude, "Work proof location is invalid");
 
         FileMetadata metadata = fileStorageService.upload(
                 file,
                 FileEntityType.CASE,
                 c.getId(),
                 FileRole.WORK_PROOF,
-                actor
+                actor,
+                latitude,
+                longitude,
+                locationCapturedAt,
+                locationAccuracyMeters,
+                captureSource
         );
 
         c.setUpdatedAt(Instant.now());
@@ -569,7 +596,12 @@ public class CaseService {
                 c.getStatus(),
                 timelineData(
                         "proofFileId", metadata.getId(),
-                        "proofFilename", metadata.getOriginalFilename()
+                        "proofFilename", metadata.getOriginalFilename(),
+                        "locationLatitude", metadata.getLocationLatitude(),
+                        "locationLongitude", metadata.getLocationLongitude(),
+                        "locationCapturedAt", metadata.getLocationCapturedAt(),
+                        "locationAccuracyMeters", metadata.getLocationAccuracyMeters(),
+                        "captureSource", metadata.getCaptureSource()
                 )
         );
 
@@ -839,6 +871,20 @@ public class CaseService {
         return a != null && a.equals(b);
     }
 
+    private void validateLocationSnapshot(Double latitude, Double longitude, String message) {
+        if (latitude == null && longitude == null) {
+            return;
+        }
+
+        if (latitude == null || longitude == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+        }
+
+        if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+        }
+    }
+
     private void enrichSlaReadValues(List<CaseEntity> cases) {
         Instant now = Instant.now();
         for (CaseEntity c : cases) {
@@ -879,7 +925,12 @@ public class CaseService {
                 metadata.getUploadedBy(),
                 metadata.getCreatedAt(),
                 fileStorageService.buildViewUrl(metadata.getId()),
-                fileStorageService.buildDownloadUrl(metadata.getId())
+                fileStorageService.buildDownloadUrl(metadata.getId()),
+                metadata.getLocationLatitude(),
+                metadata.getLocationLongitude(),
+                metadata.getLocationCapturedAt(),
+                metadata.getLocationAccuracyMeters(),
+                metadata.getCaptureSource()
         );
     }
 }

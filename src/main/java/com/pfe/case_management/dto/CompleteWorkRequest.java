@@ -12,6 +12,10 @@ public record CompleteWorkRequest(
         Double debitUl,
         Integer rsrp,
         Integer rsrq,
-        Integer sinr
+        Integer sinr,
+        Double locationLatitude,
+        Double locationLongitude,
+        Instant locationCapturedAt,
+        Double locationAccuracyMeters
 ) {
 }
