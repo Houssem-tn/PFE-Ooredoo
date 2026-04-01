@@ -29,6 +29,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Service
@@ -60,7 +61,23 @@ public class FileStorageService {
             FileRole fileRole,
             String uploadedBy
     ) {
+        return upload(file, entityType, entityId, fileRole, uploadedBy, null, null, null, null, null);
+    }
+
+    public FileMetadata upload(
+            MultipartFile file,
+            FileEntityType entityType,
+            String entityId,
+            FileRole fileRole,
+            String uploadedBy,
+            Double locationLatitude,
+            Double locationLongitude,
+            Instant locationCapturedAt,
+            Double locationAccuracyMeters,
+            String captureSource
+    ) {
         validateImage(file);
+        validateCoordinates(locationLatitude, locationLongitude);
 
         String safeOriginalName = file.getOriginalFilename() != null
                 ? file.getOriginalFilename().replaceAll("\\s+", "_")
@@ -71,7 +88,20 @@ public class FileStorageService {
         try {
             ensureBucketExists();
             storeInMinio(file, objectKey);
-            return persistMetadata(bucket, objectKey, file, entityType, entityId, fileRole, uploadedBy);
+            return persistMetadata(
+                    bucket,
+                    objectKey,
+                    file,
+                    entityType,
+                    entityId,
+                    fileRole,
+                    uploadedBy,
+                    locationLatitude,
+                    locationLongitude,
+                    locationCapturedAt,
+                    locationAccuracyMeters,
+                    captureSource
+            );
 
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(
@@ -91,7 +121,20 @@ public class FileStorageService {
 
             try {
                 storeLocally(file, objectKey);
-                return persistMetadata(LOCAL_BUCKET, objectKey, file, entityType, entityId, fileRole, uploadedBy);
+                return persistMetadata(
+                        LOCAL_BUCKET,
+                        objectKey,
+                        file,
+                        entityType,
+                        entityId,
+                        fileRole,
+                        uploadedBy,
+                        locationLatitude,
+                        locationLongitude,
+                        locationCapturedAt,
+                        locationAccuracyMeters,
+                        captureSource
+                );
             } catch (IOException localStorageException) {
                 throw new ResponseStatusException(
                         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -232,7 +275,12 @@ public class FileStorageService {
             FileEntityType entityType,
             String entityId,
             FileRole fileRole,
-            String uploadedBy
+            String uploadedBy,
+            Double locationLatitude,
+            Double locationLongitude,
+            Instant locationCapturedAt,
+            Double locationAccuracyMeters,
+            String captureSource
     ) {
         FileMetadata metadata = FileMetadata.builder()
                 .bucket(bucketName)
@@ -244,6 +292,11 @@ public class FileStorageService {
                 .entityId(entityId)
                 .fileRole(fileRole)
                 .uploadedBy(uploadedBy)
+                .locationLatitude(locationLatitude)
+                .locationLongitude(locationLongitude)
+                .locationCapturedAt(locationCapturedAt)
+                .locationAccuracyMeters(locationAccuracyMeters)
+                .captureSource(normalizeCaptureSource(captureSource))
                 .createdAt(Instant.now())
                 .build();
 
@@ -291,6 +344,37 @@ public class FileStorageService {
         if (file.getSize() > maxSize) {
             throw new IllegalArgumentException("Image must be <= 8 MB");
         }
+    }
+
+    private void validateCoordinates(Double latitude, Double longitude) {
+        if (latitude == null && longitude == null) {
+            return;
+        }
+
+        if (latitude == null || longitude == null) {
+            throw new IllegalArgumentException("Latitude and longitude must be provided together");
+        }
+
+        if (latitude < -90 || latitude > 90) {
+            throw new IllegalArgumentException("Latitude must be between -90 and 90");
+        }
+
+        if (longitude < -180 || longitude > 180) {
+            throw new IllegalArgumentException("Longitude must be between -180 and 180");
+        }
+    }
+
+    private String normalizeCaptureSource(String captureSource) {
+        if (captureSource == null || captureSource.isBlank()) {
+            return null;
+        }
+
+        String normalized = captureSource.trim().toLowerCase(Locale.ROOT);
+        if (!normalized.equals("camera") && !normalized.equals("gallery")) {
+            return "unknown";
+        }
+
+        return normalized;
     }
 
     private String resolvePublicBaseUrl() {

@@ -16,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.Instant;
 import java.util.List;
 
 @RestController
@@ -83,9 +84,24 @@ public class CaseController {
     @PostMapping("/{id}/work-proof")
     public ResponseEntity<CaseEntity> uploadWorkProof(
             @PathVariable String id,
-            @RequestParam("file") MultipartFile file
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "latitude", required = false) Double latitude,
+            @RequestParam(value = "longitude", required = false) Double longitude,
+            @RequestParam(value = "locationCapturedAt", required = false) Instant locationCapturedAt,
+            @RequestParam(value = "locationAccuracyMeters", required = false) Double locationAccuracyMeters,
+            @RequestParam(value = "captureSource", required = false) String captureSource
     ) {
-        return ResponseEntity.ok(caseService.uploadWorkProof(id, file));
+        return ResponseEntity.ok(
+                caseService.uploadWorkProof(
+                        id,
+                        file,
+                        latitude,
+                        longitude,
+                        locationCapturedAt,
+                        locationAccuracyMeters,
+                        captureSource
+                )
+        );
     }
 
     @PostMapping("/{id}/validate-zm")

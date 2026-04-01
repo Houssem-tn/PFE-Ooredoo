@@ -56,4 +56,8 @@ public class WorkInfo {
     private String cmtTrvStt;
     private Instant updatedAt;
     private String updatedBy;
+    private Double locationLatitude;
+    private Double locationLongitude;
+    private Instant locationCapturedAt;
+    private Double locationAccuracyMeters;
 }

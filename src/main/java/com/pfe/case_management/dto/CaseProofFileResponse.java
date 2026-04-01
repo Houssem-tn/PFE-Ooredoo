@@ -10,6 +10,11 @@ public record CaseProofFileResponse(
         String uploadedBy,
         Instant createdAt,
         String viewUrl,
-        String downloadUrl
+        String downloadUrl,
+        Double locationLatitude,
+        Double locationLongitude,
+        Instant locationCapturedAt,
+        Double locationAccuracyMeters,
+        String captureSource
 ) {
 }

@@ -39,6 +39,11 @@ public class FileMetadata {
     private FileRole fileRole;
 
     private String uploadedBy;
+    private Double locationLatitude;
+    private Double locationLongitude;
+    private Instant locationCapturedAt;
+    private Double locationAccuracyMeters;
+    private String captureSource;
 
     @Builder.Default
     private boolean deleted = false;
