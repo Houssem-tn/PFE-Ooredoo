@@ -2,7 +2,10 @@ package com.pfe.Service;
 
 import com.pfe.Dto.*;
 import com.pfe.Entity.*;
+import com.pfe.Repository.TechInvitationRepository;
 import com.pfe.Repository.UserRepository;
+import com.pfe.case_management.dto.PerformanceSummaryResponse;
+import com.pfe.case_management.service.CaseAnalyticsService;
 import com.pfe.exception.NotFoundException;
 import com.pfe.mapper.UserMapper;
 import org.springframework.security.access.AccessDeniedException;
@@ -20,17 +23,23 @@ public class UserService {
     private final UserMapper mapper;
     private final PasswordEncoder encoder;
     private final FileStorageService fileStorageService;
+    private final TechInvitationRepository techInvitationRepository;
+    private final CaseAnalyticsService caseAnalyticsService;
 
     public UserService(
             UserRepository repo,
             UserMapper mapper,
             PasswordEncoder encoder,
-            FileStorageService fileStorageService
+            FileStorageService fileStorageService,
+            TechInvitationRepository techInvitationRepository,
+            CaseAnalyticsService caseAnalyticsService
     ) {
         this.repo = repo;
         this.mapper = mapper;
         this.encoder = encoder;
         this.fileStorageService = fileStorageService;
+        this.techInvitationRepository = techInvitationRepository;
+        this.caseAnalyticsService = caseAnalyticsService;
     }
 
     public List<UserDTO> findAll() {
@@ -39,6 +48,35 @@ public class UserService {
 
     public UserDTO findById(String id) {
         return mapper.toDto(getEntity(id));
+    }
+
+    public UserAuditDetailsDTO findAuditDetails(String id) {
+        AppUser user = getEntity(id);
+        UserRole effectiveRole = resolveAuditRole(user);
+
+        TechInvitation invitation = resolveInvitation(user, effectiveRole);
+        UserAuditActorDTO validator = resolveActorByEmail(user.getValidatedBy());
+        UserAuditActorDTO assignedStt = resolveActor(user.getAssignedSttId(), user.getAssignedSttEmail(), null);
+        UserAuditActorDTO assignedZm = resolveActor(user.getAssignedZmId(), user.getAssignedZmEmail(), null);
+        UserAuditActorDTO invitedBy = invitation != null
+                ? resolveActor(invitation.getSttId(), invitation.getSttEmail(), invitation.getSttName())
+                : null;
+        UserAuditActorDTO invitationZm = invitation != null
+                ? resolveActor(invitation.getZmId(), invitation.getZmEmail(), invitation.getZmName())
+                : null;
+
+        return new UserAuditDetailsDTO(
+                mapper.toDto(user),
+                validator,
+                assignedStt,
+                assignedZm,
+                invitedBy,
+                invitationZm,
+                toInvitationDto(invitation),
+                buildHierarchy(user, effectiveRole),
+                buildRoleProfile(user),
+                buildPerformance(user, effectiveRole)
+        );
     }
 
     public UserDTO findMe(String email) {
@@ -199,8 +237,201 @@ public class UserService {
         repo.delete(u);
     }
 
+    private UserRole resolveAuditRole(AppUser user) {
+        if (user == null) {
+            return null;
+        }
+
+        return user.getRole() != null ? user.getRole() : user.getRoleRequested();
+    }
+
+    private TechInvitation resolveInvitation(AppUser user, UserRole effectiveRole) {
+        if (user == null || effectiveRole != UserRole.ROLE_TECH) {
+            return null;
+        }
+
+        if (hasText(user.getId())) {
+            TechInvitation byRegisteredTech = techInvitationRepository
+                    .findFirstByRegisteredTechIdOrderByCreatedAtDesc(user.getId())
+                    .orElse(null);
+
+            if (byRegisteredTech != null) {
+                return byRegisteredTech;
+            }
+        }
+
+        if (hasText(user.getEmail())) {
+            return techInvitationRepository
+                    .findFirstByEmailOrderByCreatedAtDesc(user.getEmail().trim().toLowerCase())
+                    .orElse(null);
+        }
+
+        return null;
+    }
+
+    private UserHierarchyAuditDTO buildHierarchy(AppUser user, UserRole effectiveRole) {
+        if (user == null || !hasText(user.getId()) || effectiveRole == null) {
+            return new UserHierarchyAuditDTO(0L, 0L, 0L, List.of());
+        }
+
+        return switch (effectiveRole) {
+            case ROLE_STT -> {
+                List<AppUser> techs = repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(
+                        UserRole.ROLE_TECH,
+                        user.getId()
+                );
+
+                yield new UserHierarchyAuditDTO(
+                        techs.size(),
+                        0L,
+                        techs.size(),
+                        techs.stream().map(this::toActor).toList()
+                );
+            }
+            case ROLE_ZM -> {
+                List<AppUser> stts = repo.findByRoleAndAssignedZmIdOrderByFullNameAsc(
+                        UserRole.ROLE_STT,
+                        user.getId()
+                );
+                List<AppUser> techs = repo.findByRoleAndAssignedZmIdOrderByFullNameAsc(
+                        UserRole.ROLE_TECH,
+                        user.getId()
+                );
+
+                yield new UserHierarchyAuditDTO(
+                        stts.size(),
+                        stts.size(),
+                        techs.size(),
+                        stts.stream().map(this::toActor).toList()
+                );
+            }
+            default -> new UserHierarchyAuditDTO(0L, 0L, 0L, List.of());
+        };
+    }
+
+    private UserRoleProfileDTO buildRoleProfile(AppUser user) {
+        if (user == null) {
+            return null;
+        }
+
+        CrmBoutiqueProfile crm = user.getCrmBoutiqueProfile();
+        SttProfile stt = user.getSttProfile();
+        TechnicianProfile tech = user.getTechnicianProfile();
+        ZmProfile zm = user.getZmProfile();
+
+        return new UserRoleProfileDTO(
+                crm != null ? blankToNull(crm.getBoutiqueName()) : null,
+                crm != null ? blankToNull(crm.getBoutiqueCode()) : null,
+                crm != null ? blankToNull(crm.getAddress()) : null,
+                stt != null ? blankToNull(stt.getServiceCenter()) : null,
+                stt != null ? blankToNull(stt.getDepartment()) : null,
+                tech != null ? blankToNull(tech.getMatricule()) : null,
+                tech != null ? blankToNull(tech.getSkillSet()) : null,
+                tech != null ? blankToNull(tech.getRegion()) : null,
+                tech != null ? tech.isAvailable() : null,
+                zm != null ? blankToNull(zm.getZoneName()) : null,
+                zm != null ? blankToNull(zm.getZoneCode()) : null,
+                zm != null ? blankToNull(zm.getCoverage()) : null
+        );
+    }
+
+    private PerformanceSummaryResponse buildPerformance(AppUser user, UserRole effectiveRole) {
+        if (user == null) {
+            return null;
+        }
+
+        return caseAnalyticsService.getPerformanceForUser(
+                user.getId(),
+                user.getFullName(),
+                user.getEmail(),
+                effectiveRole
+        );
+    }
+
+    private UserInvitationAuditDTO toInvitationDto(TechInvitation invitation) {
+        if (invitation == null) {
+            return null;
+        }
+
+        return new UserInvitationAuditDTO(
+                invitation.getId(),
+                invitation.getStatus(),
+                invitation.getCreatedAt(),
+                invitation.getExpiresAt(),
+                invitation.getRegisteredAt(),
+                invitation.getZmDecisionAt(),
+                invitation.isUsed()
+        );
+    }
+
+    private UserAuditActorDTO resolveActorByEmail(String email) {
+        return resolveActor(null, email, null);
+    }
+
+    private UserAuditActorDTO resolveActor(String userId, String email, String fallbackName) {
+        AppUser candidate = null;
+
+        if (hasText(userId)) {
+            candidate = repo.findById(userId).orElse(null);
+        }
+
+        if (candidate == null && hasText(email)) {
+            candidate = repo.findByEmail(email.trim().toLowerCase()).orElse(null);
+        }
+
+        if (candidate != null) {
+            return toActor(candidate);
+        }
+
+        if (!hasText(email) && !hasText(fallbackName)) {
+            return null;
+        }
+
+        return new UserAuditActorDTO(
+                blankToNull(userId),
+                blankToNull(fallbackName),
+                normalizeEmail(email),
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    private UserAuditActorDTO toActor(AppUser user) {
+        if (user == null) {
+            return null;
+        }
+
+        UserDTO dto = mapper.toDto(user);
+
+        return new UserAuditActorDTO(
+                dto.id(),
+                dto.fullName(),
+                dto.email(),
+                dto.role() != null ? dto.role() : dto.roleRequested(),
+                dto.status(),
+                dto.enabled(),
+                dto.profileImageUrl(),
+                dto.profileThumbnailUrl()
+        );
+    }
+
     private AppUser getEntity(String id) {
         return repo.findById(id)
                 .orElseThrow(() -> new NotFoundException("User not found: " + id));
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private String blankToNull(String value) {
+        return hasText(value) ? value.trim() : null;
+    }
+
+    private String normalizeEmail(String email) {
+        return hasText(email) ? email.trim().toLowerCase() : null;
     }
 }

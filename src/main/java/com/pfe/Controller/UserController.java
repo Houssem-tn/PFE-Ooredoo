@@ -34,6 +34,12 @@ public class UserController {
         return service.findById(id);
     }
 
+    @GetMapping("/{id}/audit-details")
+    @PreAuthorize("hasAuthority('ROLE_ADMIN')")
+    public UserAuditDetailsDTO auditDetails(@PathVariable String id) {
+        return service.findAuditDetails(id);
+    }
+
     @GetMapping("/me")
     @PreAuthorize("isAuthenticated()")
     public UserDTO me(Authentication authentication) {

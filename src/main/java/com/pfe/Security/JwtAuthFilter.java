@@ -13,9 +13,11 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.time.Instant;
 
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
+    private static final String BANNED_MESSAGE = "Unfortunately you are banned! Contact admin";
 
     private final JwtService jwtService;
     private final UserDetailsServiceImpl userDetailsService;
@@ -61,6 +63,12 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             System.out.println("USER LOADED = " + userDetails.getUsername());
             System.out.println("AUTHORITIES = " + userDetails.getAuthorities());
 
+            if (!userDetails.isEnabled()) {
+                SecurityContextHolder.clearContext();
+                writeUnauthorized(response, request.getRequestURI(), BANNED_MESSAGE);
+                return;
+            }
+
             UsernamePasswordAuthenticationToken auth =
                     new UsernamePasswordAuthenticationToken(
                             userDetails,
@@ -87,6 +95,18 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 || path.equals("/error");
     }
 
+    private void writeUnauthorized(HttpServletResponse response, String path, String message) throws IOException {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+        response.getWriter().write(
+                "{\"timestamp\":\"" + Instant.now() + "\","
+                        + "\"status\":401,"
+                        + "\"error\":\"UNAUTHORIZED\","
+                        + "\"message\":\"" + message + "\","
+                        + "\"path\":\"" + path + "\"}"
+        );
+    }
 
 
 }

@@ -62,22 +62,12 @@ public class CaseAnalyticsService {
         UserRole role = currentUserRole();
         String email = currentUserEmail();
 
-        List<CaseEntity> scope = switch (role) {
-            case ROLE_TECH -> caseRepository.findByTypeAndTechEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_STT -> caseRepository.findByTypeAndSttEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_ZM -> caseRepository.findByTypeAndZmEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_ADMIN -> caseRepository.findByType(CaseType.ACTIVATION);
-            default -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unsupported role for analytics");
-        };
-
-        refreshSlaForRead(scope);
-
         return summarize(
                 null,
                 role.name(),
                 null,
                 email,
-                scope,
+                loadScope(role, email),
                 role
         );
     }
@@ -86,15 +76,7 @@ public class CaseAnalyticsService {
         UserRole role = currentUserRole();
         String email = currentUserEmail();
 
-        List<CaseEntity> scope = switch (role) {
-            case ROLE_ADMIN -> caseRepository.findByType(CaseType.ACTIVATION);
-            case ROLE_ZM -> caseRepository.findByTypeAndZmEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_STT -> caseRepository.findByTypeAndSttEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_TECH -> caseRepository.findByTypeAndTechEmailIgnoreCase(CaseType.ACTIVATION, email);
-            default -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unsupported role for analytics");
-        };
-
-        refreshSlaForRead(scope);
+        List<CaseEntity> scope = loadScope(role, email);
 
         Map<String, List<CaseEntity>> grouped = new HashMap<>();
         for (CaseEntity c : scope) {
@@ -121,6 +103,43 @@ public class CaseAnalyticsService {
 
         results.sort(Comparator.comparingLong(PerformanceSummaryResponse::assignedCases).reversed());
         return results;
+    }
+
+    public PerformanceSummaryResponse getPerformanceForUser(
+            String userId,
+            String userName,
+            String userEmail,
+            UserRole role
+    ) {
+        if (role == null || isBlank(userEmail) || !supportsPerformance(role)) {
+            return new PerformanceSummaryResponse(
+                    userId,
+                    blankToNull(userName),
+                    blankToNull(userEmail),
+                    role != null ? role.name() : null,
+                    0L,
+                    0L,
+                    0L,
+                    0d,
+                    0L,
+                    0L,
+                    0L,
+                    0d,
+                    0d,
+                    0d,
+                    0L,
+                    0L
+            );
+        }
+
+        return summarize(
+                userId,
+                role.name(),
+                userName,
+                userEmail,
+                loadScope(role, userEmail),
+                role
+        );
     }
 
     private PerformanceSummaryResponse summarize(
@@ -181,8 +200,29 @@ public class CaseAnalyticsService {
                 round2(averageResponseMinutes),
                 round2(averageOverdueMinutes),
                 workCompletionProgress,
-                activeTasksCount
+                activeTasksCount,
+                completedWorkCount
         );
+    }
+
+    private List<CaseEntity> loadScope(UserRole role, String email) {
+        List<CaseEntity> scope = switch (role) {
+            case ROLE_TECH -> caseRepository.findByTypeAndTechEmailIgnoreCase(CaseType.ACTIVATION, email);
+            case ROLE_STT -> caseRepository.findByTypeAndSttEmailIgnoreCase(CaseType.ACTIVATION, email);
+            case ROLE_ZM -> caseRepository.findByTypeAndZmEmailIgnoreCase(CaseType.ACTIVATION, email);
+            case ROLE_ADMIN -> caseRepository.findByType(CaseType.ACTIVATION);
+            default -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unsupported role for analytics");
+        };
+
+        refreshSlaForRead(scope);
+        return scope;
+    }
+
+    private boolean supportsPerformance(UserRole role) {
+        return role == UserRole.ROLE_TECH
+                || role == UserRole.ROLE_STT
+                || role == UserRole.ROLE_ZM
+                || role == UserRole.ROLE_ADMIN;
     }
 
     private double overdueMinutes(SlaTrackingInfo sla, Instant now) {

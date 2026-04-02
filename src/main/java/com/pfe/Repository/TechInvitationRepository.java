@@ -14,6 +14,10 @@ public interface TechInvitationRepository extends MongoRepository<TechInvitation
 
     Optional<TechInvitation> findFirstByEmailAndUsedFalseAndExpiresAtAfter(String email, Instant now);
 
+    Optional<TechInvitation> findFirstByRegisteredTechIdOrderByCreatedAtDesc(String registeredTechId);
+
+    Optional<TechInvitation> findFirstByEmailOrderByCreatedAtDesc(String email);
+
     List<TechInvitation> findByZmIdAndStatus(String zmId, TechInvitationStatus status);
 
     List<TechInvitation> findByZmIdAndStatusOrderByCreatedAtDesc(String zmId, TechInvitationStatus status);

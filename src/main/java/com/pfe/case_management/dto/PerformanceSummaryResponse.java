@@ -15,6 +15,7 @@ public record PerformanceSummaryResponse(
         double averageResponseMinutes,
         double averageOverdueMinutes,
         double workCompletionProgress,
-        long activeTasksCount
+        long activeTasksCount,
+        long completedCasesCount
 ) {
 }
