@@ -470,7 +470,6 @@ public class CaseService {
         }
 
         CaseEntity saved = repository.save(c);
-        enrichWorkProofReadValues(saved);
 
         if (triggerImmediateBreachNotification) {
             notificationEventService.onSlaBreached(saved);
@@ -544,9 +543,7 @@ public class CaseService {
             )
         );
 
-        CaseEntity saved = repository.save(c);
-        enrichWorkProofReadValues(saved);
-        return saved;
+        return repository.save(c);
     }
 
     public CaseEntity uploadWorkProof(

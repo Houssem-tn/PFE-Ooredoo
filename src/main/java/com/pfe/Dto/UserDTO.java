@@ -22,6 +22,7 @@ public record UserDTO(
         String rejectionReason,
 
         Instant createdAt,
+        Instant updatedAt,
         Instant lastLoginAt,
 
         String assignedSttId,

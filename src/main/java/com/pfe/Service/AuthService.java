@@ -97,25 +97,27 @@ public class AuthService {
     public AuthResponse login(LoginRequest req) {
         String email = req.email().trim().toLowerCase();
 
-        try {
-            authManager.authenticate(
-                    new UsernamePasswordAuthenticationToken(email, req.password())
-            );
-        } catch (DisabledException e) {
-            throw new IllegalStateException("Account pending approval");
-        } catch (BadCredentialsException e) {
-            throw new IllegalArgumentException("Invalid credentials");
-        }
-
         AppUser user = repo.findByEmail(email)
                 .orElseThrow(() -> new IllegalArgumentException("Invalid credentials"));
 
         if (user.getStatus() != AccountStatus.APPROVED) {
             throw new IllegalStateException("Account pending approval");
         }
+
         if (!user.isEnabled()) {
-            throw new IllegalStateException("Account disabled");
+            throw new IllegalStateException("Unfortunately you are banned! Contact admin");
         }
+
+        try {
+            authManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(email, req.password())
+            );
+        } catch (DisabledException e) {
+            throw new IllegalStateException("Unfortunately you are banned! Contact admin");
+        } catch (BadCredentialsException e) {
+            throw new IllegalArgumentException("Invalid credentials");
+        }
+
         if (user.getRole() == null) {
             throw new IllegalStateException("Account role not assigned");
         }
