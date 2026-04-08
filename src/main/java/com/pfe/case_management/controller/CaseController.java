@@ -12,6 +12,8 @@ import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.service.CaseService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -39,6 +41,17 @@ public class CaseController {
     @GetMapping("/{id}")
     public ResponseEntity<CaseEntity> getCaseById(@PathVariable String id) {
         return ResponseEntity.ok(caseService.getCaseById(id));
+    }
+
+    @GetMapping("/{id}/pdf")
+    public ResponseEntity<byte[]> downloadCasePdf(@PathVariable String id) {
+        String filename = caseService.buildCasePdfFilename(id);
+        byte[] pdf = caseService.exportCasePdf(id);
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                .contentType(MediaType.APPLICATION_PDF)
+                .body(pdf);
     }
 
     @PostMapping("/{id}/assign-zm")

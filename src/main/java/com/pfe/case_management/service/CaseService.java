@@ -97,6 +97,7 @@ public class CaseService {
     private final NotificationEventService notificationEventService;
     private final CaseTimelineService caseTimelineService;
     private final FileStorageService fileStorageService;
+    private final CasePdfExportService casePdfExportService;
 
     public CaseEntity createCase(CreateCaseRequest request) {
         ensureCurrentUserHasRole("ROLE_ADMIN");
@@ -211,6 +212,16 @@ public class CaseService {
         }
 
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to access this case");
+    }
+
+    public byte[] exportCasePdf(String caseId) {
+        CaseEntity caseEntity = getCaseById(caseId);
+        return casePdfExportService.generateCasePdf(caseEntity);
+    }
+
+    public String buildCasePdfFilename(String caseId) {
+        CaseEntity caseEntity = getCaseById(caseId);
+        return casePdfExportService.buildFilename(caseEntity);
     }
 
     public CaseEntity assignToZm(String caseId, AssignZmRequest request) {
