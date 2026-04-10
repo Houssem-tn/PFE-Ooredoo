@@ -8,6 +8,8 @@ import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @Document(collection = "users")
 @Getter
@@ -39,6 +41,15 @@ public class AppUser {
     private String assignedZmId;
 
     private String assignedZmEmail;
+
+    @Builder.Default
+    private List<String> assignedGovernorates = new ArrayList<>();
+
+    @Builder.Default
+    private List<String> coveredGovernorates = new ArrayList<>();
+
+    @Builder.Default
+    private List<String> requestedGovernorates = new ArrayList<>();
 
     @Builder.Default
     private AccountStatus status = AccountStatus.PENDING;

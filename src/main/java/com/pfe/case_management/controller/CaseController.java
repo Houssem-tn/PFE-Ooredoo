@@ -2,7 +2,6 @@ package com.pfe.case_management.controller;
 
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
-import com.pfe.case_management.dto.AssignZmRequest;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
@@ -52,14 +51,6 @@ public class CaseController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
                 .contentType(MediaType.APPLICATION_PDF)
                 .body(pdf);
-    }
-
-    @PostMapping("/{id}/assign-zm")
-    public ResponseEntity<CaseEntity> assignToZm(
-            @PathVariable String id,
-            @Valid @RequestBody AssignZmRequest request
-    ) {
-        return ResponseEntity.ok(caseService.assignToZm(id, request));
     }
 
     @PostMapping("/{id}/assign-stt")

@@ -4,6 +4,8 @@ import com.pfe.Dto.*;
 import com.pfe.Entity.UserRole;
 import com.pfe.Service.UserService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
@@ -15,6 +17,17 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/v1/users")
 public class UserController {
+
+    public record CoverageRequestUpdateRequest(
+            List<@NotBlank(message = "Governorate names cannot be blank") String> requestedGovernorates
+    ) {
+    }
+
+    public record CoverageValidationRequest(
+            @NotEmpty(message = "approvedGovernorates is required")
+            List<@NotBlank(message = "Governorate names cannot be blank") String> approvedGovernorates
+    ) {
+    }
 
     private final UserService service;
 
@@ -76,10 +89,31 @@ public class UserController {
         return service.findMyStts(authentication.getName());
     }
 
+    @GetMapping("/me/stts/coverage-requests")
+    @PreAuthorize("hasAuthority('ROLE_ZM')")
+    public List<UserDTO> mySttCoverageRequests(Authentication authentication) {
+        return service.findMySttCoverageRequests(authentication.getName());
+    }
+
     @GetMapping("/me/stts/{sttId}/techs")
     @PreAuthorize("hasAuthority('ROLE_ZM')")
     public List<UserDTO> mySttTechs(@PathVariable String sttId, Authentication authentication) {
         return service.findMyTechsByStt(authentication.getName(), sttId);
+    }
+
+    @PutMapping("/me/coverage-request")
+    @PreAuthorize("hasAuthority('ROLE_STT')")
+    public UserDTO requestCoverage(Authentication authentication,
+                                   @Valid @RequestBody CoverageRequestUpdateRequest req) {
+        return service.requestCoverageAreas(authentication.getName(), req.requestedGovernorates());
+    }
+
+    @PutMapping("/me/stts/{sttId}/coverage-validation")
+    @PreAuthorize("hasAuthority('ROLE_ZM')")
+    public UserDTO validateCoverage(@PathVariable String sttId,
+                                    Authentication authentication,
+                                    @Valid @RequestBody CoverageValidationRequest req) {
+        return service.validateCoverageAreas(authentication.getName(), sttId, req.approvedGovernorates());
     }
 
     @PostMapping(value = "/{id}/profile-image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
