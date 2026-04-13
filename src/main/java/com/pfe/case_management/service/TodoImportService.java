@@ -1,11 +1,15 @@
 package com.pfe.case_management.service;
 
+import com.pfe.case_management.dto.AdminPerformanceImportInjectResponse;
+import com.pfe.case_management.dto.AdminPerformanceImportPreviewResponse;
+import com.pfe.case_management.dto.AdminPerformanceImportPreviewRowResponse;
 import com.pfe.case_management.dto.ImportedTodoListItemResponse;
 import com.pfe.case_management.dto.ImportedTodoPageResponse;
 import com.pfe.case_management.dto.ImportedTodoPreviewRowResponse;
 import com.pfe.case_management.dto.TodoImportInjectResponse;
 import com.pfe.case_management.dto.TodoImportPreviewResponse;
 import com.pfe.case_management.entity.ImportedTodoEntity;
+import com.pfe.case_management.model.ImportedTodoSourceType;
 import com.pfe.case_management.repository.ImportedTodoRepository;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
@@ -41,9 +45,15 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
+import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -60,6 +70,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class TodoImportService {
     private static final Logger log = LoggerFactory.getLogger(TodoImportService.class);
+    private static final int ADMIN_PREVIEW_LIMIT = 50;
     private static final List<String> REQUIRED_COLUMNS = List.of(
             "CRM_CASE",
             "FX_DATE_CRM",
@@ -76,6 +87,25 @@ public class TodoImportService {
             "STATUT",
             "ZONE_MNANAGER"
     );
+    private static final List<DateTimeFormatter> SUPPORTED_DATE_FORMATTERS = List.of(
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yy").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yy").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("dd-MM-yyyy").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("MM-dd-yyyy").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy H:mm").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy HH:mm").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy h:mm a").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy H:mm").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy HH:mm").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy h:mm a").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd H:mm").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd HH:mm").toFormatter(Locale.ROOT),
+            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd HH:mm:ss").toFormatter(Locale.ROOT)
+    );
+    private static final Map<String, String> TUNISIA_GOVERNORATE_ALIASES = buildTunisiaGovernorateAliases();
 
     static {
         // Large enterprise XLSX exports can be highly compressed and trigger
@@ -85,6 +115,48 @@ public class TodoImportService {
 
     private final ImportedTodoRepository importedTodoRepository;
     private final MongoTemplate mongoTemplate;
+
+    public AdminPerformanceImportPreviewResponse previewAdminPerformanceImport(MultipartFile file) {
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+        return new AdminPerformanceImportPreviewResponse(
+                parsedImport.sourceFileName(),
+                parsedImport.totalRows(),
+                parsedImport.validRows(),
+                parsedImport.invalidRows(),
+                parsedImport.distinctZoneManagers(),
+                parsedImport.distinctStts(),
+                parsedImport.distinctGovernorates(),
+                parsedImport.previewRows().stream()
+                        .limit(ADMIN_PREVIEW_LIMIT)
+                        .map(this::toAdminPreviewRowResponse)
+                        .toList()
+        );
+    }
+
+    public AdminPerformanceImportInjectResponse injectAdminPerformanceImport(MultipartFile file, String uploadedBy) {
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+
+        String batchId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+
+        List<ImportedTodoEntity> entities = parsedImport.previewRows().stream()
+                .map(row -> toAdminEntity(row, parsedImport.sourceFileName(), batchId, uploadedBy, now))
+                .toList();
+
+        importedTodoRepository.saveAll(entities);
+
+        return new AdminPerformanceImportInjectResponse(
+                batchId,
+                parsedImport.sourceFileName(),
+                parsedImport.totalRows(),
+                parsedImport.validRows(),
+                parsedImport.invalidRows(),
+                parsedImport.distinctZoneManagers(),
+                parsedImport.distinctStts(),
+                parsedImport.distinctGovernorates(),
+                entities.size()
+        );
+    }
 
     public ImportedTodoPageResponse listImportedTodos(
             String uploadedBy,
@@ -296,6 +368,276 @@ public class TodoImportService {
             log.warn("Failed to read uploaded Excel file {}", sourceFileName, ex);
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, resolveExcelReadError(ex), ex);
         }
+    }
+
+    private ParsedAnalyticsImport parseAdminPerformanceWorkbook(MultipartFile file) {
+        validateFile(file);
+
+        String sourceFileName = resolveSourceFileName(file);
+
+        try (InputStream inputStream = file.getInputStream();
+             Workbook workbook = WorkbookFactory.create(inputStream)) {
+            if (workbook.getNumberOfSheets() == 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no sheets");
+            }
+
+            Sheet sheet = workbook.getSheetAt(0);
+            Row headerRow = sheet.getRow(sheet.getFirstRowNum());
+            if (headerRow == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no header row");
+            }
+
+            DataFormatter formatter = new DataFormatter(Locale.ROOT);
+            FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+
+            Map<String, Integer> headerIndexes = resolveHeaderIndexes(headerRow, formatter, evaluator);
+            validateRequiredColumns(headerIndexes);
+
+            List<SourceRow> sourceRows = new ArrayList<>();
+            for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex);
+                Map<String, String> sourceValues = extractSourceValues(row, headerIndexes, formatter, evaluator);
+
+                if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
+                    continue;
+                }
+
+                sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
+            }
+
+            return buildAnalyticsImport(sourceFileName, sourceRows);
+        } catch (EncryptedDocumentException ex) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Password-protected Excel files are not supported",
+                    ex
+            );
+        } catch (IOException ex) {
+            if (shouldAttemptFallback(sourceFileName, ex)) {
+                try {
+                    return parseAdminStructuredTextWorkbook(file, sourceFileName);
+                } catch (Exception fallbackEx) {
+                    log.warn("Failed to read admin analytics spreadsheet fallback for {}", sourceFileName, fallbackEx);
+                    throw new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST,
+                            resolveFallbackReadError(ex, fallbackEx, sourceFileName),
+                            fallbackEx
+                    );
+                }
+            }
+
+            log.warn("Failed to read uploaded admin analytics file {}", sourceFileName, ex);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, resolveExcelReadError(ex), ex);
+        }
+    }
+
+    private ParsedAnalyticsImport parseAdminStructuredTextWorkbook(MultipartFile file, String sourceFileName) throws Exception {
+        byte[] bytes = file.getBytes();
+        String content = decodeTextContent(bytes);
+        List<String> failures = new ArrayList<>();
+
+        if (looksLikeSpreadsheetXml(content)) {
+            try {
+                return buildAnalyticsImport(sourceFileName, toSourceRows(parseSpreadsheetXmlMatrix(bytes)));
+            } catch (Exception ex) {
+                failures.add(sanitizeErrorMessage(deepestMessage(ex)));
+            }
+        }
+
+        if (looksLikeHtml(content)) {
+            try {
+                return buildAnalyticsImport(sourceFileName, toSourceRows(parseHtmlMatrix(content)));
+            } catch (Exception ex) {
+                failures.add(sanitizeErrorMessage(deepestMessage(ex)));
+            }
+        }
+
+        try {
+            return buildAnalyticsImport(sourceFileName, toSourceRows(parseDelimitedMatrix(content)));
+        } catch (Exception ex) {
+            failures.add(sanitizeErrorMessage(deepestMessage(ex)));
+        }
+
+        String summary = failures.stream()
+                .filter(this::hasText)
+                .distinct()
+                .collect(Collectors.joining(" | "));
+
+        throw new IOException(hasText(summary)
+                ? summary
+                : "Unsupported import file content. Open the file in Excel and save it as .xlsx or .csv, then upload it again.");
+    }
+
+    private List<SourceRow> toSourceRows(List<List<String>> matrix) {
+        if (matrix.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded spreadsheet does not contain any data rows");
+        }
+
+        Map<String, Integer> headerIndexes = resolveHeaderIndexes(matrix.get(0));
+        validateRequiredColumns(headerIndexes);
+
+        List<SourceRow> sourceRows = new ArrayList<>();
+        for (int rowIndex = 1; rowIndex < matrix.size(); rowIndex++) {
+            Map<String, String> sourceValues = extractSourceValues(matrix.get(rowIndex), headerIndexes);
+            if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
+                continue;
+            }
+
+            sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
+        }
+
+        return sourceRows;
+    }
+
+    private ParsedAnalyticsImport buildAnalyticsImport(String sourceFileName, List<SourceRow> sourceRows) {
+        Set<String> crmCases = sourceRows.stream()
+                .map(row -> normalizeLookupValue(row.sourceValues().get("CRM_CASE")))
+                .filter(this::hasText)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        Set<String> zoneManagers = sourceRows.stream()
+                .map(row -> normalizeLookupValue(row.sourceValues().get("ZONE_MNANAGER")))
+                .filter(this::hasText)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        Set<String> existingDuplicateKeys = findExistingAdminDuplicateKeys(crmCases, zoneManagers);
+        Set<String> seenInFile = new LinkedHashSet<>();
+        Set<String> distinctZoneManagers = new LinkedHashSet<>();
+        Set<String> distinctStts = new LinkedHashSet<>();
+        Set<String> distinctGovernorates = new LinkedHashSet<>();
+        List<ParsedAnalyticsRow> previewRows = new ArrayList<>();
+
+        for (SourceRow sourceRow : sourceRows) {
+            ParsedAnalyticsRow row = buildAnalyticsPreviewRow(sourceRow.rowNumber(), sourceRow.sourceValues());
+            List<String> issues = new ArrayList<>(row.issues());
+
+            if (hasText(row.zoneManagerNormalized())) {
+                distinctZoneManagers.add(row.zoneManager());
+            }
+
+            if (hasText(row.sttNormalized())) {
+                distinctStts.add(row.stt());
+            }
+
+            if (hasText(row.gouvernoratNormalized())) {
+                distinctGovernorates.add(row.gouvernorat());
+            }
+
+            String duplicateKey = analyticsDuplicateKey(row.zoneManagerNormalized(), row.crmCaseNormalized());
+            if (duplicateKey != null) {
+                if (!seenInFile.add(duplicateKey)) {
+                    issues.add("Duplicate CRM_CASE for the same Zone Manager inside the selected file");
+                }
+
+                if (existingDuplicateKeys.contains(duplicateKey)) {
+                    issues.add("Duplicate CRM_CASE already imported for this Zone Manager in performance analytics");
+                }
+            }
+
+            previewRows.add(row.withIssues(issues));
+        }
+
+        int validRows = (int) previewRows.stream().filter(ParsedAnalyticsRow::validRow).count();
+        return new ParsedAnalyticsImport(
+                sourceFileName,
+                sourceRows.size(),
+                validRows,
+                sourceRows.size() - validRows,
+                distinctZoneManagers.size(),
+                distinctStts.size(),
+                distinctGovernorates.size(),
+                previewRows
+        );
+    }
+
+    private ParsedAnalyticsRow buildAnalyticsPreviewRow(int rowNumber, Map<String, String> sourceValues) {
+        List<String> issues = new ArrayList<>();
+
+        String crmCase = trimmedValue(sourceValues.get("CRM_CASE"));
+        String zoneManager = trimmedValue(sourceValues.get("ZONE_MNANAGER"));
+        String stt = trimmedValue(sourceValues.get("STT"));
+        String gouvernoratRaw = trimmedValue(sourceValues.get("GOUVERNORAT"));
+        String openDateRaw = trimmedValue(sourceValues.get("OPEN_DATE_SUR_TIMOS"));
+        String affectationRaw = trimmedValue(sourceValues.get("DATE_AFFECTATION_STT"));
+
+        if (!hasText(crmCase)) {
+            issues.add("CRM_CASE is required");
+        }
+
+        if (!hasText(zoneManager)) {
+            issues.add("ZONE_MNANAGER is required");
+        }
+
+        if (!hasText(stt)) {
+            issues.add("STT is required");
+        }
+
+        if (!hasText(gouvernoratRaw)) {
+            issues.add("GOUVERNORAT is required");
+        }
+
+        String gouvernorat = canonicalTunisiaGovernorate(gouvernoratRaw);
+        if (hasText(gouvernoratRaw) && !hasText(gouvernorat)) {
+            issues.add("Unknown Tunisian governorate");
+        }
+
+        LocalDate openDate = parseImportedDate(openDateRaw);
+        LocalDate affectationDate = parseImportedDate(affectationRaw);
+        Integer slaBusinessDays = calculateBusinessDays(openDate, affectationDate);
+
+        return new ParsedAnalyticsRow(
+                rowNumber,
+                crmCase,
+                normalizeLookupValue(crmCase),
+                trimmedValue(sourceValues.get("FX_DATE_CRM")),
+                trimmedValue(sourceValues.get("CONTACT1")),
+                trimmedValue(sourceValues.get("CONTACT2")),
+                trimmedValue(sourceValues.get("MSISDN")),
+                gouvernorat,
+                normalizeLookupValue(gouvernorat),
+                trimmedValue(sourceValues.get("DESCRIPTION")),
+                normalizeCoordinate(sourceValues.get("LATITUDE")),
+                normalizeCoordinate(sourceValues.get("LONGITUDE")),
+                openDateRaw,
+                openDate,
+                affectationRaw,
+                affectationDate,
+                slaBusinessDays,
+                stt,
+                normalizeLookupValue(stt),
+                trimmedValue(sourceValues.get("STATUT")),
+                zoneManager,
+                normalizeLookupValue(zoneManager),
+                Map.copyOf(sourceValues),
+                List.copyOf(issues)
+        );
+    }
+
+    private Set<String> findExistingAdminDuplicateKeys(Set<String> crmCases, Set<String> zoneManagers) {
+        if (crmCases.isEmpty() || zoneManagers.isEmpty()) {
+            return Set.of();
+        }
+
+        Query query = new Query();
+        query.addCriteria(Criteria.where("sourceType").in(
+                ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT,
+                ImportedTodoSourceType.SAVED_ADMIN_PERFORMANCE_IMPORT
+        ));
+        query.addCriteria(Criteria.where("crmCaseNormalized").in(crmCases));
+        query.addCriteria(Criteria.where("zoneManagerNormalized").in(zoneManagers));
+
+        return mongoTemplate.find(query, ImportedTodoEntity.class).stream()
+                .map(entity -> analyticsDuplicateKey(entity.getZoneManagerNormalized(), entity.getCrmCaseNormalized()))
+                .filter(this::hasText)
+                .collect(Collectors.toSet());
+    }
+
+    private String analyticsDuplicateKey(String zoneManagerNormalized, String crmCaseNormalized) {
+        if (!hasText(zoneManagerNormalized) || !hasText(crmCaseNormalized)) {
+            return null;
+        }
+
+        return zoneManagerNormalized + "::" + crmCaseNormalized;
     }
 
     private Map<String, Integer> resolveHeaderIndexes(Row headerRow, DataFormatter formatter, FormulaEvaluator evaluator) {
@@ -678,6 +1020,7 @@ public class TodoImportService {
                 ? Set.of()
                 : importedTodoRepository.findByZoneManagerNormalizedAndCrmCaseNormalizedIn(normalizedManagerFilter, crmCases)
                 .stream()
+                .filter(entity -> entity.getSourceType() == null || entity.getSourceType() == ImportedTodoSourceType.ZM_TODO_INJECTION)
                 .map(ImportedTodoEntity::getCrmCaseNormalized)
                 .filter(this::hasText)
                 .collect(Collectors.toSet());
@@ -714,23 +1057,32 @@ public class TodoImportService {
     ) {
         return ImportedTodoEntity.builder()
                 .importBatchId(batchId)
+                .sourceType(ImportedTodoSourceType.ZM_TODO_INJECTION)
                 .uploadedBy(uploadedBy)
                 .uploadedAt(uploadedAt)
                 .sourceFileName(parsedImport.sourceFileName())
                 .managerFilterUsed(parsedImport.managerFilterUsed())
                 .crmCase(row.crmCase())
                 .crmCaseNormalized(row.crmCaseNormalized())
+                .rowNumber(row.rowNumber())
+                .validRow(row.readyToInject())
+                .validationIssues(row.issues())
                 .fxDateCrm(row.fxDateCrm())
                 .contact1(row.contact1())
                 .contact2(row.contact2())
                 .msisdn(row.msisdn())
                 .gouvernorat(row.gouvernorat())
+                .gouvernoratNormalized(normalizeLookupValue(row.gouvernorat()))
                 .description(row.description())
                 .latitude(row.latitude())
                 .longitude(row.longitude())
                 .openDateSurTimos(row.openDateSurTimos())
+                .openDateSurTimosDate(parseImportedDate(row.openDateSurTimos()))
                 .dateAffectationStt(row.dateAffectationStt())
+                .dateAffectationSttDate(parseImportedDate(row.dateAffectationStt()))
+                .slaBusinessDays(calculateBusinessDays(parseImportedDate(row.openDateSurTimos()), parseImportedDate(row.dateAffectationStt())))
                 .stt(row.stt())
+                .sttNormalized(normalizeLookupValue(row.stt()))
                 .statut(row.statut())
                 .zoneManager(row.zoneManager())
                 .zoneManagerNormalized(normalizeLookupValue(row.zoneManager()))
@@ -777,14 +1129,71 @@ public class TodoImportService {
         );
     }
 
+    private AdminPerformanceImportPreviewRowResponse toAdminPreviewRowResponse(ParsedAnalyticsRow row) {
+        return new AdminPerformanceImportPreviewRowResponse(
+                row.rowNumber(),
+                row.crmCase(),
+                row.zoneManager(),
+                row.gouvernorat(),
+                row.stt(),
+                row.statut(),
+                row.openDateSurTimos(),
+                row.dateAffectationStt(),
+                row.slaBusinessDays(),
+                row.issues(),
+                row.validRow()
+        );
+    }
+
+    private ImportedTodoEntity toAdminEntity(
+            ParsedAnalyticsRow row,
+            String sourceFileName,
+            String batchId,
+            String uploadedBy,
+            Instant uploadedAt
+    ) {
+        return ImportedTodoEntity.builder()
+                .importBatchId(batchId)
+                .sourceType(ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT)
+                .uploadedBy(uploadedBy)
+                .uploadedAt(uploadedAt)
+                .sourceFileName(sourceFileName)
+                .crmCase(row.crmCase())
+                .crmCaseNormalized(row.crmCaseNormalized())
+                .rowNumber(row.rowNumber())
+                .validRow(row.validRow())
+                .validationIssues(row.issues())
+                .fxDateCrm(row.fxDateCrm())
+                .contact1(row.contact1())
+                .contact2(row.contact2())
+                .msisdn(row.msisdn())
+                .gouvernorat(row.gouvernorat())
+                .gouvernoratNormalized(row.gouvernoratNormalized())
+                .description(row.description())
+                .latitude(row.latitude())
+                .longitude(row.longitude())
+                .openDateSurTimos(row.openDateSurTimos())
+                .openDateSurTimosDate(row.openDateSurTimosDate())
+                .dateAffectationStt(row.dateAffectationStt())
+                .dateAffectationSttDate(row.dateAffectationSttDate())
+                .slaBusinessDays(row.slaBusinessDays())
+                .stt(row.stt())
+                .sttNormalized(row.sttNormalized())
+                .statut(row.statut())
+                .zoneManager(row.zoneManager())
+                .zoneManagerNormalized(row.zoneManagerNormalized())
+                .sourceValues(row.sourceValues())
+                .build();
+    }
+
     private void validateFile(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Excel file is required");
         }
 
         String sourceFileName = resolveSourceFileName(file).toLowerCase(Locale.ROOT);
-        if (!sourceFileName.endsWith(".xls") && !sourceFileName.endsWith(".xlsx")) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Only .xls and .xlsx files are supported");
+        if (!sourceFileName.endsWith(".xls") && !sourceFileName.endsWith(".xlsx") && !sourceFileName.endsWith(".csv")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Only .csv, .xls and .xlsx files are supported");
         }
     }
 
@@ -822,7 +1231,8 @@ public class TodoImportService {
     }
 
     private boolean shouldAttemptFallback(String sourceFileName, IOException ex) {
-        if (sourceFileName.toLowerCase(Locale.ROOT).endsWith(".xls")) {
+        String lowerCaseName = sourceFileName.toLowerCase(Locale.ROOT);
+        if (lowerCaseName.endsWith(".xls") || lowerCaseName.endsWith(".csv")) {
             return true;
         }
 
@@ -864,6 +1274,40 @@ public class TodoImportService {
         return value.trim().toLowerCase(Locale.ROOT);
     }
 
+    private String canonicalTunisiaGovernorate(String rawValue) {
+        String normalized = normalizeGovernorateAlias(rawValue);
+        if (!hasText(normalized)) {
+            return null;
+        }
+
+        String exactMatch = TUNISIA_GOVERNORATE_ALIASES.get(normalized);
+        if (exactMatch != null) {
+            return exactMatch;
+        }
+
+        return TUNISIA_GOVERNORATE_ALIASES.entrySet().stream()
+                .filter(entry -> normalized.contains(entry.getKey()))
+                .sorted((left, right) -> Integer.compare(right.getKey().length(), left.getKey().length()))
+                .map(Map.Entry::getValue)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private String normalizeGovernorateAlias(String value) {
+        if (!hasText(value)) {
+            return null;
+        }
+
+        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "")
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", " ")
+                .trim()
+                .replaceAll("\\s+", " ");
+
+        return hasText(normalized) ? normalized : null;
+    }
+
     private String normalizeCoordinate(String rawValue) {
         if (!hasText(rawValue)) {
             return null;
@@ -882,6 +1326,121 @@ public class TodoImportService {
         }
 
         return hasText(cleaned) ? cleaned : null;
+    }
+
+    private LocalDate parseImportedDate(String rawValue) {
+        if (!hasText(rawValue)) {
+            return null;
+        }
+
+        String trimmed = rawValue.trim();
+        for (DateTimeFormatter formatter : SUPPORTED_DATE_FORMATTERS) {
+            try {
+                return LocalDate.parse(trimmed, formatter);
+            } catch (DateTimeParseException ignored) {
+                // Keep trying the known telecom export formats.
+            }
+        }
+
+        String strippedTime = trimmed
+                .replace('T', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+
+        int firstSpaceIndex = strippedTime.indexOf(' ');
+        if (firstSpaceIndex > 0) {
+            String datePortion = strippedTime.substring(0, firstSpaceIndex);
+            for (DateTimeFormatter formatter : SUPPORTED_DATE_FORMATTERS) {
+                try {
+                    return LocalDate.parse(datePortion, formatter);
+                } catch (DateTimeParseException ignored) {
+                    // Keep trying compact date-only fallbacks.
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static Map<String, String> buildTunisiaGovernorateAliases() {
+        Map<String, String> aliases = new LinkedHashMap<>();
+        registerGovernorateAlias(aliases, "Ariana", "Ariana");
+        registerGovernorateAlias(aliases, "Beja", "Beja", "Béja");
+        registerGovernorateAlias(aliases, "Ben Arous", "Ben Arous");
+        registerGovernorateAlias(aliases, "Bizerte", "Bizerte");
+        registerGovernorateAlias(aliases, "Gabes", "Gabes", "Gabès");
+        registerGovernorateAlias(aliases, "Gafsa", "Gafsa");
+        registerGovernorateAlias(aliases, "Jendouba", "Jendouba");
+        registerGovernorateAlias(aliases, "Kairouan", "Kairouan");
+        registerGovernorateAlias(aliases, "Kasserine", "Kasserine");
+        registerGovernorateAlias(aliases, "Kebili", "Kebili", "Kébili");
+        registerGovernorateAlias(aliases, "Kef", "Kef", "Le Kef");
+        registerGovernorateAlias(aliases, "Mahdia", "Mahdia");
+        registerGovernorateAlias(aliases, "Manouba", "Manouba", "Mannouba");
+        registerGovernorateAlias(aliases, "Medenine", "Medenine", "Médenine");
+        registerGovernorateAlias(aliases, "Monastir", "Monastir");
+        registerGovernorateAlias(aliases, "Nabeul", "Nabeul");
+        registerGovernorateAlias(aliases, "Sfax", "Sfax");
+        registerGovernorateAlias(aliases, "Sidi Bouzid", "Sidi Bouzid");
+        registerGovernorateAlias(aliases, "Siliana", "Siliana");
+        registerGovernorateAlias(aliases, "Sousse", "Sousse");
+        registerGovernorateAlias(aliases, "Tataouine", "Tataouine");
+        registerGovernorateAlias(aliases, "Tozeur", "Tozeur");
+        registerGovernorateAlias(aliases, "Tunis", "Tunis");
+        registerGovernorateAlias(aliases, "Zaghouan", "Zaghouan");
+        return Map.copyOf(aliases);
+    }
+
+    private static void registerGovernorateAlias(Map<String, String> aliases, String canonical, String... variants) {
+        for (String variant : variants) {
+            String normalized = normalizeGovernorateAliasStatic(variant);
+            if (normalized != null) {
+                aliases.put(normalized, canonical);
+            }
+        }
+    }
+
+    private static String normalizeGovernorateAliasStatic(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "")
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", " ")
+                .trim()
+                .replaceAll("\\s+", " ");
+
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private Integer calculateBusinessDays(LocalDate startDate, LocalDate endDate) {
+        if (startDate == null || endDate == null || endDate.isBefore(startDate)) {
+            return null;
+        }
+
+        // We count working days between the two dates, excluding Saturday and Sunday.
+        // When both dates are the same working day, SLA is 0 by design for consistency.
+        int businessDays = 0;
+        LocalDate cursor = startDate;
+        while (cursor.isBefore(endDate)) {
+            cursor = cursor.plusDays(1);
+            if (cursor.isAfter(endDate)) {
+                break;
+            }
+
+            if (isWorkingDay(cursor)) {
+                businessDays += 1;
+            }
+        }
+
+        return businessDays;
+    }
+
+    private boolean isWorkingDay(LocalDate date) {
+        DayOfWeek dayOfWeek = date.getDayOfWeek();
+        return dayOfWeek != DayOfWeek.SATURDAY && dayOfWeek != DayOfWeek.SUNDAY;
     }
 
     private String trimmedValue(String value) {
@@ -917,7 +1476,7 @@ public class TodoImportService {
                 || normalized.contains("not an ooxml stream")
                 || normalized.contains("invalid header signature")
                 || normalized.contains("unsupported file format")) {
-            return "The uploaded file is not a valid .xls or .xlsx Excel workbook";
+            return "The uploaded file is not a valid .csv, .xls, or .xlsx import file";
         }
 
         if (normalized.contains("truncated")
@@ -1005,6 +1564,84 @@ public class TodoImportService {
 
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private record SourceRow(
+            int rowNumber,
+            Map<String, String> sourceValues
+    ) {
+    }
+
+    private record ParsedAnalyticsImport(
+            String sourceFileName,
+            int totalRows,
+            int validRows,
+            int invalidRows,
+            int distinctZoneManagers,
+            int distinctStts,
+            int distinctGovernorates,
+            List<ParsedAnalyticsRow> previewRows
+    ) {
+    }
+
+    private record ParsedAnalyticsRow(
+            int rowNumber,
+            String crmCase,
+            String crmCaseNormalized,
+            String fxDateCrm,
+            String contact1,
+            String contact2,
+            String msisdn,
+            String gouvernorat,
+            String gouvernoratNormalized,
+            String description,
+            String latitude,
+            String longitude,
+            String openDateSurTimos,
+            LocalDate openDateSurTimosDate,
+            String dateAffectationStt,
+            LocalDate dateAffectationSttDate,
+            Integer slaBusinessDays,
+            String stt,
+            String sttNormalized,
+            String statut,
+            String zoneManager,
+            String zoneManagerNormalized,
+            Map<String, String> sourceValues,
+            List<String> issues
+    ) {
+        private ParsedAnalyticsRow withIssues(List<String> updatedIssues) {
+            return new ParsedAnalyticsRow(
+                    rowNumber,
+                    crmCase,
+                    crmCaseNormalized,
+                    fxDateCrm,
+                    contact1,
+                    contact2,
+                    msisdn,
+                    gouvernorat,
+                    gouvernoratNormalized,
+                    description,
+                    latitude,
+                    longitude,
+                    openDateSurTimos,
+                    openDateSurTimosDate,
+                    dateAffectationStt,
+                    dateAffectationSttDate,
+                    slaBusinessDays,
+                    stt,
+                    sttNormalized,
+                    statut,
+                    zoneManager,
+                    zoneManagerNormalized,
+                    sourceValues,
+                    List.copyOf(updatedIssues)
+            );
+        }
+
+        private boolean validRow() {
+            return issues.isEmpty();
+        }
     }
 
     private record ParsedImport(
