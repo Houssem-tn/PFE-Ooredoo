@@ -3,6 +3,7 @@ package com.pfe.case_management.controller;
 import com.pfe.case_management.dto.AdminPerformanceImportInjectResponse;
 import com.pfe.case_management.dto.AdminPerformanceImportPreviewResponse;
 import com.pfe.case_management.dto.SaveZmPerformanceStudyRequest;
+import com.pfe.case_management.dto.SavedZmPerformanceRowQualityResponse;
 import com.pfe.case_management.dto.SavedZmPerformanceStudyResponse;
 import com.pfe.case_management.dto.ZmPerformanceStudyResponse;
 import com.pfe.case_management.service.SavedZmPerformanceStudyService;
@@ -83,5 +84,22 @@ public class AdminPerformanceImportController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo
     ) {
         return ResponseEntity.ok(zmPerformanceAnalyticsService.getSavedStudy(studyId, zoneManager, gouvernorat, uploadedFrom, uploadedTo));
+    }
+
+    @GetMapping("/saved-studies/{studyId}/row-quality")
+    public ResponseEntity<SavedZmPerformanceRowQualityResponse> getSavedStudyRowQuality(
+            @PathVariable String studyId,
+            @RequestParam(required = false) String zoneManager,
+            @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo
+    ) {
+        return ResponseEntity.ok(savedZmPerformanceStudyService.getSavedStudyRowQuality(
+                studyId,
+                zoneManager,
+                gouvernorat,
+                uploadedFrom,
+                uploadedTo
+        ));
     }
 }

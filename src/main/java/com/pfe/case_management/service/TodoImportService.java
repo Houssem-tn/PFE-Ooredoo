@@ -1,5 +1,8 @@
 package com.pfe.case_management.service;
 
+import com.pfe.Entity.AppUser;
+import com.pfe.Entity.UserRole;
+import com.pfe.Repository.UserRepository;
 import com.pfe.case_management.dto.AdminPerformanceImportInjectResponse;
 import com.pfe.case_management.dto.AdminPerformanceImportPreviewResponse;
 import com.pfe.case_management.dto.AdminPerformanceImportPreviewRowResponse;
@@ -8,9 +11,17 @@ import com.pfe.case_management.dto.ImportedTodoPageResponse;
 import com.pfe.case_management.dto.ImportedTodoPreviewRowResponse;
 import com.pfe.case_management.dto.TodoImportInjectResponse;
 import com.pfe.case_management.dto.TodoImportPreviewResponse;
+import com.pfe.case_management.dto.ZmTodoAnalyticsAlertResponse;
+import com.pfe.case_management.dto.ZmTodoAnalyticsGovernorateItemResponse;
+import com.pfe.case_management.dto.ZmTodoAnalyticsInvalidReasonResponse;
+import com.pfe.case_management.dto.ZmTodoImportProcessResponse;
+import com.pfe.case_management.dto.ZmTodoAnalyticsResponse;
+import com.pfe.case_management.dto.ZmTodoAnalyticsSttItemResponse;
 import com.pfe.case_management.entity.ImportedTodoEntity;
+import com.pfe.case_management.entity.ImportedZmTodoEntity;
 import com.pfe.case_management.model.ImportedTodoSourceType;
 import com.pfe.case_management.repository.ImportedTodoRepository;
+import com.pfe.case_management.repository.ImportedZmTodoRepository;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
@@ -25,6 +36,7 @@ import org.jsoup.Jsoup;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -55,7 +67,9 @@ import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -71,6 +85,12 @@ import java.util.stream.Collectors;
 public class TodoImportService {
     private static final Logger log = LoggerFactory.getLogger(TodoImportService.class);
     private static final int ADMIN_PREVIEW_LIMIT = 50;
+    private static final int ZM_DELAYED_SLA_THRESHOLD_DAYS = 3;
+    private static final double ZM_HIGH_AVERAGE_SLA_THRESHOLD_DAYS = 3d;
+    private static final double ZM_HIGH_DELAYED_RATE_THRESHOLD = 25d;
+    private static final double ZM_HIGH_GELE_RATE_THRESHOLD = 15d;
+    private static final double ZM_STT_OVERLOAD_THRESHOLD = 50d;
+    private static final double ZM_WORST_GOVERNORATE_ALERT_THRESHOLD_DAYS = 4d;
     private static final List<String> REQUIRED_COLUMNS = List.of(
             "CRM_CASE",
             "FX_DATE_CRM",
@@ -114,7 +134,10 @@ public class TodoImportService {
     }
 
     private final ImportedTodoRepository importedTodoRepository;
+    private final ImportedZmTodoRepository importedZmTodoRepository;
     private final MongoTemplate mongoTemplate;
+    private final UserRepository userRepository;
+    private final ZmTodoAnalysisService zmTodoAnalysisService;
 
     public AdminPerformanceImportPreviewResponse previewAdminPerformanceImport(MultipartFile file) {
         ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
@@ -158,12 +181,157 @@ public class TodoImportService {
         );
     }
 
+    public ZmTodoAnalyticsResponse analyzeForZm(MultipartFile file, String zmEmail) {
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+        ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
+        return prepareZmAnalytics(parsedImport, zmIdentity, false).analytics();
+    }
+
+    public ZmTodoImportProcessResponse processForZm(MultipartFile file, String zmEmail) {
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+        ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
+        PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, true);
+
+        String batchId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+
+        List<ImportedZmTodoEntity> entities = prepared.matchedRows().stream()
+                .map(row -> toZmImportedEntity(row, parsedImport.sourceFileName(), zmIdentity.displayManagerKey(), batchId, zmEmail, now))
+                .toList();
+
+        if (!entities.isEmpty()) {
+            importedZmTodoRepository.saveAll(entities);
+        }
+
+        var savedAnalysis = zmTodoAnalysisService.saveAnalysis(
+                zmEmail,
+                now,
+                parsedImport.sourceFileName(),
+                batchId,
+                prepared.analytics()
+        );
+
+        return new ZmTodoImportProcessResponse(
+                savedAnalysis.getId(),
+                parsedImport.sourceFileName(),
+                now,
+                batchId,
+                prepared.analytics().totalRows(),
+                prepared.analytics().matchedRows(),
+                prepared.analytics().ignoredRows(),
+                prepared.analytics().validMatchedRows(),
+                prepared.analytics().invalidMatchedRows(),
+                entities.size()
+        );
+    }
+
+    private PreparedZmAnalytics prepareZmAnalytics(
+            ParsedAnalyticsImport parsedImport,
+            ResolvedZmIdentity zmIdentity,
+            boolean annotateDuplicates
+    ) {
+        List<ParsedAnalyticsRow> matchedRows = parsedImport.previewRows().stream()
+                .filter(row -> zmIdentity.matches(row.zoneManagerNormalized()))
+                .toList();
+
+        List<ParsedAnalyticsRow> preparedRows = annotateDuplicates
+                ? annotateDuplicateAnalyticsRows(matchedRows)
+                : matchedRows;
+
+        List<ParsedAnalyticsRow> validRows = preparedRows.stream()
+                .filter(ParsedAnalyticsRow::validRow)
+                .toList();
+
+        List<ParsedAnalyticsRow> invalidRows = preparedRows.stream()
+                .filter(row -> !row.validRow())
+                .toList();
+
+        return new PreparedZmAnalytics(
+                preparedRows,
+                validRows,
+                invalidRows,
+                buildZmAnalyticsResponse(parsedImport, zmIdentity, preparedRows, validRows, invalidRows)
+        );
+    }
+
+    private ZmTodoAnalyticsResponse buildZmAnalyticsResponse(
+            ParsedAnalyticsImport parsedImport,
+            ResolvedZmIdentity zmIdentity,
+            List<ParsedAnalyticsRow> matchedRows,
+            List<ParsedAnalyticsRow> validRows,
+            List<ParsedAnalyticsRow> invalidRows
+    ) {
+        List<ZmTodoAnalyticsSttItemResponse> sttBreakdown = buildZmTodoSttBreakdown(validRows);
+        List<ZmTodoAnalyticsGovernorateItemResponse> governorateBreakdown = buildZmTodoGovernorateBreakdown(validRows);
+
+        long totalCases = validRows.size();
+        List<Integer> slaValues = validRows.stream()
+                .map(ParsedAnalyticsRow::slaBusinessDays)
+                .filter(value -> value != null)
+                .toList();
+
+        long delayedCases = validRows.stream()
+                .filter(this::isDelayedZmAnalyticsRow)
+                .count();
+        double delayedRate = totalCases == 0 ? 0d : round2((delayedCases * 100d) / totalCases);
+
+        long geleCases = validRows.stream()
+                .filter(row -> isGeleStatus(row.statut()))
+                .count();
+        double geleRate = totalCases == 0 ? 0d : round2((geleCases * 100d) / totalCases);
+
+        ZmTodoAnalyticsSttItemResponse topStt = sttBreakdown.isEmpty() ? null : sttBreakdown.get(0);
+        ZmTodoAnalyticsGovernorateItemResponse bestGovernorate = governorateBreakdown.stream()
+                .filter(item -> item.averageSlaBusinessDays() != null)
+                .min(Comparator.comparingDouble(ZmTodoAnalyticsGovernorateItemResponse::averageSlaBusinessDays))
+                .orElse(null);
+        ZmTodoAnalyticsGovernorateItemResponse worstGovernorate = governorateBreakdown.stream()
+                .filter(item -> item.averageSlaBusinessDays() != null)
+                .max(Comparator.comparingDouble(ZmTodoAnalyticsGovernorateItemResponse::averageSlaBusinessDays))
+                .orElse(null);
+
+        List<ZmTodoAnalyticsInvalidReasonResponse> invalidReasonSummaries = summarizeInvalidReasons(invalidRows);
+
+        return new ZmTodoAnalyticsResponse(
+                parsedImport.sourceFileName(),
+                zmIdentity.fullName(),
+                zmIdentity.displayManagerKey(),
+                parsedImport.totalRows(),
+                matchedRows.size(),
+                Math.max(0, parsedImport.totalRows() - matchedRows.size()),
+                validRows.size(),
+                invalidRows.size(),
+                totalCases,
+                slaValues.size(),
+                slaValues.isEmpty() ? null : round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d)),
+                delayedCases,
+                delayedRate,
+                geleCases,
+                geleRate,
+                sttBreakdown.size(),
+                governorateBreakdown.size(),
+                topStt != null ? topStt.sttName() : null,
+                topStt != null ? topStt.caseCount() : 0L,
+                topStt != null ? topStt.percentage() : null,
+                bestGovernorate != null ? bestGovernorate.gouvernorat() : null,
+                bestGovernorate != null ? bestGovernorate.averageSlaBusinessDays() : null,
+                worstGovernorate != null ? worstGovernorate.gouvernorat() : null,
+                worstGovernorate != null ? worstGovernorate.averageSlaBusinessDays() : null,
+                buildZmTodoAlerts(zmIdentity, totalCases, matchedRows.size(), invalidRows.size(), sttBreakdown, governorateBreakdown, delayedRate, geleRate, invalidReasonSummaries, slaValues),
+                buildZmTodoInsights(zmIdentity, totalCases, sttBreakdown, governorateBreakdown, delayedRate, geleRate, invalidRows.size(), invalidReasonSummaries, slaValues),
+                sttBreakdown,
+                governorateBreakdown,
+                invalidReasonSummaries
+        );
+    }
+
     public ImportedTodoPageResponse listImportedTodos(
             String uploadedBy,
             int page,
             int size,
             String search,
             String statut,
+            String rowQuality,
             String gouvernorat,
             LocalDate uploadedFrom,
             LocalDate uploadedTo
@@ -186,6 +354,7 @@ public class TodoImportService {
                     Criteria.where("gouvernorat").regex(containsPattern, "i"),
                     Criteria.where("stt").regex(containsPattern, "i"),
                     Criteria.where("statut").regex(containsPattern, "i"),
+                    Criteria.where("validationIssues").regex(containsPattern, "i"),
                     Criteria.where("zoneManager").regex(containsPattern, "i"),
                     Criteria.where("sourceFileName").regex(containsPattern, "i"),
                     Criteria.where("managerFilterUsed").regex(containsPattern, "i"),
@@ -195,6 +364,16 @@ public class TodoImportService {
 
         if (hasText(statut)) {
             query.addCriteria(Criteria.where("statut").regex("^" + Pattern.quote(statut.trim()) + "$", "i"));
+        }
+
+        if (hasText(rowQuality)) {
+            String normalizedRowQuality = rowQuality.trim().toLowerCase(Locale.ROOT);
+
+            if ("valid".equals(normalizedRowQuality)) {
+                query.addCriteria(Criteria.where("validRow").is(true));
+            } else if ("invalid".equals(normalizedRowQuality)) {
+                query.addCriteria(Criteria.where("validRow").ne(true));
+            }
         }
 
         if (hasText(gouvernorat)) {
@@ -215,13 +394,13 @@ public class TodoImportService {
             query.addCriteria(uploadedAtCriteria);
         }
 
-        long totalElements = mongoTemplate.count(query, ImportedTodoEntity.class);
+        long totalElements = mongoTemplate.count(query, ImportedZmTodoEntity.class);
 
         query.with(Sort.by(Sort.Direction.DESC, "uploadedAt", "id"));
         query.skip((long) safePage * safeSize);
         query.limit(safeSize);
 
-        List<ImportedTodoListItemResponse> items = mongoTemplate.find(query, ImportedTodoEntity.class).stream()
+        List<ImportedTodoListItemResponse> items = mongoTemplate.find(query, ImportedZmTodoEntity.class).stream()
                 .map(this::toListItemResponse)
                 .toList();
 
@@ -258,12 +437,12 @@ public class TodoImportService {
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
-        List<ImportedTodoEntity> entities = parsedImport.previewRows().stream()
+        List<ImportedZmTodoEntity> entities = parsedImport.previewRows().stream()
                 .filter(ParsedPreviewRow::readyToInject)
                 .map(row -> toEntity(row, parsedImport, batchId, uploadedBy, now))
                 .toList();
 
-        importedTodoRepository.saveAll(entities);
+        importedZmTodoRepository.saveAll(entities);
 
         return new TodoImportInjectResponse(
                 batchId,
@@ -1018,10 +1197,10 @@ public class TodoImportService {
 
         Set<String> existingCrmCases = crmCases.isEmpty()
                 ? Set.of()
-                : importedTodoRepository.findByZoneManagerNormalizedAndCrmCaseNormalizedIn(normalizedManagerFilter, crmCases)
+                : importedZmTodoRepository.findByZoneManagerNormalizedAndCrmCaseNormalizedIn(normalizedManagerFilter, crmCases)
                 .stream()
                 .filter(entity -> entity.getSourceType() == null || entity.getSourceType() == ImportedTodoSourceType.ZM_TODO_INJECTION)
-                .map(ImportedTodoEntity::getCrmCaseNormalized)
+                .map(ImportedZmTodoEntity::getCrmCaseNormalized)
                 .filter(this::hasText)
                 .collect(Collectors.toSet());
 
@@ -1048,14 +1227,70 @@ public class TodoImportService {
         return annotatedRows;
     }
 
-    private ImportedTodoEntity toEntity(
+    private List<ParsedAnalyticsRow> annotateDuplicateAnalyticsRows(List<ParsedAnalyticsRow> rows) {
+        if (rows.isEmpty()) {
+            return rows;
+        }
+
+        Map<String, Set<String>> existingCrmCasesByManager = new LinkedHashMap<>();
+        Map<String, Set<String>> crmCasesByManager = new LinkedHashMap<>();
+
+        for (ParsedAnalyticsRow row : rows) {
+            if (!hasText(row.zoneManagerNormalized()) || !hasText(row.crmCaseNormalized())) {
+                continue;
+            }
+
+            crmCasesByManager
+                    .computeIfAbsent(row.zoneManagerNormalized(), ignored -> new LinkedHashSet<>())
+                    .add(row.crmCaseNormalized());
+        }
+
+        for (Map.Entry<String, Set<String>> entry : crmCasesByManager.entrySet()) {
+            Set<String> existingCrmCases = importedZmTodoRepository
+                    .findByZoneManagerNormalizedAndCrmCaseNormalizedIn(entry.getKey(), entry.getValue())
+                    .stream()
+                    .filter(entity -> entity.getSourceType() == null || entity.getSourceType() == ImportedTodoSourceType.ZM_TODO_INJECTION)
+                    .map(ImportedZmTodoEntity::getCrmCaseNormalized)
+                    .filter(this::hasText)
+                    .collect(Collectors.toSet());
+
+            existingCrmCasesByManager.put(entry.getKey(), existingCrmCases);
+        }
+
+        Set<String> seenInWorkbook = new LinkedHashSet<>();
+        List<ParsedAnalyticsRow> annotatedRows = new ArrayList<>();
+
+        for (ParsedAnalyticsRow row : rows) {
+            List<String> issues = new ArrayList<>(row.issues());
+            String crmCaseNormalized = row.crmCaseNormalized();
+            String zoneManagerNormalized = row.zoneManagerNormalized();
+
+            if (hasText(crmCaseNormalized) && hasText(zoneManagerNormalized)) {
+                String duplicateKey = zoneManagerNormalized + "::" + crmCaseNormalized;
+
+                if (!seenInWorkbook.add(duplicateKey)) {
+                    issues.add("Duplicate CRM_CASE inside the selected file");
+                }
+
+                if (existingCrmCasesByManager.getOrDefault(zoneManagerNormalized, Set.of()).contains(crmCaseNormalized)) {
+                    issues.add("Duplicate CRM_CASE already imported for this zone manager");
+                }
+            }
+
+            annotatedRows.add(row.withIssues(issues));
+        }
+
+        return annotatedRows;
+    }
+
+    private ImportedZmTodoEntity toEntity(
             ParsedPreviewRow row,
             ParsedImport parsedImport,
             String batchId,
             String uploadedBy,
             Instant uploadedAt
     ) {
-        return ImportedTodoEntity.builder()
+        return ImportedZmTodoEntity.builder()
                 .importBatchId(batchId)
                 .sourceType(ImportedTodoSourceType.ZM_TODO_INJECTION)
                 .uploadedBy(uploadedBy)
@@ -1090,6 +1325,49 @@ public class TodoImportService {
                 .build();
     }
 
+    private ImportedZmTodoEntity toZmImportedEntity(
+            ParsedAnalyticsRow row,
+            String sourceFileName,
+            String managerFilterUsed,
+            String batchId,
+            String uploadedBy,
+            Instant uploadedAt
+    ) {
+        return ImportedZmTodoEntity.builder()
+                .importBatchId(batchId)
+                .sourceType(ImportedTodoSourceType.ZM_TODO_INJECTION)
+                .uploadedBy(uploadedBy)
+                .uploadedAt(uploadedAt)
+                .sourceFileName(sourceFileName)
+                .managerFilterUsed(managerFilterUsed)
+                .crmCase(row.crmCase())
+                .crmCaseNormalized(row.crmCaseNormalized())
+                .rowNumber(row.rowNumber())
+                .validRow(row.validRow())
+                .validationIssues(row.issues())
+                .fxDateCrm(row.fxDateCrm())
+                .contact1(row.contact1())
+                .contact2(row.contact2())
+                .msisdn(row.msisdn())
+                .gouvernorat(row.gouvernorat())
+                .gouvernoratNormalized(row.gouvernoratNormalized())
+                .description(row.description())
+                .latitude(row.latitude())
+                .longitude(row.longitude())
+                .openDateSurTimos(row.openDateSurTimos())
+                .openDateSurTimosDate(row.openDateSurTimosDate())
+                .dateAffectationStt(row.dateAffectationStt())
+                .dateAffectationSttDate(row.dateAffectationSttDate())
+                .slaBusinessDays(row.slaBusinessDays())
+                .stt(row.stt())
+                .sttNormalized(row.sttNormalized())
+                .statut(row.statut())
+                .zoneManager(row.zoneManager())
+                .zoneManagerNormalized(row.zoneManagerNormalized())
+                .sourceValues(row.sourceValues())
+                .build();
+    }
+
     private ImportedTodoPreviewRowResponse toPreviewRowResponse(ParsedPreviewRow row) {
         return new ImportedTodoPreviewRowResponse(
                 row.rowNumber(),
@@ -1112,12 +1390,15 @@ public class TodoImportService {
         );
     }
 
-    private ImportedTodoListItemResponse toListItemResponse(ImportedTodoEntity entity) {
+    private ImportedTodoListItemResponse toListItemResponse(ImportedZmTodoEntity entity) {
         return new ImportedTodoListItemResponse(
                 entity.getId(),
                 entity.getImportBatchId(),
                 entity.getSourceFileName(),
                 entity.getManagerFilterUsed(),
+                entity.getRowNumber(),
+                entity.getValidRow(),
+                entity.getValidationIssues() == null ? List.of() : List.copyOf(entity.getValidationIssues()),
                 entity.getCrmCase(),
                 entity.getFxDateCrm(),
                 entity.getGouvernorat(),
@@ -1184,6 +1465,390 @@ public class TodoImportService {
                 .zoneManagerNormalized(row.zoneManagerNormalized())
                 .sourceValues(row.sourceValues())
                 .build();
+    }
+
+    private List<ZmTodoAnalyticsSttItemResponse> buildZmTodoSttBreakdown(List<ParsedAnalyticsRow> rows) {
+        long totalCases = rows.size();
+        Map<String, List<ParsedAnalyticsRow>> grouped = groupAnalyticsRows(
+                rows,
+                ParsedAnalyticsRow::sttNormalized
+        );
+
+        List<ZmTodoAnalyticsSttItemResponse> items = new ArrayList<>();
+        for (List<ParsedAnalyticsRow> group : grouped.values()) {
+            List<Integer> slaValues = group.stream()
+                    .map(ParsedAnalyticsRow::slaBusinessDays)
+                    .filter(value -> value != null)
+                    .toList();
+            long delayedCases = group.stream().filter(this::isDelayedZmAnalyticsRow).count();
+            long geleCases = group.stream().filter(row -> isGeleStatus(row.statut())).count();
+
+            items.add(new ZmTodoAnalyticsSttItemResponse(
+                    displayAnalyticsValue(group, ParsedAnalyticsRow::stt),
+                    group.size(),
+                    totalCases == 0 ? 0d : round2((group.size() * 100d) / totalCases),
+                    slaValues.isEmpty() ? null : round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d)),
+                    delayedCases,
+                    group.isEmpty() ? 0d : round2((delayedCases * 100d) / group.size()),
+                    geleCases,
+                    group.isEmpty() ? 0d : round2((geleCases * 100d) / group.size())
+            ));
+        }
+
+        items.sort(Comparator
+                .comparingLong(ZmTodoAnalyticsSttItemResponse::caseCount).reversed()
+                .thenComparing(item -> item.sttName() == null ? "" : item.sttName(), String.CASE_INSENSITIVE_ORDER));
+        return items;
+    }
+
+    private List<ZmTodoAnalyticsGovernorateItemResponse> buildZmTodoGovernorateBreakdown(List<ParsedAnalyticsRow> rows) {
+        long totalCases = rows.size();
+        Map<String, List<ParsedAnalyticsRow>> grouped = groupAnalyticsRows(
+                rows,
+                ParsedAnalyticsRow::gouvernoratNormalized
+        );
+
+        List<ZmTodoAnalyticsGovernorateItemResponse> items = new ArrayList<>();
+        for (List<ParsedAnalyticsRow> group : grouped.values()) {
+            List<Integer> slaValues = group.stream()
+                    .map(ParsedAnalyticsRow::slaBusinessDays)
+                    .filter(value -> value != null)
+                    .toList();
+            long delayedCases = group.stream().filter(this::isDelayedZmAnalyticsRow).count();
+            long geleCases = group.stream().filter(row -> isGeleStatus(row.statut())).count();
+
+            Map<String, List<ParsedAnalyticsRow>> byStt = groupAnalyticsRows(
+                    group,
+                    ParsedAnalyticsRow::sttNormalized
+            );
+            ZmTodoAnalyticsSttItemResponse topStt = byStt.values().stream()
+                    .map(sttGroup -> new ZmTodoAnalyticsSttItemResponse(
+                            displayAnalyticsValue(sttGroup, ParsedAnalyticsRow::stt),
+                            sttGroup.size(),
+                            group.isEmpty() ? 0d : round2((sttGroup.size() * 100d) / group.size()),
+                            null,
+                            0L,
+                            0d,
+                            0L,
+                            0d
+                    ))
+                    .max(Comparator
+                            .comparingLong(ZmTodoAnalyticsSttItemResponse::caseCount)
+                            .thenComparing(item -> item.sttName() == null ? "" : item.sttName(), String.CASE_INSENSITIVE_ORDER))
+                    .orElse(null);
+
+            items.add(new ZmTodoAnalyticsGovernorateItemResponse(
+                    displayAnalyticsValue(group, ParsedAnalyticsRow::gouvernorat),
+                    group.size(),
+                    totalCases == 0 ? 0d : round2((group.size() * 100d) / totalCases),
+                    slaValues.isEmpty() ? null : round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d)),
+                    delayedCases,
+                    group.isEmpty() ? 0d : round2((delayedCases * 100d) / group.size()),
+                    geleCases,
+                    group.isEmpty() ? 0d : round2((geleCases * 100d) / group.size()),
+                    topStt != null ? topStt.sttName() : null,
+                    topStt != null ? topStt.caseCount() : 0L
+            ));
+        }
+
+        items.sort(Comparator
+                .comparingLong(ZmTodoAnalyticsGovernorateItemResponse::caseCount).reversed()
+                .thenComparing(item -> item.gouvernorat() == null ? "" : item.gouvernorat(), String.CASE_INSENSITIVE_ORDER));
+        return items;
+    }
+
+    private List<ZmTodoAnalyticsInvalidReasonResponse> summarizeInvalidReasons(List<ParsedAnalyticsRow> invalidRows) {
+        Map<String, Long> summary = new LinkedHashMap<>();
+        Map<String, LinkedHashSet<String>> crmCasesByReason = new LinkedHashMap<>();
+
+        for (ParsedAnalyticsRow row : invalidRows) {
+            List<String> issues = row.issues().isEmpty() ? List.of("Unknown validation issue") : row.issues();
+            for (String issue : issues) {
+                summary.merge(issue, 1L, Long::sum);
+                crmCasesByReason
+                        .computeIfAbsent(issue, ignored -> new LinkedHashSet<>())
+                        .add(hasText(row.crmCase()) ? row.crmCase().trim() : "Row #" + row.rowNumber());
+            }
+        }
+
+        return summary.entrySet().stream()
+                .map(entry -> new ZmTodoAnalyticsInvalidReasonResponse(
+                        entry.getKey(),
+                        entry.getValue(),
+                        new ArrayList<>(crmCasesByReason.getOrDefault(entry.getKey(), new LinkedHashSet<>()))
+                ))
+                .sorted(Comparator
+                        .comparingLong(ZmTodoAnalyticsInvalidReasonResponse::count).reversed()
+                        .thenComparing(ZmTodoAnalyticsInvalidReasonResponse::reason, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+    }
+
+    private List<ZmTodoAnalyticsAlertResponse> buildZmTodoAlerts(
+            ResolvedZmIdentity zmIdentity,
+            long totalCases,
+            int matchedRows,
+            int invalidMatchedRows,
+            List<ZmTodoAnalyticsSttItemResponse> sttBreakdown,
+            List<ZmTodoAnalyticsGovernorateItemResponse> governorateBreakdown,
+            double delayedRate,
+            double geleRate,
+            List<ZmTodoAnalyticsInvalidReasonResponse> invalidReasonSummaries,
+            List<Integer> slaValues
+    ) {
+        List<ZmTodoAnalyticsAlertResponse> alerts = new ArrayList<>();
+
+        if (matchedRows == 0) {
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    "info",
+                    "No matching rows",
+                    "No Excel rows matched your Zone Manager identity using the key " + zmIdentity.displayManagerKey() + "."
+            ));
+            return alerts;
+        }
+
+        if (totalCases == 0) {
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    "warning",
+                    "No analyzable rows",
+                    "Matching rows were found for " + zmIdentity.fullName() + ", but all of them were excluded by validation checks."
+            ));
+        }
+
+        if (!slaValues.isEmpty()) {
+            double averageSla = round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d));
+            if (averageSla > ZM_HIGH_AVERAGE_SLA_THRESHOLD_DAYS) {
+                alerts.add(new ZmTodoAnalyticsAlertResponse(
+                        "warning",
+                        "High SLA",
+                        "Your average SLA is high at " + averageSla + " business day(s)."
+                ));
+            }
+        }
+
+        if (delayedRate >= ZM_HIGH_DELAYED_RATE_THRESHOLD) {
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    delayedRate >= 40d ? "critical" : "warning",
+                    "High delayed rate",
+                    round2(delayedRate) + "% of your analyzed cases are delayed based on the SLA threshold of " + ZM_DELAYED_SLA_THRESHOLD_DAYS + " business day(s)."
+            ));
+        }
+
+        if (geleRate >= ZM_HIGH_GELE_RATE_THRESHOLD) {
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    geleRate >= 25d ? "critical" : "warning",
+                    "High Gelé rate",
+                    round2(geleRate) + "% of your analyzed cases are currently marked as Gelé."
+            ));
+        }
+
+        ZmTodoAnalyticsSttItemResponse topStt = sttBreakdown.isEmpty() ? null : sttBreakdown.get(0);
+        if (topStt != null && topStt.percentage() >= ZM_STT_OVERLOAD_THRESHOLD) {
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    "warning",
+                    "STT overload",
+                    "STT " + topStt.sttName() + " handles " + topStt.percentage() + "% of your workload."
+            ));
+        }
+
+        ZmTodoAnalyticsGovernorateItemResponse worstGovernorate = governorateBreakdown.stream()
+                .filter(item -> item.averageSlaBusinessDays() != null)
+                .max(Comparator.comparingDouble(ZmTodoAnalyticsGovernorateItemResponse::averageSlaBusinessDays))
+                .orElse(null);
+        if (worstGovernorate != null && worstGovernorate.averageSlaBusinessDays() != null
+                && worstGovernorate.averageSlaBusinessDays() >= ZM_WORST_GOVERNORATE_ALERT_THRESHOLD_DAYS) {
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    "warning",
+                    "Worst governorate SLA",
+                    worstGovernorate.gouvernorat() + " has your weakest SLA at " + worstGovernorate.averageSlaBusinessDays() + " business day(s)."
+            ));
+        }
+
+        if (invalidMatchedRows > 0 && !invalidReasonSummaries.isEmpty()) {
+            ZmTodoAnalyticsInvalidReasonResponse topReason = invalidReasonSummaries.get(0);
+            alerts.add(new ZmTodoAnalyticsAlertResponse(
+                    "info",
+                    "Rows excluded from analysis",
+                    invalidMatchedRows + " matched row(s) were excluded. Most common reason: " + topReason.reason() + "."
+            ));
+        }
+
+        return alerts;
+    }
+
+    private List<String> buildZmTodoInsights(
+            ResolvedZmIdentity zmIdentity,
+            long totalCases,
+            List<ZmTodoAnalyticsSttItemResponse> sttBreakdown,
+            List<ZmTodoAnalyticsGovernorateItemResponse> governorateBreakdown,
+            double delayedRate,
+            double geleRate,
+            int invalidMatchedRows,
+            List<ZmTodoAnalyticsInvalidReasonResponse> invalidReasonSummaries,
+            List<Integer> slaValues
+    ) {
+        List<String> insights = new ArrayList<>();
+
+        if (totalCases == 0) {
+            insights.add("No valid analyzable rows were found for " + zmIdentity.fullName() + " in the uploaded file.");
+            if (invalidMatchedRows > 0 && !invalidReasonSummaries.isEmpty()) {
+                insights.add("Matched rows exist, but they were excluded mainly because " + invalidReasonSummaries.get(0).reason().toLowerCase(Locale.ROOT) + ".");
+            }
+            return insights;
+        }
+
+        insights.add("You currently have " + totalCases + " valid case(s) across " + governorateBreakdown.size() + " governorate(s) in this uploaded file.");
+
+        ZmTodoAnalyticsSttItemResponse topStt = sttBreakdown.isEmpty() ? null : sttBreakdown.get(0);
+        if (topStt != null) {
+            insights.add("Most of your workload is assigned to STT " + topStt.sttName() + " with " + topStt.caseCount() + " case(s), representing " + topStt.percentage() + "% of your total volume.");
+        }
+
+        ZmTodoAnalyticsGovernorateItemResponse bestGovernorate = governorateBreakdown.stream()
+                .filter(item -> item.averageSlaBusinessDays() != null)
+                .min(Comparator.comparingDouble(ZmTodoAnalyticsGovernorateItemResponse::averageSlaBusinessDays))
+                .orElse(null);
+        if (bestGovernorate != null && bestGovernorate.averageSlaBusinessDays() != null) {
+            insights.add(bestGovernorate.gouvernorat() + " is your best-performing governorate with an average SLA of " + bestGovernorate.averageSlaBusinessDays() + " business day(s).");
+        }
+
+        ZmTodoAnalyticsGovernorateItemResponse worstGovernorate = governorateBreakdown.stream()
+                .filter(item -> item.averageSlaBusinessDays() != null)
+                .max(Comparator.comparingDouble(ZmTodoAnalyticsGovernorateItemResponse::averageSlaBusinessDays))
+                .orElse(null);
+        if (worstGovernorate != null && worstGovernorate.averageSlaBusinessDays() != null) {
+            insights.add(worstGovernorate.gouvernorat() + " is your weakest governorate on SLA with an average of " + worstGovernorate.averageSlaBusinessDays() + " business day(s).");
+        }
+
+        if (topStt != null && topStt.percentage() >= ZM_STT_OVERLOAD_THRESHOLD) {
+            insights.add("Your workload is highly concentrated on one STT. Consider balancing assignments away from " + topStt.sttName() + ".");
+        }
+
+        if (!slaValues.isEmpty() && round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d)) <= 2d) {
+            insights.add("Your overall SLA is under control, with an average at or below 2 business day(s).");
+        }
+
+        if (delayedRate >= ZM_HIGH_DELAYED_RATE_THRESHOLD) {
+            insights.add("Delayed cases need attention because " + round2(delayedRate) + "% of your analyzed workload exceeded the SLA threshold.");
+        }
+
+        if (geleRate >= ZM_HIGH_GELE_RATE_THRESHOLD) {
+            insights.add("The Gelé status is materially affecting your flow, with " + round2(geleRate) + "% of cases frozen.");
+        }
+
+        if (invalidMatchedRows > 0 && !invalidReasonSummaries.isEmpty()) {
+            insights.add(invalidMatchedRows + " matched row(s) were left out of the study. The leading issue is " + invalidReasonSummaries.get(0).reason().toLowerCase(Locale.ROOT) + ".");
+        }
+
+        return insights;
+    }
+
+    private Map<String, List<ParsedAnalyticsRow>> groupAnalyticsRows(
+            List<ParsedAnalyticsRow> rows,
+            AnalyticsRowValueExtractor normalizedExtractor
+    ) {
+        Map<String, List<ParsedAnalyticsRow>> grouped = new LinkedHashMap<>();
+
+        for (ParsedAnalyticsRow row : rows) {
+            String normalized = normalizedExtractor.extract(row);
+            if (!hasText(normalized)) {
+                continue;
+            }
+
+            grouped.computeIfAbsent(normalized, ignored -> new ArrayList<>()).add(row);
+        }
+
+        return grouped;
+    }
+
+    private String displayAnalyticsValue(List<ParsedAnalyticsRow> rows, AnalyticsRowValueExtractor extractor) {
+        for (ParsedAnalyticsRow row : rows) {
+            String value = extractor.extract(row);
+            if (hasText(value)) {
+                return value.trim();
+            }
+        }
+
+        return null;
+    }
+
+    private boolean isDelayedZmAnalyticsRow(ParsedAnalyticsRow row) {
+        return row != null && row.slaBusinessDays() != null && row.slaBusinessDays() > ZM_DELAYED_SLA_THRESHOLD_DAYS;
+    }
+
+    private boolean isGeleStatus(String statut) {
+        String normalized = normalizeSearchToken(statut);
+        return normalized != null && normalized.contains("gele");
+    }
+
+    private String normalizeSearchToken(String value) {
+        if (!hasText(value)) {
+            return null;
+        }
+
+        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "")
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", " ")
+                .trim()
+                .replaceAll("\\s+", " ");
+
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private ResolvedZmIdentity resolveZmIdentity(String zmEmail) {
+        if (!hasText(zmEmail)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Authenticated Zone Manager email is required");
+        }
+
+        AppUser user = userRepository.findByEmail(zmEmail.trim().toLowerCase(Locale.ROOT))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Connected Zone Manager was not found"));
+
+        if (user.getRole() != UserRole.ROLE_ZM) {
+            throw new AccessDeniedException("Current user is not a Zone Manager");
+        }
+
+        String fullName = hasText(user.getFullName()) ? user.getFullName().trim() : user.getEmail().trim();
+        String excelKey = buildZoneManagerExcelKey(fullName);
+
+        LinkedHashSet<String> normalizedCandidates = new LinkedHashSet<>();
+        if (hasText(excelKey)) {
+            normalizedCandidates.add(normalizeLookupValue(excelKey));
+        }
+        if (hasText(fullName)) {
+            normalizedCandidates.add(normalizeLookupValue(fullName));
+        }
+
+        return new ResolvedZmIdentity(
+                fullName,
+                excelKey,
+                List.copyOf(normalizedCandidates)
+        );
+    }
+
+    private String buildZoneManagerExcelKey(String fullName) {
+        if (!hasText(fullName)) {
+            return null;
+        }
+
+        List<String> nameParts = Arrays.stream(fullName.trim().split("\\s+"))
+                .filter(this::hasText)
+                .toList();
+
+        if (nameParts.isEmpty()) {
+            return null;
+        }
+
+        if (nameParts.size() == 1) {
+            return nameParts.get(0);
+        }
+
+        String firstName = nameParts.get(0);
+        String lastName = String.join(" ", nameParts.subList(1, nameParts.size()));
+        return (lastName + " " + firstName).trim();
+    }
+
+    private double round2(double value) {
+        return Math.round(value * 100d) / 100d;
     }
 
     private void validateFile(MultipartFile file) {
@@ -1711,5 +2376,28 @@ public class TodoImportService {
         private boolean readyToInject() {
             return issues.isEmpty();
         }
+    }
+
+    @FunctionalInterface
+    private interface AnalyticsRowValueExtractor {
+        String extract(ParsedAnalyticsRow row);
+    }
+
+    private record ResolvedZmIdentity(
+            String fullName,
+            String displayManagerKey,
+            List<String> normalizedCandidateKeys
+    ) {
+        private boolean matches(String normalizedZoneManager) {
+            return normalizedZoneManager != null && normalizedCandidateKeys.contains(normalizedZoneManager);
+        }
+    }
+
+    private record PreparedZmAnalytics(
+            List<ParsedAnalyticsRow> matchedRows,
+            List<ParsedAnalyticsRow> validRows,
+            List<ParsedAnalyticsRow> invalidRows,
+            ZmTodoAnalyticsResponse analytics
+    ) {
     }
 }
