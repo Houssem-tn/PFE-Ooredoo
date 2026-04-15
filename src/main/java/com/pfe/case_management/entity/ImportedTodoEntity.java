@@ -7,6 +7,8 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.CompoundIndexes;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
@@ -16,6 +18,20 @@ import java.util.List;
 import java.util.Map;
 
 @Document(collection = "imported_todos")
+@CompoundIndexes({
+        @CompoundIndex(
+                name = "imported_todos_owner_source_zm_crm_idx",
+                def = "{'sourceType': 1, 'uploadedBy': 1, 'zoneManagerNormalized': 1, 'crmCaseNormalized': 1}"
+        ),
+        @CompoundIndex(
+                name = "imported_todos_owner_source_uploaded_idx",
+                def = "{'sourceType': 1, 'uploadedBy': 1, 'uploadedAt': -1}"
+        ),
+        @CompoundIndex(
+                name = "imported_todos_saved_study_owner_idx",
+                def = "{'savedStudyId': 1, 'uploadedBy': 1, 'uploadedAt': -1}"
+        )
+})
 @Getter
 @Setter
 @NoArgsConstructor

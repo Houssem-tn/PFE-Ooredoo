@@ -37,8 +37,11 @@ public class AdminPerformanceImportController {
     private final SavedZmPerformanceStudyService savedZmPerformanceStudyService;
 
     @PostMapping(value = "/preview", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<AdminPerformanceImportPreviewResponse> preview(@RequestParam("file") MultipartFile file) {
-        return ResponseEntity.ok(todoImportService.previewAdminPerformanceImport(file));
+    public ResponseEntity<AdminPerformanceImportPreviewResponse> preview(
+            @RequestParam("file") MultipartFile file,
+            Authentication authentication
+    ) {
+        return ResponseEntity.ok(todoImportService.previewAdminPerformanceImport(file, authentication.getName()));
     }
 
     @PostMapping(value = "/inject", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -54,9 +57,16 @@ public class AdminPerformanceImportController {
             @RequestParam(required = false) String zoneManager,
             @RequestParam(required = false) String gouvernorat,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            Authentication authentication
     ) {
-        return ResponseEntity.ok(zmPerformanceAnalyticsService.getStudy(zoneManager, gouvernorat, uploadedFrom, uploadedTo));
+        return ResponseEntity.ok(zmPerformanceAnalyticsService.getStudy(
+                authentication.getName(),
+                zoneManager,
+                gouvernorat,
+                uploadedFrom,
+                uploadedTo
+        ));
     }
 
     @PostMapping("/save-study")
@@ -71,8 +81,8 @@ public class AdminPerformanceImportController {
     }
 
     @GetMapping("/saved-studies")
-    public ResponseEntity<java.util.List<SavedZmPerformanceStudyResponse>> listSavedStudies() {
-        return ResponseEntity.ok(savedZmPerformanceStudyService.listSavedStudies());
+    public ResponseEntity<java.util.List<SavedZmPerformanceStudyResponse>> listSavedStudies(Authentication authentication) {
+        return ResponseEntity.ok(savedZmPerformanceStudyService.listSavedStudies(authentication.getName()));
     }
 
     @GetMapping("/saved-studies/{studyId}/analytics")
@@ -81,9 +91,17 @@ public class AdminPerformanceImportController {
             @RequestParam(required = false) String zoneManager,
             @RequestParam(required = false) String gouvernorat,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            Authentication authentication
     ) {
-        return ResponseEntity.ok(zmPerformanceAnalyticsService.getSavedStudy(studyId, zoneManager, gouvernorat, uploadedFrom, uploadedTo));
+        return ResponseEntity.ok(zmPerformanceAnalyticsService.getSavedStudy(
+                authentication.getName(),
+                studyId,
+                zoneManager,
+                gouvernorat,
+                uploadedFrom,
+                uploadedTo
+        ));
     }
 
     @GetMapping("/saved-studies/{studyId}/row-quality")
@@ -92,9 +110,11 @@ public class AdminPerformanceImportController {
             @RequestParam(required = false) String zoneManager,
             @RequestParam(required = false) String gouvernorat,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            Authentication authentication
     ) {
         return ResponseEntity.ok(savedZmPerformanceStudyService.getSavedStudyRowQuality(
+                authentication.getName(),
                 studyId,
                 zoneManager,
                 gouvernorat,

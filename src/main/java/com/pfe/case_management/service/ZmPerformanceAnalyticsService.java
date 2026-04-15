@@ -5,7 +5,9 @@ import com.pfe.case_management.dto.ZmPerformanceGovernorateSttItemResponse;
 import com.pfe.case_management.dto.ZmPerformanceStudyResponse;
 import com.pfe.case_management.dto.ZmPerformanceSttBreakdownItemResponse;
 import com.pfe.case_management.entity.ImportedTodoEntity;
+import com.pfe.case_management.entity.SavedZmPerformanceStudyEntity;
 import com.pfe.case_management.model.ImportedTodoSourceType;
+import com.pfe.case_management.repository.SavedZmPerformanceStudyRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -52,14 +54,17 @@ public class ZmPerformanceAnalyticsService {
     private static final Map<String, String> TUNISIA_GOVERNORATE_ALIASES = buildTunisiaGovernorateAliases();
 
     private final MongoTemplate mongoTemplate;
+    private final SavedZmPerformanceStudyRepository savedZmPerformanceStudyRepository;
 
     public ZmPerformanceStudyResponse getStudy(
+            String uploadedBy,
             String zoneManager,
             String governorate,
             LocalDate uploadedFrom,
             LocalDate uploadedTo
     ) {
         List<ImportedTodoEntity> validRows = loadAnalyticsRows(
+                uploadedBy,
                 ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT,
                 null,
                 uploadedFrom,
@@ -69,6 +74,7 @@ public class ZmPerformanceAnalyticsService {
     }
 
     public ZmPerformanceStudyResponse getSavedStudy(
+            String uploadedBy,
             String savedStudyId,
             String zoneManager,
             String governorate,
@@ -79,7 +85,10 @@ public class ZmPerformanceAnalyticsService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Saved study id is required");
         }
 
+        resolveOwnedSavedStudy(savedStudyId, uploadedBy);
+
         List<ImportedTodoEntity> validRows = loadAnalyticsRows(
+                uploadedBy,
                 ImportedTodoSourceType.SAVED_ADMIN_PERFORMANCE_IMPORT,
                 savedStudyId.trim(),
                 uploadedFrom,
@@ -172,6 +181,7 @@ public class ZmPerformanceAnalyticsService {
     }
 
     private List<ImportedTodoEntity> loadAnalyticsRows(
+            String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
             LocalDate uploadedFrom,
@@ -181,6 +191,7 @@ public class ZmPerformanceAnalyticsService {
 
         Query query = new Query();
         query.addCriteria(Criteria.where("sourceType").is(sourceType));
+        query.addCriteria(Criteria.where("uploadedBy").is(uploadedBy));
         query.addCriteria(Criteria.where("validRow").is(true));
 
         if (hasText(savedStudyId)) {
@@ -199,6 +210,11 @@ public class ZmPerformanceAnalyticsService {
         }
 
         return mongoTemplate.find(query, ImportedTodoEntity.class);
+    }
+
+    private SavedZmPerformanceStudyEntity resolveOwnedSavedStudy(String savedStudyId, String uploadedBy) {
+        return savedZmPerformanceStudyRepository.findByIdAndSavedBy(savedStudyId.trim(), uploadedBy)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved study was not found"));
     }
 
     private void validateUploadedRange(LocalDate uploadedFrom, LocalDate uploadedTo) {

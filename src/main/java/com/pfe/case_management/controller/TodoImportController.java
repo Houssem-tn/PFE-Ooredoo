@@ -62,9 +62,10 @@ public class TodoImportController {
     @PostMapping(value = "/preview", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<TodoImportPreviewResponse> preview(
             @RequestParam("file") MultipartFile file,
-            @RequestParam("managerFilter") String managerFilter
+            @RequestParam("managerFilter") String managerFilter,
+            Authentication authentication
     ) {
-        return ResponseEntity.ok(todoImportService.preview(file, managerFilter));
+        return ResponseEntity.ok(todoImportService.preview(file, managerFilter, authentication.getName()));
     }
 
     @PostMapping(value = "/inject", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

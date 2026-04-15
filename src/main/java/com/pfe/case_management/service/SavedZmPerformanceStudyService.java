@@ -37,7 +37,10 @@ public class SavedZmPerformanceStudyService {
     private final SavedZmPerformanceStudyRepository savedZmPerformanceStudyRepository;
 
     public SavedZmPerformanceStudyResponse saveCurrentStudy(String savedBy, SaveZmPerformanceStudyRequest request) {
-        Query stagingQuery = new Query(Criteria.where("sourceType").is(ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT));
+        Query stagingQuery = new Query(new Criteria().andOperator(
+                Criteria.where("sourceType").is(ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT),
+                Criteria.where("uploadedBy").is(savedBy)
+        ));
         List<ImportedTodoEntity> stagingRows = mongoTemplate.find(stagingQuery, ImportedTodoEntity.class);
 
         if (stagingRows.isEmpty()) {
@@ -70,13 +73,14 @@ public class SavedZmPerformanceStudyService {
         return toResponse(savedEntity);
     }
 
-    public List<SavedZmPerformanceStudyResponse> listSavedStudies() {
-        return savedZmPerformanceStudyRepository.findAllByOrderBySavedAtDesc().stream()
+    public List<SavedZmPerformanceStudyResponse> listSavedStudies(String savedBy) {
+        return savedZmPerformanceStudyRepository.findAllBySavedByOrderBySavedAtDesc(savedBy).stream()
                 .map(this::toResponse)
                 .toList();
     }
 
     public SavedZmPerformanceRowQualityResponse getSavedStudyRowQuality(
+            String savedBy,
             String savedStudyId,
             String zoneManager,
             String governorate,
@@ -89,12 +93,13 @@ public class SavedZmPerformanceStudyService {
 
         validateUploadedRange(uploadedFrom, uploadedTo);
 
-        SavedZmPerformanceStudyEntity study = savedZmPerformanceStudyRepository.findById(savedStudyId.trim())
+        SavedZmPerformanceStudyEntity study = savedZmPerformanceStudyRepository.findByIdAndSavedBy(savedStudyId.trim(), savedBy)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved study was not found"));
 
         Query query = new Query();
         query.addCriteria(Criteria.where("sourceType").is(ImportedTodoSourceType.SAVED_ADMIN_PERFORMANCE_IMPORT));
         query.addCriteria(Criteria.where("savedStudyId").is(savedStudyId.trim()));
+        query.addCriteria(Criteria.where("uploadedBy").is(savedBy));
 
         if (hasText(zoneManager)) {
             query.addCriteria(Criteria.where("zoneManagerNormalized").is(zoneManager.trim().toLowerCase(Locale.ROOT)));

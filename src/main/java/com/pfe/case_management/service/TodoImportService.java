@@ -139,8 +139,8 @@ public class TodoImportService {
     private final UserRepository userRepository;
     private final ZmTodoAnalysisService zmTodoAnalysisService;
 
-    public AdminPerformanceImportPreviewResponse previewAdminPerformanceImport(MultipartFile file) {
-        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+    public AdminPerformanceImportPreviewResponse previewAdminPerformanceImport(MultipartFile file, String uploadedBy) {
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, uploadedBy);
         return new AdminPerformanceImportPreviewResponse(
                 parsedImport.sourceFileName(),
                 parsedImport.totalRows(),
@@ -157,7 +157,7 @@ public class TodoImportService {
     }
 
     public AdminPerformanceImportInjectResponse injectAdminPerformanceImport(MultipartFile file, String uploadedBy) {
-        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, uploadedBy);
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
@@ -182,15 +182,15 @@ public class TodoImportService {
     }
 
     public ZmTodoAnalyticsResponse analyzeForZm(MultipartFile file, String zmEmail) {
-        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, null);
         ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
-        return prepareZmAnalytics(parsedImport, zmIdentity, false).analytics();
+        return prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, false).analytics();
     }
 
     public ZmTodoImportProcessResponse processForZm(MultipartFile file, String zmEmail) {
-        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file);
+        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, null);
         ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
-        PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, true);
+        PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, true);
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
@@ -228,6 +228,7 @@ public class TodoImportService {
     private PreparedZmAnalytics prepareZmAnalytics(
             ParsedAnalyticsImport parsedImport,
             ResolvedZmIdentity zmIdentity,
+            String uploadedBy,
             boolean annotateDuplicates
     ) {
         List<ParsedAnalyticsRow> matchedRows = parsedImport.previewRows().stream()
@@ -235,7 +236,7 @@ public class TodoImportService {
                 .toList();
 
         List<ParsedAnalyticsRow> preparedRows = annotateDuplicates
-                ? annotateDuplicateAnalyticsRows(matchedRows)
+                ? annotateDuplicateAnalyticsRows(uploadedBy, matchedRows)
                 : matchedRows;
 
         List<ParsedAnalyticsRow> validRows = preparedRows.stream()
@@ -408,8 +409,8 @@ public class TodoImportService {
         return new ImportedTodoPageResponse(items, totalElements, totalPages, safePage, safeSize);
     }
 
-    public TodoImportPreviewResponse preview(MultipartFile file, String managerFilter) {
-        ParsedImport parsedImport = parseWorkbook(file, managerFilter);
+    public TodoImportPreviewResponse preview(MultipartFile file, String managerFilter, String uploadedBy) {
+        ParsedImport parsedImport = parseWorkbook(file, managerFilter, uploadedBy);
         return new TodoImportPreviewResponse(
                 parsedImport.sourceFileName(),
                 parsedImport.managerFilterUsed(),
@@ -426,7 +427,7 @@ public class TodoImportService {
     }
 
     public TodoImportInjectResponse inject(MultipartFile file, String managerFilter, String uploadedBy) {
-        ParsedImport parsedImport = parseWorkbook(file, managerFilter);
+        ParsedImport parsedImport = parseWorkbook(file, managerFilter, uploadedBy);
 
         if (parsedImport.readyRows() == 0) {
             throw new ResponseStatusException(
@@ -457,7 +458,7 @@ public class TodoImportService {
         );
     }
 
-    private ParsedImport parseWorkbook(MultipartFile file, String managerFilter) {
+    private ParsedImport parseWorkbook(MultipartFile file, String managerFilter, String uploadedBy) {
         validateFile(file);
 
         String normalizedManagerFilter = normalizeLookupValue(managerFilter);
@@ -508,7 +509,7 @@ public class TodoImportService {
                 matchedRows.add(buildPreviewRow(rowIndex + 1, sourceValues));
             }
 
-            List<ParsedPreviewRow> annotatedRows = annotateDuplicateRows(normalizedManagerFilter, matchedRows);
+            List<ParsedPreviewRow> annotatedRows = annotateDuplicateRows(uploadedBy, matchedRows);
             int invalidRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasValidationIssue).count();
             int duplicateRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasDuplicateIssue).count();
             int readyRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::readyToInject).count();
@@ -533,7 +534,7 @@ public class TodoImportService {
         } catch (IOException ex) {
             if (shouldAttemptFallback(sourceFileName, ex)) {
                 try {
-                    return parseStructuredTextWorkbook(file, managerFilter.trim(), normalizedManagerFilter, sourceFileName);
+                    return parseStructuredTextWorkbook(file, managerFilter.trim(), normalizedManagerFilter, sourceFileName, uploadedBy);
                 } catch (Exception fallbackEx) {
                     log.warn("Failed to read structured-text spreadsheet fallback for {}", sourceFileName, fallbackEx);
                     throw new ResponseStatusException(
@@ -549,7 +550,7 @@ public class TodoImportService {
         }
     }
 
-    private ParsedAnalyticsImport parseAdminPerformanceWorkbook(MultipartFile file) {
+    private ParsedAnalyticsImport parseAdminPerformanceWorkbook(MultipartFile file, String uploadedBy) {
         validateFile(file);
 
         String sourceFileName = resolveSourceFileName(file);
@@ -584,7 +585,7 @@ public class TodoImportService {
                 sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
             }
 
-            return buildAnalyticsImport(sourceFileName, sourceRows);
+            return buildAnalyticsImport(sourceFileName, sourceRows, uploadedBy);
         } catch (EncryptedDocumentException ex) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
@@ -594,7 +595,7 @@ public class TodoImportService {
         } catch (IOException ex) {
             if (shouldAttemptFallback(sourceFileName, ex)) {
                 try {
-                    return parseAdminStructuredTextWorkbook(file, sourceFileName);
+                    return parseAdminStructuredTextWorkbook(file, sourceFileName, uploadedBy);
                 } catch (Exception fallbackEx) {
                     log.warn("Failed to read admin analytics spreadsheet fallback for {}", sourceFileName, fallbackEx);
                     throw new ResponseStatusException(
@@ -610,14 +611,18 @@ public class TodoImportService {
         }
     }
 
-    private ParsedAnalyticsImport parseAdminStructuredTextWorkbook(MultipartFile file, String sourceFileName) throws Exception {
+    private ParsedAnalyticsImport parseAdminStructuredTextWorkbook(
+            MultipartFile file,
+            String sourceFileName,
+            String uploadedBy
+    ) throws Exception {
         byte[] bytes = file.getBytes();
         String content = decodeTextContent(bytes);
         List<String> failures = new ArrayList<>();
 
         if (looksLikeSpreadsheetXml(content)) {
             try {
-                return buildAnalyticsImport(sourceFileName, toSourceRows(parseSpreadsheetXmlMatrix(bytes)));
+                return buildAnalyticsImport(sourceFileName, toSourceRows(parseSpreadsheetXmlMatrix(bytes)), uploadedBy);
             } catch (Exception ex) {
                 failures.add(sanitizeErrorMessage(deepestMessage(ex)));
             }
@@ -625,14 +630,14 @@ public class TodoImportService {
 
         if (looksLikeHtml(content)) {
             try {
-                return buildAnalyticsImport(sourceFileName, toSourceRows(parseHtmlMatrix(content)));
+                return buildAnalyticsImport(sourceFileName, toSourceRows(parseHtmlMatrix(content)), uploadedBy);
             } catch (Exception ex) {
                 failures.add(sanitizeErrorMessage(deepestMessage(ex)));
             }
         }
 
         try {
-            return buildAnalyticsImport(sourceFileName, toSourceRows(parseDelimitedMatrix(content)));
+            return buildAnalyticsImport(sourceFileName, toSourceRows(parseDelimitedMatrix(content)), uploadedBy);
         } catch (Exception ex) {
             failures.add(sanitizeErrorMessage(deepestMessage(ex)));
         }
@@ -668,7 +673,7 @@ public class TodoImportService {
         return sourceRows;
     }
 
-    private ParsedAnalyticsImport buildAnalyticsImport(String sourceFileName, List<SourceRow> sourceRows) {
+    private ParsedAnalyticsImport buildAnalyticsImport(String sourceFileName, List<SourceRow> sourceRows, String uploadedBy) {
         Set<String> crmCases = sourceRows.stream()
                 .map(row -> normalizeLookupValue(row.sourceValues().get("CRM_CASE")))
                 .filter(this::hasText)
@@ -679,7 +684,9 @@ public class TodoImportService {
                 .filter(this::hasText)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
 
-        Set<String> existingDuplicateKeys = findExistingAdminDuplicateKeys(crmCases, zoneManagers);
+        Set<String> existingDuplicateKeys = hasText(uploadedBy)
+                ? findExistingAdminDuplicateKeys(uploadedBy, crmCases, zoneManagers)
+                : Set.of();
         Set<String> seenInFile = new LinkedHashSet<>();
         Set<String> distinctZoneManagers = new LinkedHashSet<>();
         Set<String> distinctStts = new LinkedHashSet<>();
@@ -709,7 +716,7 @@ public class TodoImportService {
                 }
 
                 if (existingDuplicateKeys.contains(duplicateKey)) {
-                    issues.add("Duplicate CRM_CASE already imported for this Zone Manager in performance analytics");
+                    issues.add("Duplicate CRM_CASE already imported for this Zone Manager in your admin analytics context");
                 }
             }
 
@@ -792,7 +799,7 @@ public class TodoImportService {
         );
     }
 
-    private Set<String> findExistingAdminDuplicateKeys(Set<String> crmCases, Set<String> zoneManagers) {
+    private Set<String> findExistingAdminDuplicateKeys(String uploadedBy, Set<String> crmCases, Set<String> zoneManagers) {
         if (crmCases.isEmpty() || zoneManagers.isEmpty()) {
             return Set.of();
         }
@@ -802,6 +809,7 @@ public class TodoImportService {
                 ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT,
                 ImportedTodoSourceType.SAVED_ADMIN_PERFORMANCE_IMPORT
         ));
+        query.addCriteria(Criteria.where("uploadedBy").is(uploadedBy));
         query.addCriteria(Criteria.where("crmCaseNormalized").in(crmCases));
         query.addCriteria(Criteria.where("zoneManagerNormalized").in(zoneManagers));
 
@@ -906,7 +914,8 @@ public class TodoImportService {
             MultipartFile file,
             String managerFilter,
             String normalizedManagerFilter,
-            String sourceFileName
+            String sourceFileName,
+            String uploadedBy
     ) throws Exception {
         byte[] bytes = file.getBytes();
         String content = decodeTextContent(bytes);
@@ -914,7 +923,13 @@ public class TodoImportService {
 
         if (looksLikeSpreadsheetXml(content)) {
             try {
-                return parseMatrixBasedImport(parseSpreadsheetXmlMatrix(bytes), managerFilter, normalizedManagerFilter, sourceFileName);
+                return parseMatrixBasedImport(
+                        parseSpreadsheetXmlMatrix(bytes),
+                        managerFilter,
+                        normalizedManagerFilter,
+                        sourceFileName,
+                        uploadedBy
+                );
             } catch (Exception ex) {
                 failures.add(sanitizeErrorMessage(deepestMessage(ex)));
             }
@@ -922,14 +937,26 @@ public class TodoImportService {
 
         if (looksLikeHtml(content)) {
             try {
-                return parseMatrixBasedImport(parseHtmlMatrix(content), managerFilter, normalizedManagerFilter, sourceFileName);
+                return parseMatrixBasedImport(
+                        parseHtmlMatrix(content),
+                        managerFilter,
+                        normalizedManagerFilter,
+                        sourceFileName,
+                        uploadedBy
+                );
             } catch (Exception ex) {
                 failures.add(sanitizeErrorMessage(deepestMessage(ex)));
             }
         }
 
         try {
-            return parseMatrixBasedImport(parseDelimitedMatrix(content), managerFilter, normalizedManagerFilter, sourceFileName);
+            return parseMatrixBasedImport(
+                    parseDelimitedMatrix(content),
+                    managerFilter,
+                    normalizedManagerFilter,
+                    sourceFileName,
+                    uploadedBy
+            );
         } catch (Exception ex) {
             failures.add(sanitizeErrorMessage(deepestMessage(ex)));
         }
@@ -948,7 +975,8 @@ public class TodoImportService {
             List<List<String>> matrix,
             String managerFilter,
             String normalizedManagerFilter,
-            String sourceFileName
+            String sourceFileName,
+            String uploadedBy
     ) {
         if (matrix.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded spreadsheet does not contain any data rows");
@@ -979,7 +1007,7 @@ public class TodoImportService {
             matchedRows.add(buildPreviewRow(rowIndex + 1, sourceValues));
         }
 
-        List<ParsedPreviewRow> annotatedRows = annotateDuplicateRows(normalizedManagerFilter, matchedRows);
+        List<ParsedPreviewRow> annotatedRows = annotateDuplicateRows(uploadedBy, matchedRows);
         int invalidRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasValidationIssue).count();
         int duplicateRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasDuplicateIssue).count();
         int readyRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::readyToInject).count();
@@ -1185,7 +1213,7 @@ public class TodoImportService {
         );
     }
 
-    private List<ParsedPreviewRow> annotateDuplicateRows(String normalizedManagerFilter, List<ParsedPreviewRow> rows) {
+    private List<ParsedPreviewRow> annotateDuplicateRows(String uploadedBy, List<ParsedPreviewRow> rows) {
         if (rows.isEmpty()) {
             return rows;
         }
@@ -1197,9 +1225,12 @@ public class TodoImportService {
 
         Set<String> existingCrmCases = crmCases.isEmpty()
                 ? Set.of()
-                : importedZmTodoRepository.findByZoneManagerNormalizedAndCrmCaseNormalizedIn(normalizedManagerFilter, crmCases)
+                : importedZmTodoRepository.findByUploadedByAndSourceTypeAndCrmCaseNormalizedIn(
+                        uploadedBy,
+                        ImportedTodoSourceType.ZM_TODO_INJECTION,
+                        crmCases
+                )
                 .stream()
-                .filter(entity -> entity.getSourceType() == null || entity.getSourceType() == ImportedTodoSourceType.ZM_TODO_INJECTION)
                 .map(ImportedZmTodoEntity::getCrmCaseNormalized)
                 .filter(this::hasText)
                 .collect(Collectors.toSet());
@@ -1217,7 +1248,7 @@ public class TodoImportService {
                 }
 
                 if (existingCrmCases.contains(crmCaseNormalized)) {
-                    issues.add("Duplicate CRM_CASE already imported for this zone manager");
+                    issues.add("Duplicate CRM_CASE already imported in your ZM todo context");
                 }
             }
 
@@ -1227,35 +1258,26 @@ public class TodoImportService {
         return annotatedRows;
     }
 
-    private List<ParsedAnalyticsRow> annotateDuplicateAnalyticsRows(List<ParsedAnalyticsRow> rows) {
+    private List<ParsedAnalyticsRow> annotateDuplicateAnalyticsRows(String uploadedBy, List<ParsedAnalyticsRow> rows) {
         if (rows.isEmpty()) {
             return rows;
         }
 
-        Map<String, Set<String>> existingCrmCasesByManager = new LinkedHashMap<>();
-        Map<String, Set<String>> crmCasesByManager = new LinkedHashMap<>();
+        Set<String> crmCases = rows.stream()
+                .map(ParsedAnalyticsRow::crmCaseNormalized)
+                .filter(this::hasText)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
 
-        for (ParsedAnalyticsRow row : rows) {
-            if (!hasText(row.zoneManagerNormalized()) || !hasText(row.crmCaseNormalized())) {
-                continue;
-            }
-
-            crmCasesByManager
-                    .computeIfAbsent(row.zoneManagerNormalized(), ignored -> new LinkedHashSet<>())
-                    .add(row.crmCaseNormalized());
-        }
-
-        for (Map.Entry<String, Set<String>> entry : crmCasesByManager.entrySet()) {
-            Set<String> existingCrmCases = importedZmTodoRepository
-                    .findByZoneManagerNormalizedAndCrmCaseNormalizedIn(entry.getKey(), entry.getValue())
-                    .stream()
-                    .filter(entity -> entity.getSourceType() == null || entity.getSourceType() == ImportedTodoSourceType.ZM_TODO_INJECTION)
-                    .map(ImportedZmTodoEntity::getCrmCaseNormalized)
-                    .filter(this::hasText)
-                    .collect(Collectors.toSet());
-
-            existingCrmCasesByManager.put(entry.getKey(), existingCrmCases);
-        }
+        Set<String> existingCrmCases = crmCases.isEmpty()
+                ? Set.of()
+                : importedZmTodoRepository.findByUploadedByAndSourceTypeAndCrmCaseNormalizedIn(
+                        uploadedBy,
+                        ImportedTodoSourceType.ZM_TODO_INJECTION,
+                        crmCases
+                ).stream()
+                .map(ImportedZmTodoEntity::getCrmCaseNormalized)
+                .filter(this::hasText)
+                .collect(Collectors.toSet());
 
         Set<String> seenInWorkbook = new LinkedHashSet<>();
         List<ParsedAnalyticsRow> annotatedRows = new ArrayList<>();
@@ -1263,17 +1285,14 @@ public class TodoImportService {
         for (ParsedAnalyticsRow row : rows) {
             List<String> issues = new ArrayList<>(row.issues());
             String crmCaseNormalized = row.crmCaseNormalized();
-            String zoneManagerNormalized = row.zoneManagerNormalized();
 
-            if (hasText(crmCaseNormalized) && hasText(zoneManagerNormalized)) {
-                String duplicateKey = zoneManagerNormalized + "::" + crmCaseNormalized;
-
-                if (!seenInWorkbook.add(duplicateKey)) {
+            if (hasText(crmCaseNormalized)) {
+                if (!seenInWorkbook.add(crmCaseNormalized)) {
                     issues.add("Duplicate CRM_CASE inside the selected file");
                 }
 
-                if (existingCrmCasesByManager.getOrDefault(zoneManagerNormalized, Set.of()).contains(crmCaseNormalized)) {
-                    issues.add("Duplicate CRM_CASE already imported for this zone manager");
+                if (existingCrmCases.contains(crmCaseNormalized)) {
+                    issues.add("Duplicate CRM_CASE already imported in your ZM todo context");
                 }
             }
 
