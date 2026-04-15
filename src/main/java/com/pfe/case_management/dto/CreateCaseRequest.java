@@ -25,6 +25,7 @@ public record CreateCaseRequest(
         String longitude,
         String localite,
         String delegation,
+        @NotBlank(message = "gouvernorat is required")
         String gouvernorat,
         String siteSecteur,
 

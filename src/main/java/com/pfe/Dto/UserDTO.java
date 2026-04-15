@@ -4,6 +4,7 @@ import com.pfe.Entity.AccountStatus;
 import com.pfe.Entity.UserRole;
 
 import java.time.Instant;
+import java.util.List;
 
 public record UserDTO(
         String id,
@@ -30,6 +31,9 @@ public record UserDTO(
 
         String assignedZmId,
         String assignedZmEmail,
+        List<String> assignedGovernorates,
+        List<String> coveredGovernorates,
+        List<String> requestedGovernorates,
 
         String profileImageFileId,
         String profileImageUrl,

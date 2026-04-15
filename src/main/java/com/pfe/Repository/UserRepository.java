@@ -5,6 +5,7 @@ import com.pfe.Entity.AppUser;
 import com.pfe.Entity.UserRole;
 import org.springframework.data.mongodb.repository.MongoRepository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -54,4 +55,6 @@ public interface UserRepository extends MongoRepository<AppUser, String> {
     );
 
     List<AppUser> findByRoleOrderByFullNameAsc(UserRole role);
+
+    List<AppUser> findByRoleAndAssignedGovernoratesIn(UserRole role, Collection<String> assignedGovernorates);
 }

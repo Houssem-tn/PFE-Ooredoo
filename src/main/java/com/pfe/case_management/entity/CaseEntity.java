@@ -53,6 +53,9 @@ public class CaseEntity {
     private String delegation;
     private String gouvernorat;
     private String siteSecteur;
+    private String ownerZmId;
+    private String ownerZmName;
+    private String assignedSttId;
 
     // Commercial / offer
     private String offre;

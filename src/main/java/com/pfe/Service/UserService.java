@@ -14,10 +14,42 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @Service
 public class UserService {
+    private static final List<String> TUNISIA_GOVERNORATES = List.of(
+            "Tunis",
+            "Ariana",
+            "Ben Arous",
+            "Mannouba",
+            "Nabeul",
+            "Zaghouan",
+            "Bizerte",
+            "B\u00E9ja",
+            "Jendouba",
+            "Le Kef",
+            "Siliana",
+            "Sousse",
+            "Monastir",
+            "Mahdia",
+            "Sfax",
+            "Kairouan",
+            "Kasserine",
+            "Sidi Bouzid",
+            "Gab\u00E8s",
+            "M\u00E9denine",
+            "Tataouine",
+            "Gafsa",
+            "Tozeur",
+            "K\u00E9bili"
+    );
+    private static final Set<String> TUNISIA_GOVERNORATE_SET = Set.copyOf(TUNISIA_GOVERNORATES);
 
     private final UserRepository repo;
     private final UserMapper mapper;
@@ -166,8 +198,31 @@ public class UserService {
             throw new AccessDeniedException("Current user is not a ZM");
         }
 
-        return repo.findByRoleAndAssignedZmIdOrderByFullNameAsc(UserRole.ROLE_STT, zm.getId())
+        List<String> governorates = safeGovernorates(zm.getAssignedGovernorates());
+
+        return repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_STT)
                 .stream()
+                .filter(stt -> stt.getStatus() == AccountStatus.APPROVED)
+                .filter(AppUser::isEnabled)
+                .filter(stt -> hasGovernorateOverlap(governorates, stt.getCoveredGovernorates()))
+                .map(mapper::toDto)
+                .toList();
+    }
+
+    public List<UserDTO> findMySttCoverageRequests(String zmEmail) {
+        AppUser zm = repo.findByEmail(zmEmail.toLowerCase())
+                .orElseThrow(() -> new NotFoundException("ZM not found: " + zmEmail));
+
+        if (zm.getRole() != UserRole.ROLE_ZM) {
+            throw new AccessDeniedException("Current user is not a ZM");
+        }
+
+        List<String> territory = safeGovernorates(zm.getAssignedGovernorates());
+
+        return repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_STT).stream()
+                .filter(stt -> stt.getStatus() == AccountStatus.APPROVED)
+                .filter(AppUser::isEnabled)
+                .filter(stt -> hasGovernorateOverlap(territory, stt.getRequestedGovernorates()))
                 .map(mapper::toDto)
                 .toList();
     }
@@ -187,14 +242,84 @@ public class UserService {
             throw new IllegalArgumentException("Selected user is not an STT");
         }
 
-        if (stt.getAssignedZmId() == null || !stt.getAssignedZmId().equals(zm.getId())) {
-            throw new AccessDeniedException("This STT is not assigned to the current ZM");
+        if (!hasGovernorateOverlap(zm.getAssignedGovernorates(), stt.getCoveredGovernorates())) {
+            throw new AccessDeniedException("This STT does not cover the current ZM territory");
         }
 
         return repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(UserRole.ROLE_TECH, sttId)
                 .stream()
                 .map(mapper::toDto)
                 .toList();
+    }
+
+    public UserDTO requestCoverageAreas(String sttEmail, List<String> requestedGovernorates) {
+        AppUser stt = repo.findByEmail(sttEmail.toLowerCase())
+                .orElseThrow(() -> new NotFoundException("STT not found: " + sttEmail));
+
+        if (stt.getRole() != UserRole.ROLE_STT) {
+            throw new AccessDeniedException("Current user is not an STT");
+        }
+
+        if (stt.getStatus() != AccountStatus.APPROVED || !stt.isEnabled()) {
+            throw new AccessDeniedException("Your account is not active");
+        }
+
+        List<String> normalizedSelection = normalizeGovernoratesAllowEmpty(requestedGovernorates);
+        List<String> currentCoverage = safeGovernorates(stt.getCoveredGovernorates());
+        List<String> pendingRequest = normalizedSelection.stream()
+                .filter(governorate -> !currentCoverage.contains(governorate))
+                .toList();
+
+        ensureGovernoratesHaveOwningZm(pendingRequest);
+
+        stt.setRequestedGovernorates(pendingRequest);
+        return mapper.toDto(repo.save(stt));
+    }
+
+    public UserDTO validateCoverageAreas(String zmEmail, String sttId, List<String> approvedGovernorates) {
+        AppUser zm = repo.findByEmail(zmEmail.toLowerCase())
+                .orElseThrow(() -> new NotFoundException("ZM not found: " + zmEmail));
+
+        if (zm.getRole() != UserRole.ROLE_ZM) {
+            throw new AccessDeniedException("Current user is not a ZM");
+        }
+
+        if (zm.getStatus() != AccountStatus.APPROVED || !zm.isEnabled()) {
+            throw new AccessDeniedException("Your account is not active");
+        }
+
+        AppUser stt = repo.findById(sttId)
+                .orElseThrow(() -> new NotFoundException("STT not found: " + sttId));
+
+        if (stt.getRole() != UserRole.ROLE_STT) {
+            throw new IllegalArgumentException("Selected user is not an STT");
+        }
+
+        List<String> normalizedGovernorates = normalizeGovernoratesRequireSelection(approvedGovernorates);
+        List<String> zmTerritory = safeGovernorates(zm.getAssignedGovernorates());
+        List<String> pendingGovernorates = safeGovernorates(stt.getRequestedGovernorates());
+
+        for (String governorate : normalizedGovernorates) {
+            if (!zmTerritory.contains(governorate)) {
+                throw new AccessDeniedException("Governorate " + governorate + " is outside your territory");
+            }
+
+            if (!pendingGovernorates.contains(governorate)) {
+                throw new IllegalArgumentException("Governorate " + governorate + " is not pending validation for this STT");
+            }
+        }
+
+        LinkedHashSet<String> updatedCoverage = new LinkedHashSet<>(safeGovernorates(stt.getCoveredGovernorates()));
+        updatedCoverage.addAll(normalizedGovernorates);
+
+        stt.setCoveredGovernorates(orderGovernorates(updatedCoverage));
+        stt.setRequestedGovernorates(
+                pendingGovernorates.stream()
+                        .filter(governorate -> !normalizedGovernorates.contains(governorate))
+                        .toList()
+        );
+
+        return mapper.toDto(repo.save(stt));
     }
 
     public UserDTO uploadProfileImage(String userId, MultipartFile file, Authentication authentication) {
@@ -289,14 +414,18 @@ public class UserService {
                 );
             }
             case ROLE_ZM -> {
-                List<AppUser> stts = repo.findByRoleAndAssignedZmIdOrderByFullNameAsc(
-                        UserRole.ROLE_STT,
-                        user.getId()
-                );
-                List<AppUser> techs = repo.findByRoleAndAssignedZmIdOrderByFullNameAsc(
-                        UserRole.ROLE_TECH,
-                        user.getId()
-                );
+                List<AppUser> stts = repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_STT).stream()
+                        .filter(candidate -> hasGovernorateOverlap(user.getAssignedGovernorates(), candidate.getCoveredGovernorates()))
+                        .toList();
+
+                Set<String> sttIds = stts.stream()
+                        .map(AppUser::getId)
+                        .filter(this::hasText)
+                        .collect(LinkedHashSet::new, Set::add, Set::addAll);
+
+                List<AppUser> techs = sttIds.stream()
+                        .flatMap(sttId -> repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(UserRole.ROLE_TECH, sttId).stream())
+                        .toList();
 
                 yield new UserHierarchyAuditDTO(
                         stts.size(),
@@ -433,5 +562,123 @@ public class UserService {
 
     private String normalizeEmail(String email) {
         return hasText(email) ? email.trim().toLowerCase() : null;
+    }
+
+    private boolean hasGovernorateOverlap(List<String> left, List<String> right) {
+        Set<String> leftSet = safeGovernorates(left).stream()
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .collect(LinkedHashSet::new, Set::add, Set::addAll);
+
+        if (leftSet.isEmpty()) {
+            return false;
+        }
+
+        return safeGovernorates(right).stream()
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .anyMatch(leftSet::contains);
+    }
+
+    private List<String> safeGovernorates(List<String> governorates) {
+        return governorates == null ? List.of() : governorates;
+    }
+
+    private List<String> normalizeGovernoratesAllowEmpty(List<String> governorates) {
+        if (governorates == null || governorates.isEmpty()) {
+            return List.of();
+        }
+
+        LinkedHashSet<String> requestedGovernorates = new LinkedHashSet<>();
+        for (String governorate : governorates) {
+            if (!hasText(governorate)) {
+                throw new IllegalArgumentException("Governorate names cannot be blank");
+            }
+            requestedGovernorates.add(governorate.trim());
+        }
+
+        return orderGovernorates(requestedGovernorates);
+    }
+
+    private List<String> normalizeGovernoratesRequireSelection(List<String> governorates) {
+        List<String> normalizedGovernorates = normalizeGovernoratesAllowEmpty(governorates);
+        if (normalizedGovernorates.isEmpty()) {
+            throw new IllegalArgumentException("At least one governorate must be selected");
+        }
+        return normalizedGovernorates;
+    }
+
+    private List<String> orderGovernorates(Collection<String> governorates) {
+        if (governorates == null || governorates.isEmpty()) {
+            return List.of();
+        }
+
+        LinkedHashSet<String> selectedGovernorates = new LinkedHashSet<>();
+        for (String governorate : governorates) {
+            if (!hasText(governorate)) {
+                throw new IllegalArgumentException("Governorate names cannot be blank");
+            }
+
+            String normalizedGovernorate = governorate.trim();
+            if (!TUNISIA_GOVERNORATE_SET.contains(normalizedGovernorate)) {
+                throw new IllegalArgumentException("Unsupported governorate: " + normalizedGovernorate);
+            }
+
+            selectedGovernorates.add(normalizedGovernorate);
+        }
+
+        return TUNISIA_GOVERNORATES.stream()
+                .filter(selectedGovernorates::contains)
+                .toList();
+    }
+
+    private void ensureGovernoratesHaveOwningZm(Collection<String> governorates) {
+        if (governorates == null || governorates.isEmpty()) {
+            return;
+        }
+
+        Map<String, String> ownersByGovernorate = new LinkedHashMap<>();
+        for (AppUser zm : repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_ZM)) {
+            if (zm.getStatus() != AccountStatus.APPROVED || !zm.isEnabled()) {
+                continue;
+            }
+
+            for (String governorate : safeGovernorates(zm.getAssignedGovernorates())) {
+                if (!governorates.contains(governorate)) {
+                    continue;
+                }
+
+                String previousOwner = ownersByGovernorate.putIfAbsent(governorate, displayName(zm));
+                if (previousOwner != null && !previousOwner.equals(displayName(zm))) {
+                    throw new IllegalStateException("Governorate " + governorate + " is assigned to multiple active ZMs");
+                }
+            }
+        }
+
+        List<String> missingOwners = governorates.stream()
+                .filter(governorate -> !ownersByGovernorate.containsKey(governorate))
+                .toList();
+
+        if (!missingOwners.isEmpty()) {
+            throw new IllegalStateException(
+                    "No active ZM currently covers: " + String.join(", ", missingOwners)
+            );
+        }
+    }
+
+    private String displayName(AppUser user) {
+        if (user == null) {
+            return "unknown";
+        }
+
+        if (hasText(user.getFullName())) {
+            return user.getFullName().trim();
+        }
+
+        if (hasText(user.getEmail())) {
+            return user.getEmail().trim().toLowerCase();
+        }
+
+        return "unknown";
     }
 }

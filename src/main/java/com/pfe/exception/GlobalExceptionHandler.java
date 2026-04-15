@@ -68,7 +68,7 @@ public class GlobalExceptionHandler {
                         Instant.now(),
                         HttpStatus.PAYLOAD_TOO_LARGE.value(),
                         HttpStatus.PAYLOAD_TOO_LARGE.name(),
-                        "Image must be <= 8 MB",
+                        "Uploaded file exceeds the server limit of 100 MB",
                         req.getRequestURI()
                 ));
     }

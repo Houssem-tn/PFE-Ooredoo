@@ -1,5 +1,6 @@
 package com.pfe.case_management.service;
 
+import com.pfe.Entity.AccountStatus;
 import com.pfe.Entity.AppUser;
 import com.pfe.Entity.FileEntityType;
 import com.pfe.Entity.FileMetadata;
@@ -10,7 +11,6 @@ import com.pfe.Service.FileStorageService;
 import com.pfe.Service.NotificationEventService;
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
-import com.pfe.case_management.dto.AssignZmRequest;
 import com.pfe.case_management.dto.CaseProofFileResponse;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
@@ -38,6 +38,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,18 +47,33 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class CaseService {
-
-    private static final Set<CaseStatus> ASSIGN_ZM_ALLOWED_STATUSES = EnumSet.of(
-        CaseStatus.CREATED,
-        CaseStatus.ASSIGNED_TO_ZM,
-        CaseStatus.ASSIGNED_TO_STT,
-        CaseStatus.ASSIGNED_TO_TECH,
-        CaseStatus.NOT_REACHABLE,
-        CaseStatus.RDV_SET,
-        CaseStatus.WORK_DONE,
-        CaseStatus.REJECTED_BY_ZM,
-        CaseStatus.ABANDONED
+    private static final List<String> TUNISIA_GOVERNORATES = List.of(
+            "Tunis",
+            "Ariana",
+            "Ben Arous",
+            "Mannouba",
+            "Nabeul",
+            "Zaghouan",
+            "Bizerte",
+            "B\u00E9ja",
+            "Jendouba",
+            "Le Kef",
+            "Siliana",
+            "Sousse",
+            "Monastir",
+            "Mahdia",
+            "Sfax",
+            "Kairouan",
+            "Kasserine",
+            "Sidi Bouzid",
+            "Gab\u00E8s",
+            "M\u00E9denine",
+            "Tataouine",
+            "Gafsa",
+            "Tozeur",
+            "K\u00E9bili"
     );
+    private static final Set<String> TUNISIA_GOVERNORATE_SET = Set.copyOf(TUNISIA_GOVERNORATES);
 
     private static final Set<CaseStatus> ASSIGN_STT_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_ZM,
@@ -97,6 +113,7 @@ public class CaseService {
     private final NotificationEventService notificationEventService;
     private final CaseTimelineService caseTimelineService;
     private final FileStorageService fileStorageService;
+    private final CasePdfExportService casePdfExportService;
 
     public CaseEntity createCase(CreateCaseRequest request) {
         ensureCurrentUserHasRole("ROLE_ADMIN");
@@ -106,13 +123,15 @@ public class CaseService {
         }
 
         Instant now = Instant.now();
+        String governorate = normalizeGovernorate(request.gouvernorat());
+        AppUser ownerZm = resolveOwnerZm(governorate);
 
         CaseEntity entity = CaseEntity.builder()
                 .type(request.type())
                 .crmCase(request.crmCase())
                 .dateCreationCrm(request.dateCreationCrm())
                 .openingDateTimos(request.openingDateTimos())
-                .status(CaseStatus.CREATED)
+                .status(CaseStatus.ASSIGNED_TO_ZM)
                 .clientName(request.clientName())
                 .clientPhone(request.clientPhone())
                 .msisdn(request.msisdn())
@@ -121,16 +140,22 @@ public class CaseService {
                 .longitude(request.longitude())
                 .localite(request.localite())
                 .delegation(request.delegation())
-                .gouvernorat(request.gouvernorat())
+                .gouvernorat(governorate)
                 .siteSecteur(request.siteSecteur())
+                .ownerZmId(ownerZm.getId())
+                .ownerZmName(ownerZm.getFullName())
                 .offre(request.offre())
                 .desPack(request.desPack())
+                .zmId(ownerZm.getId())
+                .zmEmail(ownerZm.getEmail())
+                .zmName(ownerZm.getFullName())
+                .dateAffectationZm(now)
                 .createdAt(now)
                 .updatedAt(now)
                 .createdBy(getCurrentUsername())
                 .build();
 
-            caseTimelineService.append(
+        caseTimelineService.append(
                 entity,
                 CaseTimelineEventType.CASE_CREATED,
                 "Case created",
@@ -144,7 +169,25 @@ public class CaseService {
                 )
             );
 
-        return repository.save(entity);
+        caseTimelineService.append(
+                entity,
+                CaseTimelineEventType.ASSIGNMENT_UPDATED,
+                "Owner ZM resolved",
+                "Governorate " + governorate + " is owned by ZM " + safe(ownerZm.getFullName(), ownerZm.getEmail()),
+                getCurrentUsername(),
+                entity.getStatus(),
+                entity.getStatus(),
+                timelineData(
+                        "assigneeRole", "ROLE_ZM",
+                        "assigneeEmail", ownerZm.getEmail(),
+                        "governorate", governorate,
+                        "automaticAssignment", true
+                )
+        );
+
+        CaseEntity saved = repository.save(entity);
+        notificationEventService.onCaseAssignedToZm(saved, getCurrentUsername());
+        return saved;
     }
 
     public List<CaseEntity> getAllCasesByType(CaseType type) {
@@ -213,58 +256,14 @@ public class CaseService {
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to access this case");
     }
 
-    public CaseEntity assignToZm(String caseId, AssignZmRequest request) {
-        CaseEntity c = getCaseOrThrow(caseId);
-        ensureCurrentUserHasRole("ROLE_ADMIN");
-        String triggeredBy = getCurrentUsername();
-        CaseStatus previousStatus = c.getStatus();
+    public byte[] exportCasePdf(String caseId) {
+        CaseEntity caseEntity = getCaseById(caseId);
+        return casePdfExportService.generateCasePdf(caseEntity);
+    }
 
-        ensureStatusIn(
-            c,
-            ASSIGN_ZM_ALLOWED_STATUSES,
-            "Case cannot be assigned to ZM in current state"
-        );
-
-        AppUser zm = userRepository.findById(request.zmId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "ZM not found"));
-
-        ensureUserHasRole(zm, UserRole.ROLE_ZM, "Selected user is not a ZM");
-        ensureUserIsActive(zm, "Selected ZM is not active");
-
-        boolean zmChanged = !equalsSafe(c.getZmId(), zm.getId());
-
-        c.setZmId(zm.getId());
-        c.setZmEmail(zm.getEmail());
-        c.setZmName(zm.getFullName());
-        c.setDateAffectationZm(Instant.now());
-
-        if (zmChanged) {
-            clearSttAssignment(c);
-            clearTechAssignment(c);
-        }
-
-        c.setStatus(CaseStatus.ASSIGNED_TO_ZM);
-        c.setUpdatedAt(Instant.now());
-
-        caseTimelineService.append(
-            c,
-            CaseTimelineEventType.ASSIGNMENT_UPDATED,
-            "ZM assignment updated",
-            "Case assigned to ZM " + safe(c.getZmName(), c.getZmEmail()),
-            triggeredBy,
-            previousStatus,
-            c.getStatus(),
-            timelineData(
-                "assigneeRole", "ROLE_ZM",
-                "assigneeEmail", c.getZmEmail(),
-                "resetDownstreamAssignments", zmChanged
-            )
-        );
-
-        CaseEntity saved = repository.save(c);
-        enrichWorkProofReadValues(saved);
-        notificationEventService.onCaseAssignedToZm(saved, triggeredBy);
-        return saved;
+    public String buildCasePdfFilename(String caseId) {
+        CaseEntity caseEntity = getCaseById(caseId);
+        return casePdfExportService.buildFilename(caseEntity);
     }
 
     public CaseEntity assignToStt(String caseId, AssignSttRequest request) {
@@ -279,8 +278,8 @@ public class CaseService {
             "Case cannot be assigned to STT in current state"
         );
 
-        if (isBlank(c.getZmId())) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must be assigned to a ZM first");
+        if (isBlank(c.getOwnerZmId()) && isBlank(c.getZmId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must have an owner ZM before STT assignment");
         }
 
         AppUser stt = userRepository.findById(request.sttId())
@@ -289,15 +288,16 @@ public class CaseService {
         ensureUserHasRole(stt, UserRole.ROLE_STT, "Selected user is not an STT");
         ensureUserIsActive(stt, "Selected STT is not active");
 
-        if (!equalsSafe(stt.getAssignedZmId(), c.getZmId())) {
+        if (!sttCoversGovernorate(stt, c.getGouvernorat())) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
-                    "This STT does not belong to the assigned ZM"
+                    "This STT does not cover the case governorate"
             );
         }
 
         boolean sttChanged = !equalsSafe(c.getSttId(), stt.getId());
 
+        c.setAssignedSttId(stt.getId());
         c.setSttId(stt.getId());
         c.setSttEmail(stt.getEmail());
         c.setSttName(stt.getFullName());
@@ -837,12 +837,13 @@ public class CaseService {
     }
 
     private void ensureUserIsActive(AppUser user, String message) {
-        if (!user.isEnabled()) {
+        if (user.getStatus() != AccountStatus.APPROVED || !user.isEnabled()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
         }
     }
 
     private void clearSttAssignment(CaseEntity c) {
+        c.setAssignedSttId(null);
         c.setSttId(null);
         c.setSttEmail(null);
         c.setSttName(null);
@@ -866,6 +867,55 @@ public class CaseService {
 
     private boolean equalsSafe(String a, String b) {
         return a != null && a.equals(b);
+    }
+
+    private AppUser resolveOwnerZm(String governorate) {
+        List<AppUser> matches = userRepository.findByRoleAndAssignedGovernoratesIn(
+                        UserRole.ROLE_ZM,
+                        List.of(governorate)
+                ).stream()
+                .filter(user -> user.getRole() == UserRole.ROLE_ZM)
+                .filter(user -> user.getStatus() == AccountStatus.APPROVED)
+                .filter(AppUser::isEnabled)
+                .filter(user -> safeGovernorates(user.getAssignedGovernorates()).contains(governorate))
+                .toList();
+
+        if (matches.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "No ZM covers governorate " + governorate
+            );
+        }
+
+        if (matches.size() > 1) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Governorate " + governorate + " is assigned to multiple ZMs"
+            );
+        }
+
+        return matches.get(0);
+    }
+
+    private boolean sttCoversGovernorate(AppUser stt, String governorate) {
+        if (stt == null || isBlank(governorate)) {
+            return false;
+        }
+
+        return safeGovernorates(stt.getCoveredGovernorates()).contains(governorate.trim());
+    }
+
+    private String normalizeGovernorate(String governorate) {
+        if (isBlank(governorate)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Governorate is required");
+        }
+
+        String normalized = governorate.trim();
+        if (!TUNISIA_GOVERNORATE_SET.contains(normalized)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported governorate: " + normalized);
+        }
+
+        return normalized;
     }
 
     private void validateLocationSnapshot(Double latitude, Double longitude, String message) {
@@ -929,5 +979,19 @@ public class CaseService {
                 metadata.getLocationAccuracyMeters(),
                 metadata.getCaptureSource()
         );
+    }
+
+    private List<String> safeGovernorates(List<String> governorates) {
+        if (governorates == null || governorates.isEmpty()) {
+            return List.of();
+        }
+
+        return governorates.stream()
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .collect(Collectors.collectingAndThen(
+                        Collectors.toCollection(LinkedHashSet::new),
+                        List::copyOf
+                ));
     }
 }

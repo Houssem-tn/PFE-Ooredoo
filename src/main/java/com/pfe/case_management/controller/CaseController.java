@@ -2,7 +2,6 @@ package com.pfe.case_management.controller;
 
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
-import com.pfe.case_management.dto.AssignZmRequest;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
@@ -12,6 +11,8 @@ import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.service.CaseService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -41,12 +42,15 @@ public class CaseController {
         return ResponseEntity.ok(caseService.getCaseById(id));
     }
 
-    @PostMapping("/{id}/assign-zm")
-    public ResponseEntity<CaseEntity> assignToZm(
-            @PathVariable String id,
-            @Valid @RequestBody AssignZmRequest request
-    ) {
-        return ResponseEntity.ok(caseService.assignToZm(id, request));
+    @GetMapping("/{id}/pdf")
+    public ResponseEntity<byte[]> downloadCasePdf(@PathVariable String id) {
+        String filename = caseService.buildCasePdfFilename(id);
+        byte[] pdf = caseService.exportCasePdf(id);
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                .contentType(MediaType.APPLICATION_PDF)
+                .body(pdf);
     }
 
     @PostMapping("/{id}/assign-stt")
