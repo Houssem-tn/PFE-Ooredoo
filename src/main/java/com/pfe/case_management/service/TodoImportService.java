@@ -163,10 +163,13 @@ public class TodoImportService {
         Instant now = Instant.now();
 
         List<ImportedTodoEntity> entities = parsedImport.previewRows().stream()
+                .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
                 .map(row -> toAdminEntity(row, parsedImport.sourceFileName(), batchId, uploadedBy, now))
                 .toList();
 
-        importedTodoRepository.saveAll(entities);
+        if (!entities.isEmpty()) {
+            importedTodoRepository.saveAll(entities);
+        }
 
         return new AdminPerformanceImportInjectResponse(
                 batchId,
@@ -196,6 +199,7 @@ public class TodoImportService {
         Instant now = Instant.now();
 
         List<ImportedZmTodoEntity> entities = prepared.matchedRows().stream()
+                .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
                 .map(row -> toZmImportedEntity(row, parsedImport.sourceFileName(), zmIdentity.displayManagerKey(), batchId, zmEmail, now))
                 .toList();
 
@@ -440,10 +444,13 @@ public class TodoImportService {
         Instant now = Instant.now();
         List<ImportedZmTodoEntity> entities = parsedImport.previewRows().stream()
                 .filter(ParsedPreviewRow::readyToInject)
+                .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
                 .map(row -> toEntity(row, parsedImport, batchId, uploadedBy, now))
                 .toList();
 
-        importedZmTodoRepository.saveAll(entities);
+        if (!entities.isEmpty()) {
+            importedZmTodoRepository.saveAll(entities);
+        }
 
         return new TodoImportInjectResponse(
                 batchId,
@@ -1864,6 +1871,17 @@ public class TodoImportService {
         String firstName = nameParts.get(0);
         String lastName = String.join(" ", nameParts.subList(1, nameParts.size()));
         return (lastName + " " + firstName).trim();
+    }
+
+    private boolean hasAlreadyImportedDuplicate(List<String> issues) {
+        if (issues == null || issues.isEmpty()) {
+            return false;
+        }
+
+        return issues.stream()
+                .filter(this::hasText)
+                .map(issue -> issue.toLowerCase(Locale.ROOT))
+                .anyMatch(issue -> issue.contains("duplicate crm_case already imported"));
     }
 
     private double round2(double value) {

@@ -111,6 +111,9 @@ public class AdminPerformanceImportController {
             @RequestParam(required = false) String gouvernorat,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            @RequestParam(required = false) String invalidReason,
+            @RequestParam(required = false) Integer invalidPage,
+            @RequestParam(required = false) Integer invalidPageSize,
             Authentication authentication
     ) {
         return ResponseEntity.ok(savedZmPerformanceStudyService.getSavedStudyRowQuality(
@@ -119,7 +122,10 @@ public class AdminPerformanceImportController {
                 zoneManager,
                 gouvernorat,
                 uploadedFrom,
-                uploadedTo
+                uploadedTo,
+                invalidReason,
+                invalidPage,
+                invalidPageSize
         ));
     }
 }

@@ -12,9 +12,12 @@ public record SavedZmPerformanceRowQualityResponse(
         long distinctGovernorates,
         long rowsWithSla,
         long invalidRowsWithMultipleIssues,
-        int rowPreviewLimit,
+        int invalidPageSize,
+        int invalidPage,
+        long filteredInvalidRows,
+        int invalidTotalPages,
+        String selectedInvalidReason,
         List<SavedZmPerformanceInvalidReasonResponse> invalidReasonSummaries,
-        List<SavedZmPerformanceRowPreviewResponse> validPreviewRows,
         List<SavedZmPerformanceRowPreviewResponse> invalidPreviewRows
 ) {
 }

@@ -31,7 +31,8 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class SavedZmPerformanceStudyService {
-    private static final int ROW_PREVIEW_LIMIT = 120;
+    private static final int INVALID_PAGE_SIZE_DEFAULT = 50;
+    private static final int INVALID_PAGE_SIZE_MAX = 200;
 
     private final MongoTemplate mongoTemplate;
     private final SavedZmPerformanceStudyRepository savedZmPerformanceStudyRepository;
@@ -85,7 +86,10 @@ public class SavedZmPerformanceStudyService {
             String zoneManager,
             String governorate,
             LocalDate uploadedFrom,
-            LocalDate uploadedTo
+            LocalDate uploadedTo,
+            String invalidReason,
+            Integer invalidPage,
+            Integer invalidPageSize
     ) {
         if (!hasText(savedStudyId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Saved study id is required");
@@ -145,6 +149,21 @@ public class SavedZmPerformanceStudyService {
                         .thenComparing(SavedZmPerformanceInvalidReasonResponse::reason, String.CASE_INSENSITIVE_ORDER))
                 .toList();
 
+        String selectedInvalidReason = hasText(invalidReason) ? invalidReason.trim() : null;
+        List<ImportedTodoEntity> filteredInvalidRows = invalidRows.stream()
+                .filter(row -> matchesInvalidReason(row, selectedInvalidReason))
+                .sorted(savedRowComparator())
+                .toList();
+
+        int pageSize = normalizeInvalidPageSize(invalidPageSize);
+        int totalPages = Math.max(1, (int) Math.ceil(filteredInvalidRows.size() / (double) pageSize));
+        int page = normalizeInvalidPage(invalidPage, totalPages);
+        int startIndex = Math.min((page - 1) * pageSize, filteredInvalidRows.size());
+        int endIndex = Math.min(startIndex + pageSize, filteredInvalidRows.size());
+        List<SavedZmPerformanceRowPreviewResponse> invalidPreviewRows = filteredInvalidRows.subList(startIndex, endIndex).stream()
+                .map(this::toSavedRowPreviewResponse)
+                .toList();
+
         return new SavedZmPerformanceRowQualityResponse(
                 study.getSourceFileNames() == null ? List.of() : List.copyOf(study.getSourceFileNames()),
                 rows.size(),
@@ -155,18 +174,13 @@ public class SavedZmPerformanceStudyService {
                 distinctCount(rows, ImportedTodoEntity::getGouvernorat),
                 validRows.stream().filter(row -> row.getSlaBusinessDays() != null).count(),
                 invalidRows.stream().filter(row -> row.getValidationIssues() != null && row.getValidationIssues().size() > 1).count(),
-                ROW_PREVIEW_LIMIT,
+                pageSize,
+                page,
+                filteredInvalidRows.size(),
+                totalPages,
+                selectedInvalidReason,
                 invalidReasonSummaries,
-                validRows.stream()
-                        .sorted(savedRowComparator())
-                        .limit(ROW_PREVIEW_LIMIT)
-                        .map(this::toSavedRowPreviewResponse)
-                        .toList(),
-                invalidRows.stream()
-                        .sorted(savedRowComparator())
-                        .limit(ROW_PREVIEW_LIMIT)
-                        .map(this::toSavedRowPreviewResponse)
-                        .toList()
+                invalidPreviewRows
         );
     }
 
@@ -232,6 +246,34 @@ public class SavedZmPerformanceStudyService {
                 .thenComparing(ImportedTodoEntity::getSourceFileName, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER))
                 .thenComparing(ImportedTodoEntity::getRowNumber, Comparator.nullsLast(Comparator.naturalOrder()))
                 .thenComparing(ImportedTodoEntity::getId, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER));
+    }
+
+    private boolean matchesInvalidReason(ImportedTodoEntity row, String selectedInvalidReason) {
+        if (!hasText(selectedInvalidReason)) {
+            return true;
+        }
+
+        List<String> issues = row.getValidationIssues() == null || row.getValidationIssues().isEmpty()
+                ? List.of("Unknown validation issue")
+                : row.getValidationIssues();
+
+        return issues.stream().anyMatch(issue -> selectedInvalidReason.equalsIgnoreCase(issue));
+    }
+
+    private int normalizeInvalidPageSize(Integer invalidPageSize) {
+        if (invalidPageSize == null) {
+            return INVALID_PAGE_SIZE_DEFAULT;
+        }
+
+        return Math.max(1, Math.min(INVALID_PAGE_SIZE_MAX, invalidPageSize));
+    }
+
+    private int normalizeInvalidPage(Integer invalidPage, int totalPages) {
+        if (invalidPage == null) {
+            return 1;
+        }
+
+        return Math.max(1, Math.min(totalPages, invalidPage));
     }
 
     private void validateUploadedRange(LocalDate uploadedFrom, LocalDate uploadedTo) {
