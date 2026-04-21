@@ -39,6 +39,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.BulkOperations;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -77,6 +78,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -85,6 +87,7 @@ import java.util.stream.Collectors;
 public class TodoImportService {
     private static final Logger log = LoggerFactory.getLogger(TodoImportService.class);
     private static final int ADMIN_PREVIEW_LIMIT = 50;
+    private static final int INSERT_CHUNK_SIZE = 5_000;
     private static final int ZM_DELAYED_SLA_THRESHOLD_DAYS = 3;
     private static final double ZM_HIGH_AVERAGE_SLA_THRESHOLD_DAYS = 3d;
     private static final double ZM_HIGH_DELAYED_RATE_THRESHOLD = 25d;
@@ -157,19 +160,38 @@ public class TodoImportService {
     }
 
     public AdminPerformanceImportInjectResponse injectAdminPerformanceImport(MultipartFile file, String uploadedBy) {
+        long totalStart = System.nanoTime();
         ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, uploadedBy);
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
 
+        long entityBuildStart = System.nanoTime();
         List<ImportedTodoEntity> entities = parsedImport.previewRows().stream()
                 .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
                 .map(row -> toAdminEntity(row, parsedImport.sourceFileName(), batchId, uploadedBy, now))
                 .toList();
+        long entityBuildMs = elapsedMs(entityBuildStart);
 
+        long saveStart = System.nanoTime();
         if (!entities.isEmpty()) {
-            importedTodoRepository.saveAll(entities);
+            bulkInsertImportedTodos(entities);
         }
+        long saveMs = elapsedMs(saveStart);
+
+        log.info(
+                "todo_admin_import_complete file={} uploadedBy={} batchId={} totalRows={} validRows={} invalidRows={} savedRows={} entityBuildMs={} saveMs={} totalMs={}",
+                parsedImport.sourceFileName(),
+                uploadedBy,
+                batchId,
+                parsedImport.totalRows(),
+                parsedImport.validRows(),
+                parsedImport.invalidRows(),
+                entities.size(),
+                entityBuildMs,
+                saveMs,
+                elapsedMs(totalStart)
+        );
 
         return new AdminPerformanceImportInjectResponse(
                 batchId,
@@ -191,6 +213,7 @@ public class TodoImportService {
     }
 
     public ZmTodoImportProcessResponse processForZm(MultipartFile file, String zmEmail) {
+        long totalStart = System.nanoTime();
         ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, null);
         ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
         PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, true);
@@ -198,14 +221,18 @@ public class TodoImportService {
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
 
+        long entityBuildStart = System.nanoTime();
         List<ImportedZmTodoEntity> entities = prepared.matchedRows().stream()
                 .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
                 .map(row -> toZmImportedEntity(row, parsedImport.sourceFileName(), zmIdentity.displayManagerKey(), batchId, zmEmail, now))
                 .toList();
+        long entityBuildMs = elapsedMs(entityBuildStart);
 
+        long saveStart = System.nanoTime();
         if (!entities.isEmpty()) {
-            importedZmTodoRepository.saveAll(entities);
+            bulkInsertImportedZmTodos(entities);
         }
+        long saveMs = elapsedMs(saveStart);
 
         var savedAnalysis = zmTodoAnalysisService.saveAnalysis(
                 zmEmail,
@@ -213,6 +240,20 @@ public class TodoImportService {
                 parsedImport.sourceFileName(),
                 batchId,
                 prepared.analytics()
+        );
+
+        log.info(
+                "todo_zm_process_complete file={} uploadedBy={} batchId={} matchedRows={} validRows={} invalidRows={} savedRows={} entityBuildMs={} saveMs={} totalMs={}",
+                parsedImport.sourceFileName(),
+                zmEmail,
+                batchId,
+                prepared.analytics().matchedRows(),
+                prepared.analytics().validMatchedRows(),
+                prepared.analytics().invalidMatchedRows(),
+                entities.size(),
+                entityBuildMs,
+                saveMs,
+                elapsedMs(totalStart)
         );
 
         return new ZmTodoImportProcessResponse(
@@ -431,6 +472,7 @@ public class TodoImportService {
     }
 
     public TodoImportInjectResponse inject(MultipartFile file, String managerFilter, String uploadedBy) {
+        long totalStart = System.nanoTime();
         ParsedImport parsedImport = parseWorkbook(file, managerFilter, uploadedBy);
 
         if (parsedImport.readyRows() == 0) {
@@ -442,15 +484,35 @@ public class TodoImportService {
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
+        long entityBuildStart = System.nanoTime();
         List<ImportedZmTodoEntity> entities = parsedImport.previewRows().stream()
                 .filter(ParsedPreviewRow::readyToInject)
                 .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
                 .map(row -> toEntity(row, parsedImport, batchId, uploadedBy, now))
                 .toList();
+        long entityBuildMs = elapsedMs(entityBuildStart);
 
+        long saveStart = System.nanoTime();
         if (!entities.isEmpty()) {
-            importedZmTodoRepository.saveAll(entities);
+            bulkInsertImportedZmTodos(entities);
         }
+        long saveMs = elapsedMs(saveStart);
+
+        log.info(
+                "todo_zm_import_complete file={} uploadedBy={} batchId={} managerFilter={} totalRows={} matchedRows={} invalidRows={} duplicateRows={} savedRows={} entityBuildMs={} saveMs={} totalMs={}",
+                parsedImport.sourceFileName(),
+                uploadedBy,
+                batchId,
+                parsedImport.managerFilterUsed(),
+                parsedImport.totalRows(),
+                parsedImport.matchedRows(),
+                parsedImport.invalidRows(),
+                parsedImport.duplicateRows(),
+                entities.size(),
+                entityBuildMs,
+                saveMs,
+                elapsedMs(totalStart)
+        );
 
         return new TodoImportInjectResponse(
                 batchId,
@@ -474,93 +536,7 @@ public class TodoImportService {
         }
 
         String sourceFileName = resolveSourceFileName(file);
-
-        try (InputStream inputStream = file.getInputStream();
-             Workbook workbook = WorkbookFactory.create(inputStream)) {
-            if (workbook.getNumberOfSheets() == 0) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no sheets");
-            }
-
-            Sheet sheet = workbook.getSheetAt(0);
-            Row headerRow = sheet.getRow(sheet.getFirstRowNum());
-            if (headerRow == null) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no header row");
-            }
-
-            DataFormatter formatter = new DataFormatter(Locale.ROOT);
-            FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
-
-            Map<String, Integer> headerIndexes = resolveHeaderIndexes(headerRow, formatter, evaluator);
-            validateRequiredColumns(headerIndexes);
-
-            List<ParsedPreviewRow> matchedRows = new ArrayList<>();
-            int totalRows = 0;
-            int unmatchedRows = 0;
-
-            for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
-                Row row = sheet.getRow(rowIndex);
-                Map<String, String> sourceValues = extractSourceValues(row, headerIndexes, formatter, evaluator);
-
-                if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
-                    continue;
-                }
-
-                totalRows += 1;
-
-                String zoneManager = trimmedValue(sourceValues.get("ZONE_MNANAGER"));
-                if (!normalizedManagerFilter.equals(normalizeLookupValue(zoneManager))) {
-                    unmatchedRows += 1;
-                    continue;
-                }
-
-                matchedRows.add(buildPreviewRow(rowIndex + 1, sourceValues));
-            }
-
-            List<ParsedPreviewRow> annotatedRows = annotateDuplicateRows(uploadedBy, matchedRows);
-            int invalidRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasValidationIssue).count();
-            int duplicateRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasDuplicateIssue).count();
-            int readyRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::readyToInject).count();
-
-            return new ParsedImport(
-                    sourceFileName,
-                    managerFilter.trim(),
-                    totalRows,
-                    annotatedRows.size(),
-                    unmatchedRows,
-                    invalidRows,
-                    duplicateRows,
-                    readyRows,
-                    annotatedRows
-            );
-        } catch (EncryptedDocumentException ex) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Password-protected Excel files are not supported",
-                    ex
-            );
-        } catch (IOException ex) {
-            if (shouldAttemptFallback(sourceFileName, ex)) {
-                try {
-                    return parseStructuredTextWorkbook(file, managerFilter.trim(), normalizedManagerFilter, sourceFileName, uploadedBy);
-                } catch (Exception fallbackEx) {
-                    log.warn("Failed to read structured-text spreadsheet fallback for {}", sourceFileName, fallbackEx);
-                    throw new ResponseStatusException(
-                            HttpStatus.BAD_REQUEST,
-                            resolveFallbackReadError(ex, fallbackEx, sourceFileName),
-                            fallbackEx
-                    );
-                }
-            }
-
-            log.warn("Failed to read uploaded Excel file {}", sourceFileName, ex);
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, resolveExcelReadError(ex), ex);
-        }
-    }
-
-    private ParsedAnalyticsImport parseAdminPerformanceWorkbook(MultipartFile file, String uploadedBy) {
-        validateFile(file);
-
-        String sourceFileName = resolveSourceFileName(file);
+        long parseStart = System.nanoTime();
 
         try (InputStream inputStream = file.getInputStream();
              Workbook workbook = WorkbookFactory.create(inputStream)) {
@@ -591,6 +567,84 @@ public class TodoImportService {
 
                 sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
             }
+
+            log.info(
+                    "todo_zm_import_parse file={} uploadedBy={} managerFilter={} parser=poi extractedRows={} extractionMs={}",
+                    sourceFileName,
+                    uploadedBy,
+                    managerFilter.trim(),
+                    sourceRows.size(),
+                    elapsedMs(parseStart)
+            );
+            return buildParsedImport(sourceFileName, managerFilter.trim(), normalizedManagerFilter, sourceRows, uploadedBy);
+        } catch (EncryptedDocumentException ex) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Password-protected Excel files are not supported",
+                    ex
+            );
+        } catch (IOException ex) {
+            if (shouldAttemptFallback(sourceFileName, ex)) {
+                try {
+                    return parseStructuredTextWorkbook(file, managerFilter.trim(), normalizedManagerFilter, sourceFileName, uploadedBy);
+                } catch (Exception fallbackEx) {
+                    log.warn("Failed to read structured-text spreadsheet fallback for {}", sourceFileName, fallbackEx);
+                    throw new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST,
+                            resolveFallbackReadError(ex, fallbackEx, sourceFileName),
+                            fallbackEx
+                    );
+                }
+            }
+
+            log.warn("Failed to read uploaded Excel file {}", sourceFileName, ex);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, resolveExcelReadError(ex), ex);
+        }
+    }
+
+    private ParsedAnalyticsImport parseAdminPerformanceWorkbook(MultipartFile file, String uploadedBy) {
+        validateFile(file);
+
+        String sourceFileName = resolveSourceFileName(file);
+        long parseStart = System.nanoTime();
+
+        try (InputStream inputStream = file.getInputStream();
+             Workbook workbook = WorkbookFactory.create(inputStream)) {
+            if (workbook.getNumberOfSheets() == 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no sheets");
+            }
+
+            Sheet sheet = workbook.getSheetAt(0);
+            Row headerRow = sheet.getRow(sheet.getFirstRowNum());
+            if (headerRow == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no header row");
+            }
+
+            DataFormatter formatter = new DataFormatter(Locale.ROOT);
+            FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+
+            Map<String, Integer> headerIndexes = resolveHeaderIndexes(headerRow, formatter, evaluator);
+            validateRequiredColumns(headerIndexes);
+
+            List<SourceRow> sourceRows = new ArrayList<>();
+            for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex);
+                Map<String, String> sourceValues = extractSourceValues(row, headerIndexes, formatter, evaluator);
+
+                if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
+                    continue;
+                }
+
+                sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
+            }
+
+            log.info(
+                    "todo_admin_import_parse file={} uploadedBy={} parser=poi extractedRows={} extractionMs={}",
+                    sourceFileName,
+                    uploadedBy,
+                    sourceRows.size(),
+                    elapsedMs(parseStart)
+            );
 
             return buildAnalyticsImport(sourceFileName, sourceRows, uploadedBy);
         } catch (EncryptedDocumentException ex) {
@@ -681,56 +735,92 @@ public class TodoImportService {
     }
 
     private ParsedAnalyticsImport buildAnalyticsImport(String sourceFileName, List<SourceRow> sourceRows, String uploadedBy) {
-        Set<String> crmCases = sourceRows.stream()
-                .map(row -> normalizeLookupValue(row.sourceValues().get("CRM_CASE")))
-                .filter(this::hasText)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
+        long duplicateLookupStart = System.nanoTime();
+        ImportValueCache cache = new ImportValueCache();
+        Set<String> crmCases = new LinkedHashSet<>(Math.max(16, sourceRows.size()));
+        Set<String> zoneManagers = new LinkedHashSet<>(Math.max(16, sourceRows.size()));
+        for (SourceRow sourceRow : sourceRows) {
+            String crmCase = cache.normalizeLookup(sourceRow.sourceValues().get("CRM_CASE"));
+            if (TodoAnalyticsSupport.hasText(crmCase)) {
+                crmCases.add(crmCase);
+            }
 
-        Set<String> zoneManagers = sourceRows.stream()
-                .map(row -> normalizeLookupValue(row.sourceValues().get("ZONE_MNANAGER")))
-                .filter(this::hasText)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
+            String zoneManager = cache.normalizeLookup(sourceRow.sourceValues().get("ZONE_MNANAGER"));
+            if (TodoAnalyticsSupport.hasText(zoneManager)) {
+                zoneManagers.add(zoneManager);
+            }
+        }
 
         Set<String> existingDuplicateKeys = hasText(uploadedBy)
                 ? findExistingAdminDuplicateKeys(uploadedBy, crmCases, zoneManagers)
                 : Set.of();
-        Set<String> seenInFile = new LinkedHashSet<>();
+        long duplicateLookupMs = elapsedMs(duplicateLookupStart);
+        long classificationStart = System.nanoTime();
+        Set<String> seenInFile = new LinkedHashSet<>(Math.max(16, sourceRows.size()));
         Set<String> distinctZoneManagers = new LinkedHashSet<>();
         Set<String> distinctStts = new LinkedHashSet<>();
         Set<String> distinctGovernorates = new LinkedHashSet<>();
-        List<ParsedAnalyticsRow> previewRows = new ArrayList<>();
+        List<ParsedAnalyticsRow> previewRows = new ArrayList<>(sourceRows.size());
+        int validRows = 0;
 
         for (SourceRow sourceRow : sourceRows) {
-            ParsedAnalyticsRow row = buildAnalyticsPreviewRow(sourceRow.rowNumber(), sourceRow.sourceValues());
-            List<String> issues = new ArrayList<>(row.issues());
+            ParsedAnalyticsRow row = buildAnalyticsPreviewRow(sourceRow.rowNumber(), sourceRow.sourceValues(), cache);
+            List<String> existingIssues = row.issues();
+            ArrayList<String> issues = existingIssues.isEmpty()
+                    ? null
+                    : new ArrayList<>(existingIssues);
 
-            if (hasText(row.zoneManagerNormalized())) {
+            if (TodoAnalyticsSupport.hasText(row.zoneManagerNormalized())) {
                 distinctZoneManagers.add(row.zoneManager());
             }
 
-            if (hasText(row.sttNormalized())) {
+            if (TodoAnalyticsSupport.hasText(row.sttNormalized())) {
                 distinctStts.add(row.stt());
             }
 
-            if (hasText(row.gouvernoratNormalized())) {
+            if (TodoAnalyticsSupport.hasText(row.gouvernoratNormalized())) {
                 distinctGovernorates.add(row.gouvernorat());
             }
 
             String duplicateKey = analyticsDuplicateKey(row.zoneManagerNormalized(), row.crmCaseNormalized());
             if (duplicateKey != null) {
                 if (!seenInFile.add(duplicateKey)) {
+                    if (issues == null) {
+                        issues = new ArrayList<>(2);
+                    }
                     issues.add("Duplicate CRM_CASE for the same Zone Manager inside the selected file");
                 }
 
                 if (existingDuplicateKeys.contains(duplicateKey)) {
+                    if (issues == null) {
+                        issues = new ArrayList<>(2);
+                    }
                     issues.add("Duplicate CRM_CASE already imported for this Zone Manager in your admin analytics context");
                 }
             }
 
-            previewRows.add(row.withIssues(issues));
+            ParsedAnalyticsRow finalRow = issues == null ? row : row.withIssues(issues);
+            previewRows.add(finalRow);
+            if (finalRow.validRow()) {
+                validRows += 1;
+            }
         }
 
-        int validRows = (int) previewRows.stream().filter(ParsedAnalyticsRow::validRow).count();
+        log.info(
+                "todo_admin_import_classification file={} uploadedBy={} totalRows={} existingDuplicateKeys={} duplicateLookupMs={} classificationMs={} validRows={} invalidRows={} distinctZoneManagers={} distinctStts={} distinctGovernorates={}",
+                sourceFileName,
+                uploadedBy,
+                sourceRows.size(),
+                existingDuplicateKeys.size(),
+                duplicateLookupMs,
+                elapsedMs(classificationStart),
+                validRows,
+                sourceRows.size() - validRows,
+                distinctZoneManagers.size(),
+                distinctStts.size(),
+                distinctGovernorates.size()
+        );
+
         return new ParsedAnalyticsImport(
                 sourceFileName,
                 sourceRows.size(),
@@ -743,15 +833,15 @@ public class TodoImportService {
         );
     }
 
-    private ParsedAnalyticsRow buildAnalyticsPreviewRow(int rowNumber, Map<String, String> sourceValues) {
+    private ParsedAnalyticsRow buildAnalyticsPreviewRow(int rowNumber, Map<String, String> sourceValues, ImportValueCache cache) {
         List<String> issues = new ArrayList<>();
 
-        String crmCase = trimmedValue(sourceValues.get("CRM_CASE"));
-        String zoneManager = trimmedValue(sourceValues.get("ZONE_MNANAGER"));
-        String stt = trimmedValue(sourceValues.get("STT"));
-        String gouvernoratRaw = trimmedValue(sourceValues.get("GOUVERNORAT"));
-        String openDateRaw = trimmedValue(sourceValues.get("OPEN_DATE_SUR_TIMOS"));
-        String affectationRaw = trimmedValue(sourceValues.get("DATE_AFFECTATION_STT"));
+        String crmCase = cache.clean(sourceValues.get("CRM_CASE"));
+        String zoneManager = cache.clean(sourceValues.get("ZONE_MNANAGER"));
+        String stt = cache.clean(sourceValues.get("STT"));
+        String gouvernoratRaw = cache.clean(sourceValues.get("GOUVERNORAT"));
+        String openDateRaw = cache.clean(sourceValues.get("OPEN_DATE_SUR_TIMOS"));
+        String affectationRaw = cache.clean(sourceValues.get("DATE_AFFECTATION_STT"));
 
         if (!hasText(crmCase)) {
             issues.add("CRM_CASE is required");
@@ -769,38 +859,38 @@ public class TodoImportService {
             issues.add("GOUVERNORAT is required");
         }
 
-        String gouvernorat = canonicalTunisiaGovernorate(gouvernoratRaw);
-        if (hasText(gouvernoratRaw) && !hasText(gouvernorat)) {
+        String gouvernorat = cache.canonicalGovernorate(gouvernoratRaw);
+        if (TodoAnalyticsSupport.hasText(gouvernoratRaw) && !TodoAnalyticsSupport.hasText(gouvernorat)) {
             issues.add("Unknown Tunisian governorate");
         }
 
-        LocalDate openDate = parseImportedDate(openDateRaw);
-        LocalDate affectationDate = parseImportedDate(affectationRaw);
-        Integer slaBusinessDays = calculateBusinessDays(openDate, affectationDate);
+        LocalDate openDate = cache.parseDate(openDateRaw);
+        LocalDate affectationDate = cache.parseDate(affectationRaw);
+        Integer slaBusinessDays = TodoAnalyticsSupport.calculateBusinessDays(openDate, affectationDate);
 
         return new ParsedAnalyticsRow(
                 rowNumber,
                 crmCase,
-                normalizeLookupValue(crmCase),
-                trimmedValue(sourceValues.get("FX_DATE_CRM")),
-                trimmedValue(sourceValues.get("CONTACT1")),
-                trimmedValue(sourceValues.get("CONTACT2")),
-                trimmedValue(sourceValues.get("MSISDN")),
+                cache.normalizeLookup(crmCase),
+                cache.clean(sourceValues.get("FX_DATE_CRM")),
+                cache.clean(sourceValues.get("CONTACT1")),
+                cache.clean(sourceValues.get("CONTACT2")),
+                cache.clean(sourceValues.get("MSISDN")),
                 gouvernorat,
-                normalizeLookupValue(gouvernorat),
-                trimmedValue(sourceValues.get("DESCRIPTION")),
-                normalizeCoordinate(sourceValues.get("LATITUDE")),
-                normalizeCoordinate(sourceValues.get("LONGITUDE")),
+                cache.normalizeLookup(gouvernorat),
+                cache.clean(sourceValues.get("DESCRIPTION")),
+                cache.normalizeCoordinate(sourceValues.get("LATITUDE")),
+                cache.normalizeCoordinate(sourceValues.get("LONGITUDE")),
                 openDateRaw,
                 openDate,
                 affectationRaw,
                 affectationDate,
                 slaBusinessDays,
                 stt,
-                normalizeLookupValue(stt),
-                trimmedValue(sourceValues.get("STATUT")),
+                cache.normalizeLookup(stt),
+                cache.clean(sourceValues.get("STATUT")),
                 zoneManager,
-                normalizeLookupValue(zoneManager),
+                cache.normalizeLookup(zoneManager),
                 Map.copyOf(sourceValues),
                 List.copyOf(issues)
         );
@@ -992,10 +1082,7 @@ public class TodoImportService {
         Map<String, Integer> headerIndexes = resolveHeaderIndexes(matrix.get(0));
         validateRequiredColumns(headerIndexes);
 
-        List<ParsedPreviewRow> matchedRows = new ArrayList<>();
-        int totalRows = 0;
-        int unmatchedRows = 0;
-
+        List<SourceRow> sourceRows = new ArrayList<>();
         for (int rowIndex = 1; rowIndex < matrix.size(); rowIndex++) {
             Map<String, String> sourceValues = extractSourceValues(matrix.get(rowIndex), headerIndexes);
 
@@ -1003,26 +1090,119 @@ public class TodoImportService {
                 continue;
             }
 
-            totalRows += 1;
+            sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
+        }
 
-            String zoneManager = trimmedValue(sourceValues.get("ZONE_MNANAGER"));
-            if (!normalizedManagerFilter.equals(normalizeLookupValue(zoneManager))) {
+        return buildParsedImport(sourceFileName, managerFilter, normalizedManagerFilter, sourceRows, uploadedBy);
+    }
+
+    private ParsedImport buildParsedImport(
+            String sourceFileName,
+            String managerFilter,
+            String normalizedManagerFilter,
+            List<SourceRow> sourceRows,
+            String uploadedBy
+    ) {
+        long duplicateLookupStart = System.nanoTime();
+        Set<String> matchedCrmCases = new LinkedHashSet<>();
+        List<SourceRow> matchedSourceRows = new ArrayList<>();
+        int unmatchedRows = 0;
+
+        ImportValueCache cache = new ImportValueCache();
+        for (SourceRow sourceRow : sourceRows) {
+            String zoneManagerNormalized = cache.normalizeLookup(sourceRow.sourceValues().get("ZONE_MNANAGER"));
+            if (!normalizedManagerFilter.equals(zoneManagerNormalized)) {
                 unmatchedRows += 1;
                 continue;
             }
 
-            matchedRows.add(buildPreviewRow(rowIndex + 1, sourceValues));
+            matchedSourceRows.add(sourceRow);
+            String crmCaseNormalized = cache.normalizeLookup(sourceRow.sourceValues().get("CRM_CASE"));
+            if (TodoAnalyticsSupport.hasText(crmCaseNormalized)) {
+                matchedCrmCases.add(crmCaseNormalized);
+            }
         }
 
-        List<ParsedPreviewRow> annotatedRows = annotateDuplicateRows(uploadedBy, matchedRows);
-        int invalidRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasValidationIssue).count();
-        int duplicateRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::hasDuplicateIssue).count();
-        int readyRows = (int) annotatedRows.stream().filter(ParsedPreviewRow::readyToInject).count();
+        Set<String> existingCrmCases = matchedCrmCases.isEmpty()
+                ? Set.of()
+                : importedZmTodoRepository.findByUploadedByAndSourceTypeAndCrmCaseNormalizedIn(
+                        uploadedBy,
+                        ImportedTodoSourceType.ZM_TODO_INJECTION,
+                        matchedCrmCases
+                )
+                .stream()
+                .map(ImportedZmTodoEntity::getCrmCaseNormalized)
+                .filter(TodoAnalyticsSupport::hasText)
+                .collect(Collectors.toSet());
+        long duplicateLookupMs = elapsedMs(duplicateLookupStart);
+
+        long classificationStart = System.nanoTime();
+        Set<String> seenInWorkbook = new LinkedHashSet<>(Math.max(16, matchedSourceRows.size()));
+        List<ParsedPreviewRow> annotatedRows = new ArrayList<>(matchedSourceRows.size());
+        int invalidRows = 0;
+        int duplicateRows = 0;
+        int readyRows = 0;
+
+        for (SourceRow sourceRow : matchedSourceRows) {
+            ParsedPreviewRow row = buildPreviewRow(sourceRow.rowNumber(), sourceRow.sourceValues(), cache);
+            List<String> existingIssues = row.issues();
+            ArrayList<String> issues = existingIssues.isEmpty()
+                    ? null
+                    : new ArrayList<>(existingIssues);
+
+            String crmCaseNormalized = row.crmCaseNormalized();
+            if (TodoAnalyticsSupport.hasText(crmCaseNormalized)) {
+                if (!seenInWorkbook.add(crmCaseNormalized)) {
+                    if (issues == null) {
+                        issues = new ArrayList<>(2);
+                    }
+                    issues.add("Duplicate CRM_CASE inside the selected file");
+                }
+
+                if (existingCrmCases.contains(crmCaseNormalized)) {
+                    if (issues == null) {
+                        issues = new ArrayList<>(2);
+                    }
+                    issues.add("Duplicate CRM_CASE already imported in your ZM todo context");
+                }
+            }
+
+            ParsedPreviewRow finalRow = issues == null ? row : row.withIssues(issues);
+            annotatedRows.add(finalRow);
+
+            if (finalRow.readyToInject()) {
+                readyRows += 1;
+                continue;
+            }
+
+            if (finalRow.hasDuplicateIssue()) {
+                duplicateRows += 1;
+            }
+            if (finalRow.hasValidationIssue()) {
+                invalidRows += 1;
+            }
+        }
+
+        log.info(
+                "todo_zm_import_classification file={} uploadedBy={} managerFilter={} totalRows={} matchedRows={} unmatchedRows={} existingDuplicates={} duplicateLookupMs={} classificationMs={} readyRows={} invalidRows={} duplicateRows={}",
+                sourceFileName,
+                uploadedBy,
+                managerFilter,
+                sourceRows.size(),
+                matchedSourceRows.size(),
+                unmatchedRows,
+                existingCrmCases.size(),
+                duplicateLookupMs,
+                elapsedMs(classificationStart),
+                readyRows,
+                invalidRows,
+                duplicateRows
+        );
 
         return new ParsedImport(
                 sourceFileName,
                 managerFilter,
-                totalRows,
+                sourceRows.size(),
                 annotatedRows.size(),
                 unmatchedRows,
                 invalidRows,
@@ -1180,89 +1360,56 @@ public class TodoImportService {
         return values;
     }
 
-    private ParsedPreviewRow buildPreviewRow(int rowNumber, Map<String, String> sourceValues) {
+    private ParsedPreviewRow buildPreviewRow(int rowNumber, Map<String, String> sourceValues, ImportValueCache cache) {
         List<String> issues = new ArrayList<>();
 
-        String crmCase = trimmedValue(sourceValues.get("CRM_CASE"));
+        String crmCase = cache.clean(sourceValues.get("CRM_CASE"));
         if (!hasText(crmCase)) {
             issues.add("CRM_CASE is required");
         }
 
-        String gouvernorat = trimmedValue(sourceValues.get("GOUVERNORAT"));
+        String gouvernorat = cache.clean(sourceValues.get("GOUVERNORAT"));
         if (!hasText(gouvernorat)) {
             issues.add("GOUVERNORAT is required");
         }
 
-        String zoneManager = trimmedValue(sourceValues.get("ZONE_MNANAGER"));
+        String zoneManager = cache.clean(sourceValues.get("ZONE_MNANAGER"));
         if (!hasText(zoneManager)) {
             issues.add("ZONE_MNANAGER is required");
         }
 
+        String openDateSurTimos = cache.clean(sourceValues.get("OPEN_DATE_SUR_TIMOS"));
+        LocalDate openDateSurTimosDate = cache.parseDate(openDateSurTimos);
+        String dateAffectationStt = cache.clean(sourceValues.get("DATE_AFFECTATION_STT"));
+        LocalDate dateAffectationSttDate = cache.parseDate(dateAffectationStt);
+        String stt = cache.clean(sourceValues.get("STT"));
+
         return new ParsedPreviewRow(
                 rowNumber,
                 crmCase,
-                normalizeLookupValue(crmCase),
-                trimmedValue(sourceValues.get("FX_DATE_CRM")),
-                trimmedValue(sourceValues.get("CONTACT1")),
-                trimmedValue(sourceValues.get("CONTACT2")),
-                trimmedValue(sourceValues.get("MSISDN")),
+                cache.normalizeLookup(crmCase),
+                cache.clean(sourceValues.get("FX_DATE_CRM")),
+                cache.clean(sourceValues.get("CONTACT1")),
+                cache.clean(sourceValues.get("CONTACT2")),
+                cache.clean(sourceValues.get("MSISDN")),
                 gouvernorat,
-                trimmedValue(sourceValues.get("DESCRIPTION")),
-                normalizeCoordinate(sourceValues.get("LATITUDE")),
-                normalizeCoordinate(sourceValues.get("LONGITUDE")),
-                trimmedValue(sourceValues.get("OPEN_DATE_SUR_TIMOS")),
-                trimmedValue(sourceValues.get("DATE_AFFECTATION_STT")),
-                trimmedValue(sourceValues.get("STT")),
-                trimmedValue(sourceValues.get("STATUT")),
+                cache.normalizeLookup(gouvernorat),
+                cache.clean(sourceValues.get("DESCRIPTION")),
+                cache.normalizeCoordinate(sourceValues.get("LATITUDE")),
+                cache.normalizeCoordinate(sourceValues.get("LONGITUDE")),
+                openDateSurTimos,
+                openDateSurTimosDate,
+                dateAffectationStt,
+                dateAffectationSttDate,
+                TodoAnalyticsSupport.calculateBusinessDays(openDateSurTimosDate, dateAffectationSttDate),
+                stt,
+                cache.normalizeLookup(stt),
+                cache.clean(sourceValues.get("STATUT")),
                 zoneManager,
+                cache.normalizeLookup(zoneManager),
                 Map.copyOf(sourceValues),
                 List.copyOf(issues)
         );
-    }
-
-    private List<ParsedPreviewRow> annotateDuplicateRows(String uploadedBy, List<ParsedPreviewRow> rows) {
-        if (rows.isEmpty()) {
-            return rows;
-        }
-
-        Set<String> crmCases = rows.stream()
-                .map(ParsedPreviewRow::crmCaseNormalized)
-                .filter(this::hasText)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-
-        Set<String> existingCrmCases = crmCases.isEmpty()
-                ? Set.of()
-                : importedZmTodoRepository.findByUploadedByAndSourceTypeAndCrmCaseNormalizedIn(
-                        uploadedBy,
-                        ImportedTodoSourceType.ZM_TODO_INJECTION,
-                        crmCases
-                )
-                .stream()
-                .map(ImportedZmTodoEntity::getCrmCaseNormalized)
-                .filter(this::hasText)
-                .collect(Collectors.toSet());
-
-        Set<String> seenInWorkbook = new LinkedHashSet<>();
-        List<ParsedPreviewRow> annotatedRows = new ArrayList<>();
-
-        for (ParsedPreviewRow row : rows) {
-            List<String> issues = new ArrayList<>(row.issues());
-            String crmCaseNormalized = row.crmCaseNormalized();
-
-            if (hasText(crmCaseNormalized)) {
-                if (!seenInWorkbook.add(crmCaseNormalized)) {
-                    issues.add("Duplicate CRM_CASE inside the selected file");
-                }
-
-                if (existingCrmCases.contains(crmCaseNormalized)) {
-                    issues.add("Duplicate CRM_CASE already imported in your ZM todo context");
-                }
-            }
-
-            annotatedRows.add(row.withIssues(issues));
-        }
-
-        return annotatedRows;
     }
 
     private List<ParsedAnalyticsRow> annotateDuplicateAnalyticsRows(String uploadedBy, List<ParsedAnalyticsRow> rows) {
@@ -1333,21 +1480,21 @@ public class TodoImportService {
                 .contact2(row.contact2())
                 .msisdn(row.msisdn())
                 .gouvernorat(row.gouvernorat())
-                .gouvernoratNormalized(normalizeLookupValue(row.gouvernorat()))
+                .gouvernoratNormalized(row.gouvernoratNormalized())
                 .description(row.description())
                 .latitude(row.latitude())
                 .longitude(row.longitude())
                 .openDateSurTimos(row.openDateSurTimos())
-                .openDateSurTimosDate(parseImportedDate(row.openDateSurTimos()))
+                .openDateSurTimosDate(row.openDateSurTimosDate())
                 .dateAffectationStt(row.dateAffectationStt())
-                .dateAffectationSttDate(parseImportedDate(row.dateAffectationStt()))
-                .slaBusinessDays(calculateBusinessDays(parseImportedDate(row.openDateSurTimos()), parseImportedDate(row.dateAffectationStt())))
+                .dateAffectationSttDate(row.dateAffectationSttDate())
+                .slaBusinessDays(row.slaBusinessDays())
                 .stt(row.stt())
-                .sttNormalized(normalizeLookupValue(row.stt()))
+                .sttNormalized(row.sttNormalized())
                 .statut(row.statut())
                 .zoneManager(row.zoneManager())
-                .zoneManagerNormalized(normalizeLookupValue(row.zoneManager()))
-                .sourceValues(row.sourceValues())
+                .zoneManagerNormalized(row.zoneManagerNormalized())
+                .sourceValues(null)
                 .build();
     }
 
@@ -1390,7 +1537,7 @@ public class TodoImportService {
                 .statut(row.statut())
                 .zoneManager(row.zoneManager())
                 .zoneManagerNormalized(row.zoneManagerNormalized())
-                .sourceValues(row.sourceValues())
+                .sourceValues(null)
                 .build();
     }
 
@@ -1489,8 +1636,34 @@ public class TodoImportService {
                 .statut(row.statut())
                 .zoneManager(row.zoneManager())
                 .zoneManagerNormalized(row.zoneManagerNormalized())
-                .sourceValues(row.sourceValues())
+                .sourceValues(null)
                 .build();
+    }
+
+    private void bulkInsertImportedTodos(List<ImportedTodoEntity> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        for (int start = 0; start < entities.size(); start += INSERT_CHUNK_SIZE) {
+            int end = Math.min(start + INSERT_CHUNK_SIZE, entities.size());
+            mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, ImportedTodoEntity.class)
+                    .insert(entities.subList(start, end))
+                    .execute();
+        }
+    }
+
+    private void bulkInsertImportedZmTodos(List<ImportedZmTodoEntity> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        for (int start = 0; start < entities.size(); start += INSERT_CHUNK_SIZE) {
+            int end = Math.min(start + INSERT_CHUNK_SIZE, entities.size());
+            mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, ImportedZmTodoEntity.class)
+                    .insert(entities.subList(start, end))
+                    .execute();
+        }
     }
 
     private List<ZmTodoAnalyticsSttItemResponse> buildZmTodoSttBreakdown(List<ParsedAnalyticsRow> rows) {
@@ -1807,18 +1980,7 @@ public class TodoImportService {
     }
 
     private String normalizeSearchToken(String value) {
-        if (!hasText(value)) {
-            return null;
-        }
-
-        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")
-                .toLowerCase(Locale.ROOT)
-                .replaceAll("[^a-z0-9]+", " ")
-                .trim()
-                .replaceAll("\\s+", " ");
-
-        return normalized.isBlank() ? null : normalized;
+        return TodoAnalyticsSupport.normalizeLookupValue(value);
     }
 
     private ResolvedZmIdentity resolveZmIdentity(String zmEmail) {
@@ -1885,7 +2047,7 @@ public class TodoImportService {
     }
 
     private double round2(double value) {
-        return Math.round(value * 100d) / 100d;
+        return TodoAnalyticsSupport.round2(value);
     }
 
     private void validateFile(MultipartFile file) {
@@ -1912,7 +2074,13 @@ public class TodoImportService {
             return true;
         }
 
-        return values.stream().noneMatch(this::hasText);
+        for (String value : values) {
+            if (hasText(value)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private String readCellValue(Cell cell, DataFormatter formatter, FormulaEvaluator evaluator) {
@@ -1965,49 +2133,19 @@ public class TodoImportService {
     }
 
     private String normalizeHeader(String value) {
-        return value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        return TodoAnalyticsSupport.normalizeHeader(value);
     }
 
     private String normalizeLookupValue(String value) {
-        if (!hasText(value)) {
-            return null;
-        }
-
-        return value.trim().toLowerCase(Locale.ROOT);
+        return TodoAnalyticsSupport.normalizeLookupValue(value);
     }
 
     private String canonicalTunisiaGovernorate(String rawValue) {
-        String normalized = normalizeGovernorateAlias(rawValue);
-        if (!hasText(normalized)) {
-            return null;
-        }
-
-        String exactMatch = TUNISIA_GOVERNORATE_ALIASES.get(normalized);
-        if (exactMatch != null) {
-            return exactMatch;
-        }
-
-        return TUNISIA_GOVERNORATE_ALIASES.entrySet().stream()
-                .filter(entry -> normalized.contains(entry.getKey()))
-                .sorted((left, right) -> Integer.compare(right.getKey().length(), left.getKey().length()))
-                .map(Map.Entry::getValue)
-                .findFirst()
-                .orElse(null);
+        return TodoAnalyticsSupport.canonicalGovernorate(rawValue);
     }
 
     private String normalizeGovernorateAlias(String value) {
-        if (!hasText(value)) {
-            return null;
-        }
-
-        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")
-                .toLowerCase(Locale.ROOT)
-                .replaceAll("[^a-z0-9]+", " ")
-                .trim()
-                .replaceAll("\\s+", " ");
-
-        return hasText(normalized) ? normalized : null;
+        return TodoAnalyticsSupport.normalizeLookupValue(value);
     }
 
     private String normalizeCoordinate(String rawValue) {
@@ -2265,7 +2403,49 @@ public class TodoImportService {
     }
 
     private boolean hasText(String value) {
-        return value != null && !value.isBlank();
+        return TodoAnalyticsSupport.hasText(value);
+    }
+
+    private long elapsedMs(long startNanos) {
+        return Math.round((System.nanoTime() - startNanos) / 1_000_000d);
+    }
+
+    private static final class ImportValueCache {
+        private final Map<String, String> cleanedValues = new LinkedHashMap<>();
+        private final Map<String, String> normalizedLookupValues = new LinkedHashMap<>();
+        private final Map<String, String> canonicalGovernorates = new LinkedHashMap<>();
+        private final Map<String, LocalDate> parsedDates = new LinkedHashMap<>();
+        private final Map<String, String> normalizedCoordinates = new LinkedHashMap<>();
+
+        private String clean(String rawValue) {
+            return cached(cleanedValues, rawValue, TodoAnalyticsSupport::cleanString);
+        }
+
+        private String normalizeLookup(String rawValue) {
+            return cached(normalizedLookupValues, rawValue, TodoAnalyticsSupport::normalizeLookupValue);
+        }
+
+        private String canonicalGovernorate(String rawValue) {
+            return cached(canonicalGovernorates, rawValue, TodoAnalyticsSupport::canonicalGovernorate);
+        }
+
+        private LocalDate parseDate(String rawValue) {
+            return cached(parsedDates, rawValue, TodoAnalyticsSupport::parseDate);
+        }
+
+        private String normalizeCoordinate(String rawValue) {
+            return cached(normalizedCoordinates, rawValue, TodoAnalyticsSupport::normalizeCoordinate);
+        }
+
+        private <T> T cached(Map<String, T> cache, String rawValue, Function<String, T> loader) {
+            if (cache.containsKey(rawValue)) {
+                return cache.get(rawValue);
+            }
+
+            T value = loader.apply(rawValue);
+            cache.put(rawValue, value);
+            return value;
+        }
     }
 
     private record SourceRow(
@@ -2368,14 +2548,20 @@ public class TodoImportService {
             String contact2,
             String msisdn,
             String gouvernorat,
+            String gouvernoratNormalized,
             String description,
             String latitude,
             String longitude,
             String openDateSurTimos,
+            LocalDate openDateSurTimosDate,
             String dateAffectationStt,
+            LocalDate dateAffectationSttDate,
+            Integer slaBusinessDays,
             String stt,
+            String sttNormalized,
             String statut,
             String zoneManager,
+            String zoneManagerNormalized,
             Map<String, String> sourceValues,
             List<String> issues
     ) {
@@ -2389,14 +2575,20 @@ public class TodoImportService {
                     contact2,
                     msisdn,
                     gouvernorat,
+                    gouvernoratNormalized,
                     description,
                     latitude,
                     longitude,
                     openDateSurTimos,
+                    openDateSurTimosDate,
                     dateAffectationStt,
+                    dateAffectationSttDate,
+                    slaBusinessDays,
                     stt,
+                    sttNormalized,
                     statut,
                     zoneManager,
+                    zoneManagerNormalized,
                     sourceValues,
                     List.copyOf(updatedIssues)
             );

@@ -11,6 +11,8 @@ import com.pfe.case_management.entity.SavedZmPerformanceStudyEntity;
 import com.pfe.case_management.model.ImportedTodoSourceType;
 import com.pfe.case_management.repository.SavedZmPerformanceStudyRepository;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -33,20 +35,17 @@ import java.util.Map;
 public class SavedZmPerformanceStudyService {
     private static final int INVALID_PAGE_SIZE_DEFAULT = 50;
     private static final int INVALID_PAGE_SIZE_MAX = 200;
+    private static final Logger log = LoggerFactory.getLogger(SavedZmPerformanceStudyService.class);
 
     private final MongoTemplate mongoTemplate;
     private final SavedZmPerformanceStudyRepository savedZmPerformanceStudyRepository;
 
     public SavedZmPerformanceStudyResponse saveCurrentStudy(String savedBy, SaveZmPerformanceStudyRequest request) {
+        long totalStart = System.nanoTime();
         Query stagingQuery = new Query(new Criteria().andOperator(
                 Criteria.where("sourceType").is(ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT),
                 Criteria.where("uploadedBy").is(savedBy)
         ));
-        List<ImportedTodoEntity> stagingRows = mongoTemplate.find(stagingQuery, ImportedTodoEntity.class);
-
-        if (stagingRows.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "There is no imported admin performance batch to save");
-        }
 
         if (request == null || request.study() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "There is no dashboard snapshot to save");
@@ -58,19 +57,43 @@ public class SavedZmPerformanceStudyService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "There is no dashboard data to save");
         }
 
+        long stagingQueryStart = System.nanoTime();
+        long stagingRowCount = mongoTemplate.count(stagingQuery, ImportedTodoEntity.class);
+        if (stagingRowCount == 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "There is no imported admin performance batch to save");
+        }
+
+        List<String> sourceFileNames = loadDistinctOrderedValues(stagingQuery, "sourceFileName");
+        List<String> sourceBatchIds = loadDistinctOrderedValues(stagingQuery, "importBatchId");
+        long stagingQueryMs = elapsedMs(stagingQueryStart);
+
         SavedZmPerformanceStudyEntity entity = SavedZmPerformanceStudyEntity.builder()
                 .savedAt(Instant.now())
                 .savedBy(savedBy)
-                .sourceFileNames(distinctOrderedValues(stagingRows, ImportedTodoEntity::getSourceFileName))
-                .sourceBatchIds(distinctOrderedValues(stagingRows, ImportedTodoEntity::getImportBatchId))
+                .sourceFileNames(sourceFileNames)
+                .sourceBatchIds(sourceBatchIds)
                 .study(study)
                 .build();
 
+        long updateStart = System.nanoTime();
         SavedZmPerformanceStudyEntity savedEntity = savedZmPerformanceStudyRepository.save(entity);
         Update update = new Update()
                 .set("sourceType", ImportedTodoSourceType.SAVED_ADMIN_PERFORMANCE_IMPORT)
                 .set("savedStudyId", savedEntity.getId());
         mongoTemplate.updateMulti(stagingQuery, update, ImportedTodoEntity.class);
+        long updateMs = elapsedMs(updateStart);
+
+        log.info(
+                "todo_admin_save_study savedBy={} studyId={} stagingRows={} sourceFiles={} sourceBatches={} stagingQueryMs={} updateMs={} totalMs={}",
+                savedBy,
+                savedEntity.getId(),
+                stagingRowCount,
+                sourceFileNames.size(),
+                sourceBatchIds.size(),
+                stagingQueryMs,
+                updateMs,
+                elapsedMs(totalStart)
+        );
         return toResponse(savedEntity);
     }
 
@@ -209,6 +232,26 @@ public class SavedZmPerformanceStudyService {
         return List.copyOf(values.values());
     }
 
+    private List<String> loadDistinctOrderedValues(Query query, String fieldName) {
+        List<String> values = mongoTemplate.query(ImportedTodoEntity.class)
+                .distinct(fieldName)
+                .matching(query)
+                .as(String.class)
+                .all();
+
+        Map<String, String> orderedValues = new LinkedHashMap<>();
+        for (String value : values) {
+            String cleaned = TodoAnalyticsSupport.cleanString(value);
+            if (!TodoAnalyticsSupport.hasText(cleaned)) {
+                continue;
+            }
+
+            orderedValues.putIfAbsent(TodoAnalyticsSupport.normalizeLookupValue(cleaned), cleaned);
+        }
+
+        return List.copyOf(orderedValues.values());
+    }
+
     private long distinctCount(List<ImportedTodoEntity> rows, ValueExtractor extractor) {
         return rows.stream()
                 .map(extractor::extract)
@@ -284,6 +327,10 @@ public class SavedZmPerformanceStudyService {
 
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private long elapsedMs(long startNanos) {
+        return Math.round((System.nanoTime() - startNanos) / 1_000_000d);
     }
 
     @FunctionalInterface

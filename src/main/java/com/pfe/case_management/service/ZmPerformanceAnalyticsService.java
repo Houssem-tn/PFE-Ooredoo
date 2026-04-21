@@ -9,49 +9,31 @@ import com.pfe.case_management.entity.SavedZmPerformanceStudyEntity;
 import com.pfe.case_management.model.ImportedTodoSourceType;
 import com.pfe.case_management.repository.SavedZmPerformanceStudyRepository;
 import lombok.RequiredArgsConstructor;
+import org.bson.Document;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationExpression;
+import org.springframework.data.mongodb.core.aggregation.ConditionalOperators;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.text.Normalizer;
-import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeFormatterBuilder;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
 public class ZmPerformanceAnalyticsService {
-    private static final List<DateTimeFormatter> SUPPORTED_DATE_FORMATTERS = List.of(
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yy").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yy").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("dd-MM-yyyy").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("MM-dd-yyyy").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy H:mm").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy HH:mm").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy h:mm a").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy H:mm").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy HH:mm").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("d/M/yyyy h:mm a").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd H:mm").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd HH:mm").toFormatter(Locale.ROOT),
-            new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("yyyy-MM-dd HH:mm:ss").toFormatter(Locale.ROOT)
-    );
-    private static final Map<String, String> TUNISIA_GOVERNORATE_ALIASES = buildTunisiaGovernorateAliases();
+    private static final Logger log = LoggerFactory.getLogger(ZmPerformanceAnalyticsService.class);
 
     private final MongoTemplate mongoTemplate;
     private final SavedZmPerformanceStudyRepository savedZmPerformanceStudyRepository;
@@ -63,14 +45,16 @@ public class ZmPerformanceAnalyticsService {
             LocalDate uploadedFrom,
             LocalDate uploadedTo
     ) {
-        List<ImportedTodoEntity> validRows = loadAnalyticsRows(
+        return loadStudy(
+                "live",
                 uploadedBy,
                 ImportedTodoSourceType.ADMIN_PERFORMANCE_IMPORT,
                 null,
+                zoneManager,
+                governorate,
                 uploadedFrom,
                 uploadedTo
         );
-        return buildStudy(validRows, zoneManager, governorate);
     }
 
     public ZmPerformanceStudyResponse getSavedStudy(
@@ -81,91 +65,134 @@ public class ZmPerformanceAnalyticsService {
             LocalDate uploadedFrom,
             LocalDate uploadedTo
     ) {
-        if (!hasText(savedStudyId)) {
+        if (!TodoAnalyticsSupport.hasText(savedStudyId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Saved study id is required");
         }
 
         resolveOwnedSavedStudy(savedStudyId, uploadedBy);
-
-        List<ImportedTodoEntity> validRows = loadAnalyticsRows(
+        return loadStudy(
+                "saved",
                 uploadedBy,
                 ImportedTodoSourceType.SAVED_ADMIN_PERFORMANCE_IMPORT,
                 savedStudyId.trim(),
+                zoneManager,
+                governorate,
                 uploadedFrom,
                 uploadedTo
         );
-        return buildStudy(validRows, zoneManager, governorate);
     }
 
-    private ZmPerformanceStudyResponse buildStudy(
-            List<ImportedTodoEntity> validRows,
+    private ZmPerformanceStudyResponse loadStudy(
+            String purpose,
+            String uploadedBy,
+            ImportedTodoSourceType sourceType,
+            String savedStudyId,
             String zoneManager,
-            String governorate
+            String governorate,
+            LocalDate uploadedFrom,
+            LocalDate uploadedTo
     ) {
-        List<String> availableZoneManagers = distinctSorted(validRows, ImportedTodoEntity::getZoneManager);
+        long totalStart = System.nanoTime();
+        validateUploadedRange(uploadedFrom, uploadedTo);
+
+        long optionsStart = System.nanoTime();
+        List<String> availableZoneManagers = loadDistinctValues(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                null,
+                "zoneManager"
+        );
+        long optionsQueryMs = elapsedMs(optionsStart);
+
         if (availableZoneManagers.isEmpty()) {
+            log.info(
+                    "todo_admin_analytics purpose={} uploadedBy={} totalCases=0 optionsQueryMs={} totalMs={}",
+                    purpose,
+                    uploadedBy,
+                    optionsQueryMs,
+                    elapsedMs(totalStart)
+            );
             return emptyStudy();
         }
 
         String selectedZoneManager = resolveOptionalSelection(zoneManager, availableZoneManagers);
-        String normalizedSelectedZm = normalizeLookupValue(selectedZoneManager);
+        String normalizedSelectedZoneManager = TodoAnalyticsSupport.normalizeLookupValue(selectedZoneManager);
 
-        List<ImportedTodoEntity> zmRows = normalizedSelectedZm == null
-                ? validRows
-                : validRows.stream()
-                .filter(row -> normalizedSelectedZm.equals(normalizeLookupValue(row.getZoneManager())))
-                .toList();
+        long governorateOptionsStart = System.nanoTime();
+        List<String> availableGovernorates = loadDistinctValues(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                normalizedSelectedZoneManager,
+                "gouvernorat"
+        );
+        long governorateOptionsQueryMs = elapsedMs(governorateOptionsStart);
 
-        List<String> availableGovernorates = distinctSortedGovernorates(zmRows);
-        String selectedGovernorate = hasText(governorate)
+        String selectedGovernorate = TodoAnalyticsSupport.hasText(governorate)
                 ? resolveOptionalGovernorateSelection(governorate, availableGovernorates)
                 : null;
-        String normalizedSelectedGovernorate = normalizeGovernorateLookupValue(selectedGovernorate);
+        String normalizedSelectedGovernorate = normalizeGovernorateSelection(selectedGovernorate);
 
-        List<ImportedTodoEntity> filteredRows = normalizedSelectedGovernorate == null
-                ? zmRows
-                : zmRows.stream()
-                .filter(row -> normalizedSelectedGovernorate.equals(normalizeGovernorateLookupValue(row.getGouvernorat())))
-                .toList();
+        SummaryMetrics summary = aggregateSummary(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                normalizedSelectedZoneManager,
+                normalizedSelectedGovernorate
+        );
+        TimedItems<ZmPerformanceSttBreakdownItemResponse> sttBreakdown = aggregateSttBreakdown(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                normalizedSelectedZoneManager,
+                normalizedSelectedGovernorate,
+                summary.totalCases()
+        );
+        TimedItems<ZmPerformanceGovernorateItemResponse> governorateBreakdown = aggregateGovernorateBreakdown(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                normalizedSelectedZoneManager,
+                normalizedSelectedGovernorate,
+                summary.totalCases()
+        );
 
-        long totalCases = filteredRows.size();
-        List<Integer> slaValues = filteredRows.stream()
-                .map(this::resolvedSlaBusinessDays)
-                .filter(value -> value != null)
-                .toList();
-
-        List<ZmPerformanceSttBreakdownItemResponse> sttBreakdown = buildSttBreakdown(filteredRows, totalCases);
-        List<ZmPerformanceGovernorateItemResponse> governorateBreakdown = buildGovernorateBreakdown(filteredRows, totalCases);
-
-        ZmPerformanceGovernorateItemResponse bestGovernorate = governorateBreakdown.stream()
+        List<ZmPerformanceSttBreakdownItemResponse> sttItems = sttBreakdown.items();
+        List<ZmPerformanceGovernorateItemResponse> governorateItems = governorateBreakdown.items();
+        ZmPerformanceSttBreakdownItemResponse topStt = sttItems.isEmpty() ? null : sttItems.get(0);
+        ZmPerformanceGovernorateItemResponse topGovernorate = governorateItems.isEmpty() ? null : governorateItems.get(0);
+        ZmPerformanceGovernorateItemResponse bestGovernorate = governorateItems.stream()
                 .filter(item -> item.averageSlaBusinessDays() != null)
                 .min(Comparator.comparingDouble(ZmPerformanceGovernorateItemResponse::averageSlaBusinessDays))
                 .orElse(null);
-
-        ZmPerformanceGovernorateItemResponse worstGovernorate = governorateBreakdown.stream()
+        ZmPerformanceGovernorateItemResponse worstGovernorate = governorateItems.stream()
                 .filter(item -> item.averageSlaBusinessDays() != null)
                 .max(Comparator.comparingDouble(ZmPerformanceGovernorateItemResponse::averageSlaBusinessDays))
                 .orElse(null);
 
-        ZmPerformanceSttBreakdownItemResponse topStt = sttBreakdown.isEmpty() ? null : sttBreakdown.get(0);
-        ZmPerformanceGovernorateItemResponse topGovernorate = governorateBreakdown.isEmpty() ? null : governorateBreakdown.get(0);
-
-        return new ZmPerformanceStudyResponse(
+        ZmPerformanceStudyResponse response = new ZmPerformanceStudyResponse(
                 selectedZoneManager,
                 selectedGovernorate,
                 availableZoneManagers,
                 availableGovernorates,
-                totalCases,
-                slaValues.size(),
-                round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d)),
-                slaValues.stream().mapToDouble(Integer::doubleValue).min().isPresent()
-                        ? round2(slaValues.stream().mapToDouble(Integer::doubleValue).min().orElse(0d))
-                        : null,
-                slaValues.stream().mapToDouble(Integer::doubleValue).max().isPresent()
-                        ? round2(slaValues.stream().mapToDouble(Integer::doubleValue).max().orElse(0d))
-                        : null,
-                sttBreakdown.size(),
-                governorateBreakdown.size(),
+                summary.totalCases(),
+                summary.rowsWithSla(),
+                roundNullable(summary.averageSlaBusinessDays(), 0d),
+                roundNullable(summary.minSlaBusinessDays()),
+                roundNullable(summary.maxSlaBusinessDays()),
+                sttItems.size(),
+                governorateItems.size(),
                 topStt != null ? topStt.sttName() : null,
                 topStt != null ? topStt.caseCount() : 0L,
                 topGovernorate != null ? topGovernorate.gouvernorat() : null,
@@ -174,130 +201,215 @@ public class ZmPerformanceAnalyticsService {
                 bestGovernorate != null ? bestGovernorate.averageSlaBusinessDays() : null,
                 worstGovernorate != null ? worstGovernorate.gouvernorat() : null,
                 worstGovernorate != null ? worstGovernorate.averageSlaBusinessDays() : null,
-                buildInsights(selectedZoneManager, totalCases, slaValues.size(), topStt, topGovernorate, worstGovernorate),
-                sttBreakdown,
-                governorateBreakdown
+                buildInsights(
+                        selectedZoneManager,
+                        summary.totalCases(),
+                        summary.rowsWithSla(),
+                        topStt,
+                        topGovernorate,
+                        worstGovernorate
+                ),
+                sttItems,
+                governorateItems
         );
+
+        log.info(
+                "todo_admin_analytics purpose={} uploadedBy={} totalCases={} zoneManagers={} governorates={} optionsQueryMs={} governorateOptionsQueryMs={} summaryQueryMs={} sttQueryMs={} governorateQueryMs={} totalMs={}",
+                purpose,
+                uploadedBy,
+                summary.totalCases(),
+                availableZoneManagers.size(),
+                availableGovernorates.size(),
+                optionsQueryMs,
+                governorateOptionsQueryMs,
+                summary.queryMs(),
+                sttBreakdown.queryMs(),
+                governorateBreakdown.queryMs(),
+                elapsedMs(totalStart)
+        );
+        return response;
     }
 
-    private List<ImportedTodoEntity> loadAnalyticsRows(
+    private SummaryMetrics aggregateSummary(
             String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
             LocalDate uploadedFrom,
-            LocalDate uploadedTo
+            LocalDate uploadedTo,
+            String zoneManagerNormalized,
+            String governorateNormalized
     ) {
-        validateUploadedRange(uploadedFrom, uploadedTo);
+        long queryStart = System.nanoTime();
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(buildRowsCriteria(
+                        uploadedBy,
+                        sourceType,
+                        savedStudyId,
+                        uploadedFrom,
+                        uploadedTo,
+                        zoneManagerNormalized,
+                        governorateNormalized
+                )),
+                Aggregation.group()
+                        .count().as("totalCases")
+                        .sum(sumPresent("slaBusinessDays")).as("rowsWithSla")
+                        .avg("slaBusinessDays").as("averageSlaBusinessDays")
+                        .min("slaBusinessDays").as("minSlaBusinessDays")
+                        .max("slaBusinessDays").as("maxSlaBusinessDays")
+        );
 
-        Query query = new Query();
-        query.addCriteria(Criteria.where("sourceType").is(sourceType));
-        query.addCriteria(Criteria.where("uploadedBy").is(uploadedBy));
-        query.addCriteria(Criteria.where("validRow").is(true));
-
-        if (hasText(savedStudyId)) {
-            query.addCriteria(Criteria.where("savedStudyId").is(savedStudyId.trim()));
+        Document document = mongoTemplate.aggregate(aggregation, ImportedTodoEntity.class, Document.class)
+                .getUniqueMappedResult();
+        long queryMs = elapsedMs(queryStart);
+        if (document == null) {
+            return new SummaryMetrics(0L, 0L, null, null, null, queryMs);
         }
 
-        if (uploadedFrom != null || uploadedTo != null) {
-            Criteria uploadedAtCriteria = Criteria.where("uploadedAt");
-            if (uploadedFrom != null) {
-                uploadedAtCriteria = uploadedAtCriteria.gte(uploadedFrom.atStartOfDay().toInstant(ZoneOffset.UTC));
-            }
-            if (uploadedTo != null) {
-                uploadedAtCriteria = uploadedAtCriteria.lte(uploadedTo.plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC).minusNanos(1));
-            }
-            query.addCriteria(uploadedAtCriteria);
+        return new SummaryMetrics(
+                readLong(document, "totalCases"),
+                readLong(document, "rowsWithSla"),
+                readDouble(document, "averageSlaBusinessDays"),
+                readDouble(document, "minSlaBusinessDays"),
+                readDouble(document, "maxSlaBusinessDays"),
+                queryMs
+        );
+    }
+
+    private TimedItems<ZmPerformanceSttBreakdownItemResponse> aggregateSttBreakdown(
+            String uploadedBy,
+            ImportedTodoSourceType sourceType,
+            String savedStudyId,
+            LocalDate uploadedFrom,
+            LocalDate uploadedTo,
+            String zoneManagerNormalized,
+            String governorateNormalized,
+            long totalCases
+    ) {
+        long queryStart = System.nanoTime();
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(buildRowsCriteria(
+                        uploadedBy,
+                        sourceType,
+                        savedStudyId,
+                        uploadedFrom,
+                        uploadedTo,
+                        zoneManagerNormalized,
+                        governorateNormalized
+                )),
+                Aggregation.group("sttNormalized")
+                        .first("stt").as("label")
+                        .count().as("caseCount")
+                        .avg("slaBusinessDays").as("averageSlaBusinessDays")
+        );
+
+        List<ZmPerformanceSttBreakdownItemResponse> items = mongoTemplate.aggregate(aggregation, ImportedTodoEntity.class, Document.class)
+                .getMappedResults()
+                .stream()
+                .map(document -> new ZmPerformanceSttBreakdownItemResponse(
+                        fallbackLabel(document.getString("label"), "Unassigned"),
+                        readLong(document, "caseCount"),
+                        percentage(readLong(document, "caseCount"), totalCases),
+                        roundNullable(readDouble(document, "averageSlaBusinessDays"))
+                ))
+                .sorted(Comparator
+                        .comparingLong(ZmPerformanceSttBreakdownItemResponse::caseCount).reversed()
+                        .thenComparing(item -> item.sttName() == null ? "" : item.sttName(), String.CASE_INSENSITIVE_ORDER))
+                .toList();
+
+        return new TimedItems<>(items, elapsedMs(queryStart));
+    }
+
+    private TimedItems<ZmPerformanceGovernorateItemResponse> aggregateGovernorateBreakdown(
+            String uploadedBy,
+            ImportedTodoSourceType sourceType,
+            String savedStudyId,
+            LocalDate uploadedFrom,
+            LocalDate uploadedTo,
+            String zoneManagerNormalized,
+            String governorateNormalized,
+            long totalCases
+    ) {
+        long queryStart = System.nanoTime();
+        Criteria criteria = buildRowsCriteria(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                zoneManagerNormalized,
+                governorateNormalized
+        );
+
+        Aggregation byGovernorate = Aggregation.newAggregation(
+                Aggregation.match(criteria),
+                Aggregation.group("gouvernoratNormalized")
+                        .first("gouvernorat").as("label")
+                        .count().as("caseCount")
+                        .avg("slaBusinessDays").as("averageSlaBusinessDays")
+        );
+        Aggregation byGovernorateAndStt = Aggregation.newAggregation(
+                Aggregation.match(criteria),
+                Aggregation.group("gouvernoratNormalized", "sttNormalized")
+                        .first("gouvernorat").as("gouvernorat")
+                        .first("stt").as("sttName")
+                        .count().as("caseCount")
+                        .avg("slaBusinessDays").as("averageSlaBusinessDays")
+        );
+
+        List<Document> governorateDocuments = mongoTemplate.aggregate(byGovernorate, ImportedTodoEntity.class, Document.class)
+                .getMappedResults();
+        List<Document> governorateSttDocuments = mongoTemplate.aggregate(byGovernorateAndStt, ImportedTodoEntity.class, Document.class)
+                .getMappedResults();
+
+        Map<String, List<GovernorateSttAggregate>> sttByGovernorate = new LinkedHashMap<>();
+        for (Document document : governorateSttDocuments) {
+            Document identifier = document.get("_id", Document.class);
+            String governorateKey = bucketKey(
+                    identifier == null ? null : identifier.getString("gouvernoratNormalized"),
+                    document.getString("gouvernorat"),
+                    "unknown"
+            );
+            sttByGovernorate.computeIfAbsent(governorateKey, ignored -> new ArrayList<>())
+                    .add(new GovernorateSttAggregate(
+                            fallbackLabel(document.getString("sttName"), "Unassigned"),
+                            readLong(document, "caseCount"),
+                            roundNullable(readDouble(document, "averageSlaBusinessDays"))
+                    ));
         }
 
-        return mongoTemplate.find(query, ImportedTodoEntity.class);
-    }
-
-    private SavedZmPerformanceStudyEntity resolveOwnedSavedStudy(String savedStudyId, String uploadedBy) {
-        return savedZmPerformanceStudyRepository.findByIdAndSavedBy(savedStudyId.trim(), uploadedBy)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved study was not found"));
-    }
-
-    private void validateUploadedRange(LocalDate uploadedFrom, LocalDate uploadedTo) {
-        if (uploadedFrom != null && uploadedTo != null && uploadedTo.isBefore(uploadedFrom)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Uploaded To date must be on or after Uploaded From date");
-        }
-    }
-
-    private List<ZmPerformanceSttBreakdownItemResponse> buildSttBreakdown(List<ImportedTodoEntity> rows, long totalCases) {
-        Map<String, List<ImportedTodoEntity>> grouped = groupByNormalized(rows, ImportedTodoEntity::getStt);
-        List<ZmPerformanceSttBreakdownItemResponse> items = new ArrayList<>();
-
-        for (List<ImportedTodoEntity> group : grouped.values()) {
-            String display = displayValue(group, ImportedTodoEntity::getStt);
-            List<Integer> slaValues = group.stream()
-                    .map(this::resolvedSlaBusinessDays)
-                    .filter(value -> value != null)
-                    .toList();
-
-            items.add(new ZmPerformanceSttBreakdownItemResponse(
-                    display,
-                    group.size(),
-                    totalCases == 0 ? 0d : round2((group.size() * 100d) / totalCases),
-                    slaValues.isEmpty() ? null : round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d))
-            ));
-        }
-
-        items.sort(Comparator
-                .comparingLong(ZmPerformanceSttBreakdownItemResponse::caseCount).reversed()
-                .thenComparing(item -> item.sttName() == null ? "" : item.sttName(), String.CASE_INSENSITIVE_ORDER));
-        return items;
-    }
-
-    private List<ZmPerformanceGovernorateItemResponse> buildGovernorateBreakdown(List<ImportedTodoEntity> rows, long totalCases) {
-        Map<String, List<ImportedTodoEntity>> grouped = groupByGovernorate(rows);
         List<ZmPerformanceGovernorateItemResponse> items = new ArrayList<>();
+        for (Document document : governorateDocuments) {
+            String label = fallbackLabel(document.getString("label"), "Unknown");
+            String governorateKey = bucketKey(document.getString("_id"), label, "unknown");
+            long caseCount = readLong(document, "caseCount");
+            List<GovernorateSttAggregate> sttAggregates = sttByGovernorate.getOrDefault(governorateKey, List.of());
 
-        for (List<ImportedTodoEntity> group : grouped.values()) {
-            String display = governorateDisplayValue(group);
-            List<Integer> slaValues = group.stream()
-                    .map(this::resolvedSlaBusinessDays)
-                    .filter(value -> value != null)
+            List<ZmPerformanceGovernorateSttItemResponse> sttBreakdown = sttAggregates.stream()
+                    .sorted(Comparator
+                            .comparingLong(GovernorateSttAggregate::caseCount).reversed()
+                            .thenComparing(GovernorateSttAggregate::sttName, String.CASE_INSENSITIVE_ORDER))
+                    .map(item -> new ZmPerformanceGovernorateSttItemResponse(
+                            item.sttName(),
+                            item.caseCount(),
+                            percentage(item.caseCount(), caseCount),
+                            item.averageSlaBusinessDays()
+                    ))
                     .toList();
 
-            Map<String, List<ImportedTodoEntity>> byStt = groupByNormalized(group, ImportedTodoEntity::getStt);
-            String topSttName = null;
-            long topSttCaseCount = 0L;
-            if (!byStt.isEmpty()) {
-                List<ImportedTodoEntity> topSttGroup = byStt.values().stream()
-                        .max(Comparator.comparingInt(List::size))
-                        .orElse(List.of());
-                topSttName = displayValue(topSttGroup, ImportedTodoEntity::getStt);
-                topSttCaseCount = topSttGroup.size();
-            }
-
-            List<ZmPerformanceGovernorateSttItemResponse> sttBreakdown = new ArrayList<>();
-            for (List<ImportedTodoEntity> sttGroup : byStt.values()) {
-                String sttDisplay = displayValue(sttGroup, ImportedTodoEntity::getStt);
-                List<Integer> sttSlaValues = sttGroup.stream()
-                        .map(this::resolvedSlaBusinessDays)
-                        .filter(value -> value != null)
-                        .toList();
-
-                sttBreakdown.add(new ZmPerformanceGovernorateSttItemResponse(
-                        sttDisplay,
-                        sttGroup.size(),
-                        group.isEmpty() ? 0d : round2((sttGroup.size() * 100d) / group.size()),
-                        sttSlaValues.isEmpty() ? null : round2(sttSlaValues.stream().mapToInt(Integer::intValue).average().orElse(0d))
-                ));
-            }
-
-            sttBreakdown.sort(Comparator
-                    .comparingLong(ZmPerformanceGovernorateSttItemResponse::caseCount).reversed()
-                    .thenComparing(item -> item.sttName() == null ? "" : item.sttName(), String.CASE_INSENSITIVE_ORDER));
+            GovernorateSttAggregate topStt = sttAggregates.stream()
+                    .max(Comparator
+                            .comparingLong(GovernorateSttAggregate::caseCount)
+                            .thenComparing(GovernorateSttAggregate::sttName, String.CASE_INSENSITIVE_ORDER))
+                    .orElse(null);
 
             items.add(new ZmPerformanceGovernorateItemResponse(
-                    display,
-                    group.size(),
-                    totalCases == 0 ? 0d : round2((group.size() * 100d) / totalCases),
-                    slaValues.isEmpty() ? null : round2(slaValues.stream().mapToInt(Integer::intValue).average().orElse(0d)),
-                    byStt.size(),
-                    topSttName,
-                    topSttCaseCount,
+                    label,
+                    caseCount,
+                    percentage(caseCount, totalCases),
+                    roundNullable(readDouble(document, "averageSlaBusinessDays")),
+                    sttBreakdown.size(),
+                    topStt != null ? topStt.sttName() : null,
+                    topStt != null ? topStt.caseCount() : 0L,
                     sttBreakdown
             ));
         }
@@ -305,20 +417,20 @@ public class ZmPerformanceAnalyticsService {
         items.sort(Comparator
                 .comparingLong(ZmPerformanceGovernorateItemResponse::caseCount).reversed()
                 .thenComparing(item -> item.gouvernorat() == null ? "" : item.gouvernorat(), String.CASE_INSENSITIVE_ORDER));
-        return items;
+        return new TimedItems<>(List.copyOf(items), elapsedMs(queryStart));
     }
 
     private List<String> buildInsights(
             String selectedZoneManager,
             long totalCases,
-            int rowsWithSla,
+            long rowsWithSla,
             ZmPerformanceSttBreakdownItemResponse topStt,
             ZmPerformanceGovernorateItemResponse topGovernorate,
             ZmPerformanceGovernorateItemResponse worstGovernorate
     ) {
         List<String> insights = new ArrayList<>();
 
-        if (hasText(selectedZoneManager)) {
+        if (selectedZoneManager != null) {
             insights.add(selectedZoneManager + " has " + totalCases + " imported case(s) in the current study scope.");
         } else {
             insights.add("All Zone Managers combined have " + totalCases + " imported case(s) in the current study scope.");
@@ -370,311 +482,210 @@ public class ZmPerformanceAnalyticsService {
         );
     }
 
-    private <T> Map<String, List<ImportedTodoEntity>> groupByNormalized(List<ImportedTodoEntity> rows, ValueExtractor extractor) {
-        Map<String, List<ImportedTodoEntity>> grouped = new LinkedHashMap<>();
+    private List<String> loadDistinctValues(
+            String uploadedBy,
+            ImportedTodoSourceType sourceType,
+            String savedStudyId,
+            LocalDate uploadedFrom,
+            LocalDate uploadedTo,
+            String zoneManagerNormalized,
+            String fieldName
+    ) {
+        Query query = Query.query(buildRowsCriteria(
+                uploadedBy,
+                sourceType,
+                savedStudyId,
+                uploadedFrom,
+                uploadedTo,
+                zoneManagerNormalized,
+                null
+        ));
 
-        for (ImportedTodoEntity row : rows) {
-            String rawValue = extractor.extract(row);
-            String normalized = normalizeLookupValue(rawValue);
-            if (normalized == null) {
+        List<String> values = mongoTemplate.query(ImportedTodoEntity.class)
+                .distinct(fieldName)
+                .matching(query)
+                .as(String.class)
+                .all();
+
+        LinkedHashMap<String, String> sanitized = new LinkedHashMap<>();
+        for (String value : values) {
+            String display = "gouvernorat".equals(fieldName)
+                    ? TodoAnalyticsSupport.canonicalGovernorate(value)
+                    : TodoAnalyticsSupport.cleanString(value);
+            String normalized = "gouvernorat".equals(fieldName)
+                    ? normalizeGovernorateSelection(display)
+                    : TodoAnalyticsSupport.normalizeLookupValue(display);
+            if (!TodoAnalyticsSupport.hasText(normalized) || sanitized.containsKey(normalized)) {
                 continue;
             }
-
-            grouped.computeIfAbsent(normalized, ignored -> new ArrayList<>()).add(row);
+            sanitized.put(normalized, display);
         }
 
-        return grouped;
-    }
-
-    private Map<String, List<ImportedTodoEntity>> groupByGovernorate(List<ImportedTodoEntity> rows) {
-        Map<String, List<ImportedTodoEntity>> grouped = new LinkedHashMap<>();
-
-        for (ImportedTodoEntity row : rows) {
-            String normalized = normalizeGovernorateLookupValue(row.getGouvernorat());
-            if (normalized == null) {
-                continue;
-            }
-
-            grouped.computeIfAbsent(normalized, ignored -> new ArrayList<>()).add(row);
-        }
-
-        return grouped;
-    }
-
-    private String displayValue(List<ImportedTodoEntity> rows, ValueExtractor extractor) {
-        for (ImportedTodoEntity row : rows) {
-            String rawValue = extractor.extract(row);
-            if (hasText(rawValue)) {
-                return rawValue.trim();
-            }
-        }
-        return null;
-    }
-
-    private String governorateDisplayValue(List<ImportedTodoEntity> rows) {
-        for (ImportedTodoEntity row : rows) {
-            String canonical = canonicalTunisiaGovernorate(row.getGouvernorat());
-            if (hasText(canonical)) {
-                return canonical;
-            }
-        }
-
-        return null;
-    }
-
-    private List<String> distinctSorted(List<ImportedTodoEntity> rows, ValueExtractor extractor) {
-        Map<String, String> normalizedToDisplay = new LinkedHashMap<>();
-
-        for (ImportedTodoEntity row : rows) {
-            String rawValue = extractor.extract(row);
-            String normalized = normalizeLookupValue(rawValue);
-            if (normalized == null || normalizedToDisplay.containsKey(normalized)) {
-                continue;
-            }
-
-            normalizedToDisplay.put(normalized, rawValue.trim());
-        }
-
-        return normalizedToDisplay.values().stream()
+        return sanitized.values().stream()
                 .sorted(String.CASE_INSENSITIVE_ORDER)
                 .toList();
     }
 
-    private List<String> distinctSortedGovernorates(List<ImportedTodoEntity> rows) {
-        Map<String, String> normalizedToDisplay = new LinkedHashMap<>();
+    private Criteria buildRowsCriteria(
+            String uploadedBy,
+            ImportedTodoSourceType sourceType,
+            String savedStudyId,
+            LocalDate uploadedFrom,
+            LocalDate uploadedTo,
+            String zoneManagerNormalized,
+            String governorateNormalized
+    ) {
+        List<Criteria> criteria = new ArrayList<>();
+        criteria.add(Criteria.where("sourceType").is(sourceType));
+        criteria.add(Criteria.where("uploadedBy").is(uploadedBy));
+        criteria.add(Criteria.where("validRow").is(true));
 
-        for (ImportedTodoEntity row : rows) {
-            String canonical = canonicalTunisiaGovernorate(row.getGouvernorat());
-            String normalized = normalizeGovernorateLookupValue(canonical);
-            if (normalized == null || normalizedToDisplay.containsKey(normalized)) {
-                continue;
-            }
-
-            normalizedToDisplay.put(normalized, canonical);
+        if (TodoAnalyticsSupport.hasText(savedStudyId)) {
+            criteria.add(Criteria.where("savedStudyId").is(savedStudyId.trim()));
         }
 
-        return normalizedToDisplay.values().stream()
-                .sorted(String.CASE_INSENSITIVE_ORDER)
-                .toList();
+        if (uploadedFrom != null || uploadedTo != null) {
+            Criteria uploadedAtCriteria = Criteria.where("uploadedAt");
+            if (uploadedFrom != null) {
+                uploadedAtCriteria = uploadedAtCriteria.gte(uploadedFrom.atStartOfDay().toInstant(ZoneOffset.UTC));
+            }
+            if (uploadedTo != null) {
+                uploadedAtCriteria = uploadedAtCriteria.lte(uploadedTo.plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC).minusNanos(1));
+            }
+            criteria.add(uploadedAtCriteria);
+        }
+
+        if (TodoAnalyticsSupport.hasText(zoneManagerNormalized)) {
+            criteria.add(Criteria.where("zoneManagerNormalized").is(zoneManagerNormalized));
+        }
+
+        if (TodoAnalyticsSupport.hasText(governorateNormalized)) {
+            criteria.add(Criteria.where("gouvernoratNormalized").is(governorateNormalized));
+        }
+
+        if (criteria.size() == 1) {
+            return criteria.get(0);
+        }
+
+        return new Criteria().andOperator(criteria.toArray(Criteria[]::new));
+    }
+
+    private SavedZmPerformanceStudyEntity resolveOwnedSavedStudy(String savedStudyId, String uploadedBy) {
+        return savedZmPerformanceStudyRepository.findByIdAndSavedBy(savedStudyId.trim(), uploadedBy)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved study was not found"));
+    }
+
+    private void validateUploadedRange(LocalDate uploadedFrom, LocalDate uploadedTo) {
+        if (uploadedFrom != null && uploadedTo != null && uploadedTo.isBefore(uploadedFrom)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Uploaded To date must be on or after Uploaded From date");
+        }
     }
 
     private String resolveOptionalSelection(String requestedValue, List<String> availableValues) {
-        if (!hasText(requestedValue)) {
+        if (!TodoAnalyticsSupport.hasText(requestedValue)) {
             return null;
         }
 
-        String normalizedRequested = normalizeLookupValue(requestedValue);
-        if (normalizedRequested == null) {
+        String normalizedRequested = TodoAnalyticsSupport.normalizeLookupValue(requestedValue);
+        if (!TodoAnalyticsSupport.hasText(normalizedRequested)) {
             return null;
         }
 
         return availableValues.stream()
-                .filter(value -> normalizedRequested.equals(normalizeLookupValue(value)))
+                .filter(value -> normalizedRequested.equals(TodoAnalyticsSupport.normalizeLookupValue(value)))
                 .findFirst()
                 .orElse(null);
     }
 
     private String resolveOptionalGovernorateSelection(String requestedValue, List<String> availableValues) {
-        if (!hasText(requestedValue)) {
+        if (!TodoAnalyticsSupport.hasText(requestedValue)) {
             return null;
         }
 
-        String normalizedRequested = normalizeGovernorateLookupValue(requestedValue);
-        if (normalizedRequested == null) {
+        String normalizedRequested = normalizeGovernorateSelection(requestedValue);
+        if (!TodoAnalyticsSupport.hasText(normalizedRequested)) {
             return null;
         }
 
         return availableValues.stream()
-                .filter(value -> normalizedRequested.equals(normalizeGovernorateLookupValue(value)))
+                .filter(value -> normalizedRequested.equals(normalizeGovernorateSelection(value)))
                 .findFirst()
                 .orElse(null);
     }
 
-    private String normalizeLookupValue(String value) {
-        if (!hasText(value)) {
-            return null;
-        }
-
-        return value.trim().toLowerCase(Locale.ROOT);
+    private String normalizeGovernorateSelection(String value) {
+        return TodoAnalyticsSupport.normalizeLookupValue(TodoAnalyticsSupport.canonicalGovernorate(value));
     }
 
-    private String normalizeGovernorateLookupValue(String value) {
-        String canonical = canonicalTunisiaGovernorate(value);
-        if (!hasText(canonical)) {
-            return null;
-        }
-
-        return normalizeLookupValue(canonical);
+    private AggregationExpression sumPresent(String fieldName) {
+        return ConditionalOperators.when(Criteria.where(fieldName).ne(null)).then(1).otherwise(0);
     }
 
-    private String canonicalTunisiaGovernorate(String rawValue) {
-        String normalized = normalizeGovernorateAlias(rawValue);
-        if (!hasText(normalized)) {
-            return null;
-        }
-
-        String exactMatch = TUNISIA_GOVERNORATE_ALIASES.get(normalized);
-        if (exactMatch != null) {
-            return exactMatch;
-        }
-
-        return TUNISIA_GOVERNORATE_ALIASES.entrySet().stream()
-                .filter(entry -> normalized.contains(entry.getKey()))
-                .sorted((left, right) -> Integer.compare(right.getKey().length(), left.getKey().length()))
-                .map(Map.Entry::getValue)
-                .findFirst()
-                .orElse(null);
+    private long readLong(Document document, String fieldName) {
+        Object value = document.get(fieldName);
+        return value instanceof Number number ? number.longValue() : 0L;
     }
 
-    private String normalizeGovernorateAlias(String value) {
-        if (!hasText(value)) {
-            return null;
+    private Double readDouble(Document document, String fieldName) {
+        Object value = document.get(fieldName);
+        return value instanceof Number number ? number.doubleValue() : null;
+    }
+
+    private Double roundNullable(Double value) {
+        return roundNullable(value, null);
+    }
+
+    private Double roundNullable(Double value, Double fallback) {
+        return value == null ? fallback : TodoAnalyticsSupport.round2(value);
+    }
+
+    private double percentage(long count, long total) {
+        if (total <= 0) {
+            return 0d;
         }
 
-        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")
-                .toLowerCase(Locale.ROOT)
-                .replaceAll("[^a-z0-9]+", " ")
-                .trim()
-                .replaceAll("\\s+", " ");
-
-        return hasText(normalized) ? normalized : null;
+        return TodoAnalyticsSupport.round2((count * 100d) / total);
     }
 
-    private Integer resolvedSlaBusinessDays(ImportedTodoEntity row) {
-        if (row.getSlaBusinessDays() != null) {
-            return row.getSlaBusinessDays();
+    private String fallbackLabel(String value, String fallback) {
+        String cleaned = TodoAnalyticsSupport.cleanString(value);
+        return TodoAnalyticsSupport.hasText(cleaned) ? cleaned : fallback;
+    }
+
+    private String bucketKey(String normalizedValue, String fallbackValue, String emptyFallback) {
+        String cleanedNormalized = TodoAnalyticsSupport.cleanString(normalizedValue);
+        if (TodoAnalyticsSupport.hasText(cleanedNormalized)) {
+            return cleanedNormalized;
         }
 
-        LocalDate startDate = row.getOpenDateSurTimosDate() != null
-                ? row.getOpenDateSurTimosDate()
-                : parseImportedDate(row.getOpenDateSurTimos());
-        LocalDate endDate = row.getDateAffectationSttDate() != null
-                ? row.getDateAffectationSttDate()
-                : parseImportedDate(row.getDateAffectationStt());
-
-        return calculateBusinessDays(startDate, endDate);
+        String normalizedFallback = TodoAnalyticsSupport.normalizeLookupValue(fallbackValue);
+        return TodoAnalyticsSupport.hasText(normalizedFallback) ? normalizedFallback : emptyFallback;
     }
 
-    private LocalDate parseImportedDate(String rawValue) {
-        if (!hasText(rawValue)) {
-            return null;
-        }
-
-        String trimmed = rawValue.trim();
-        for (DateTimeFormatter formatter : SUPPORTED_DATE_FORMATTERS) {
-            try {
-                return LocalDate.parse(trimmed, formatter);
-            } catch (DateTimeParseException ignored) {
-                // Keep trying the known telecom export formats.
-            }
-        }
-
-        String strippedTime = trimmed.replace('T', ' ').replaceAll("\\s+", " ").trim();
-        int firstSpaceIndex = strippedTime.indexOf(' ');
-        if (firstSpaceIndex > 0) {
-            String datePortion = strippedTime.substring(0, firstSpaceIndex);
-            for (DateTimeFormatter formatter : SUPPORTED_DATE_FORMATTERS) {
-                try {
-                    return LocalDate.parse(datePortion, formatter);
-                } catch (DateTimeParseException ignored) {
-                    // Keep trying compact date-only fallbacks.
-                }
-            }
-        }
-
-        return null;
+    private long elapsedMs(long startNanos) {
+        return Math.round((System.nanoTime() - startNanos) / 1_000_000d);
     }
 
-    private Integer calculateBusinessDays(LocalDate startDate, LocalDate endDate) {
-        if (startDate == null || endDate == null || endDate.isBefore(startDate)) {
-            return null;
-        }
-
-        int businessDays = 0;
-        LocalDate cursor = startDate;
-        while (cursor.isBefore(endDate)) {
-            cursor = cursor.plusDays(1);
-            if (cursor.isAfter(endDate)) {
-                break;
-            }
-
-            if (isWorkingDay(cursor)) {
-                businessDays += 1;
-            }
-        }
-
-        return businessDays;
+    private record SummaryMetrics(
+            long totalCases,
+            long rowsWithSla,
+            Double averageSlaBusinessDays,
+            Double minSlaBusinessDays,
+            Double maxSlaBusinessDays,
+            long queryMs
+    ) {
     }
 
-    private boolean isWorkingDay(LocalDate date) {
-        DayOfWeek dayOfWeek = date.getDayOfWeek();
-        return dayOfWeek != DayOfWeek.SATURDAY && dayOfWeek != DayOfWeek.SUNDAY;
+    private record TimedItems<T>(
+            List<T> items,
+            long queryMs
+    ) {
     }
 
-    private boolean hasText(String value) {
-        return value != null && !value.isBlank();
-    }
-
-    private double round2(double value) {
-        return Math.round(value * 100d) / 100d;
-    }
-
-    @FunctionalInterface
-    private interface ValueExtractor {
-        String extract(ImportedTodoEntity entity);
-    }
-
-    private static Map<String, String> buildTunisiaGovernorateAliases() {
-        Map<String, String> aliases = new LinkedHashMap<>();
-        registerGovernorateAlias(aliases, "Ariana", "Ariana");
-        registerGovernorateAlias(aliases, "Beja", "Beja", "Béja");
-        registerGovernorateAlias(aliases, "Ben Arous", "Ben Arous");
-        registerGovernorateAlias(aliases, "Bizerte", "Bizerte");
-        registerGovernorateAlias(aliases, "Gabes", "Gabes", "Gabès");
-        registerGovernorateAlias(aliases, "Gafsa", "Gafsa");
-        registerGovernorateAlias(aliases, "Jendouba", "Jendouba");
-        registerGovernorateAlias(aliases, "Kairouan", "Kairouan");
-        registerGovernorateAlias(aliases, "Kasserine", "Kasserine");
-        registerGovernorateAlias(aliases, "Kebili", "Kebili", "Kébili");
-        registerGovernorateAlias(aliases, "Kef", "Kef", "Le Kef");
-        registerGovernorateAlias(aliases, "Mahdia", "Mahdia");
-        registerGovernorateAlias(aliases, "Manouba", "Manouba", "Mannouba");
-        registerGovernorateAlias(aliases, "Medenine", "Medenine", "Médenine");
-        registerGovernorateAlias(aliases, "Monastir", "Monastir");
-        registerGovernorateAlias(aliases, "Nabeul", "Nabeul");
-        registerGovernorateAlias(aliases, "Sfax", "Sfax");
-        registerGovernorateAlias(aliases, "Sidi Bouzid", "Sidi Bouzid");
-        registerGovernorateAlias(aliases, "Siliana", "Siliana");
-        registerGovernorateAlias(aliases, "Sousse", "Sousse");
-        registerGovernorateAlias(aliases, "Tataouine", "Tataouine");
-        registerGovernorateAlias(aliases, "Tozeur", "Tozeur");
-        registerGovernorateAlias(aliases, "Tunis", "Tunis");
-        registerGovernorateAlias(aliases, "Zaghouan", "Zaghouan");
-        return Map.copyOf(aliases);
-    }
-
-    private static void registerGovernorateAlias(Map<String, String> aliases, String canonical, String... variants) {
-        for (String variant : variants) {
-            String normalized = normalizeGovernorateAliasStatic(variant);
-            if (normalized != null) {
-                aliases.put(normalized, canonical);
-            }
-        }
-    }
-
-    private static String normalizeGovernorateAliasStatic(String value) {
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-
-        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
-                .replaceAll("\\p{M}+", "")
-                .toLowerCase(Locale.ROOT)
-                .replaceAll("[^a-z0-9]+", " ")
-                .trim()
-                .replaceAll("\\s+", " ");
-
-        return normalized.isBlank() ? null : normalized;
+    private record GovernorateSttAggregate(
+            String sttName,
+            long caseCount,
+            Double averageSlaBusinessDays
+    ) {
     }
 }
