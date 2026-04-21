@@ -29,6 +29,14 @@ import java.util.Map;
         @CompoundIndex(
                 name = "activation_rows_owner_batch_row_idx",
                 def = "{'uploadedBy': 1, 'batchId': 1, 'rowNumber': 1}"
+        ),
+        @CompoundIndex(
+                name = "activation_rows_owner_valid_stt_gov_uploaded_idx",
+                def = "{'uploadedBy': 1, 'validRow': 1, 'nameSttNormalized': 1, 'gouvernoratNormalized': 1, 'uploadedAt': -1}"
+        ),
+        @CompoundIndex(
+                name = "activation_rows_owner_valid_batch_uploaded_idx",
+                def = "{'uploadedBy': 1, 'validRow': 1, 'batchId': 1, 'uploadedAt': -1}"
         )
 })
 @Getter
@@ -126,6 +134,13 @@ public class ActivationAnalyticsRowEntity {
     private Integer rdvBusinessDays;
     private Integer executionBusinessDays;
     private Integer endToEndBusinessDays;
+
+    private Boolean completed;
+    private Boolean rdvSuccess;
+    private Boolean injoignable;
+    private Boolean abandon;
+    private Boolean blocked;
+    private Boolean delayed;
 
     private Map<String, String> sourceValues;
 }

@@ -1,6 +1,9 @@
 package com.pfe.activation_analytics.service;
 
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsChartsResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsDashboardResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowsPageResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSummaryResponse;
 import com.pfe.activation_analytics.dto.SaveActivationAnalyticsStudyRequest;
 import com.pfe.activation_analytics.dto.SavedActivationAnalyticsStudyResponse;
 import com.pfe.activation_analytics.entity.ActivationAnalyticsImportBatchEntity;
@@ -74,6 +77,48 @@ public class SavedActivationAnalyticsStudyService {
         return dashboardService.getSavedStudyDashboard(savedBy, study.getSourceBatchIds(), stt, governorate);
     }
 
+    public AdminActivationAnalyticsSummaryResponse getSavedStudySummary(
+            String savedBy,
+            String studyId,
+            String stt,
+            String governorate
+    ) {
+        SavedActivationAnalyticsStudyEntity study = resolveOwnedStudy(studyId, savedBy);
+        boolean hasAdHocFilters = ActivationAnalyticsSupport.hasText(stt) || ActivationAnalyticsSupport.hasText(governorate);
+        if (!hasAdHocFilters && study.getDashboardSnapshot() != null) {
+            return dashboardService.toSummary(study.getDashboardSnapshot());
+        }
+
+        return dashboardService.getSavedStudySummary(savedBy, study.getSourceBatchIds(), stt, governorate);
+    }
+
+    public AdminActivationAnalyticsChartsResponse getSavedStudyCharts(
+            String savedBy,
+            String studyId,
+            String stt,
+            String governorate
+    ) {
+        SavedActivationAnalyticsStudyEntity study = resolveOwnedStudy(studyId, savedBy);
+        boolean hasAdHocFilters = ActivationAnalyticsSupport.hasText(stt) || ActivationAnalyticsSupport.hasText(governorate);
+        if (!hasAdHocFilters && study.getDashboardSnapshot() != null) {
+            return dashboardService.toCharts(study.getDashboardSnapshot());
+        }
+
+        return dashboardService.getSavedStudyCharts(savedBy, study.getSourceBatchIds(), stt, governorate);
+    }
+
+    public AdminActivationAnalyticsRowsPageResponse getSavedStudyRows(
+            String savedBy,
+            String studyId,
+            String stt,
+            String governorate,
+            int page,
+            int size
+    ) {
+        SavedActivationAnalyticsStudyEntity study = resolveOwnedStudy(studyId, savedBy);
+        return dashboardService.getSavedStudyRows(savedBy, study.getSourceBatchIds(), stt, governorate, page, size);
+    }
+
     private SavedActivationAnalyticsStudyResponse toResponse(SavedActivationAnalyticsStudyEntity entity) {
         return new SavedActivationAnalyticsStudyResponse(
                 entity.getId(),
@@ -83,6 +128,11 @@ public class SavedActivationAnalyticsStudyService {
                 entity.getSourceBatchIds() == null ? List.of() : List.copyOf(entity.getSourceBatchIds()),
                 entity.getDashboardSnapshot()
         );
+    }
+
+    private SavedActivationAnalyticsStudyEntity resolveOwnedStudy(String studyId, String savedBy) {
+        return savedStudyRepository.findByIdAndSavedBy(studyId, savedBy)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved activation analysis was not found"));
     }
 
     private List<String> distinctOrderedValues(

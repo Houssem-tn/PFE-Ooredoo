@@ -22,6 +22,10 @@ import org.jsoup.Jsoup;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.mongodb.core.BulkOperations;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -39,9 +43,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -49,6 +55,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
@@ -58,8 +65,12 @@ public class ActivationAnalyticsImportService {
     private static final Logger log = LoggerFactory.getLogger(ActivationAnalyticsImportService.class);
     private static final int VALID_PREVIEW_LIMIT = 80;
     private static final int INVALID_ROW_PAGE_SIZE = 50;
+    private static final int INSERT_CHUNK_SIZE = 5_000;
     private static final List<String> REQUIRED_COLUMNS = List.of("CRM_CASE");
     private static final Map<String, List<String>> COLUMN_ALIASES = buildColumnAliases();
+    private static final String DUPLICATE_IN_FILE_ISSUE = "Duplicate CRM_CASE inside the selected file";
+    private static final String DUPLICATE_IN_DATASET_ISSUE =
+            "Duplicate CRM_CASE already imported in the admin activation analytics dataset";
 
     static {
         ZipSecureFile.setMinInflateRatio(0.0001d);
@@ -67,14 +78,16 @@ public class ActivationAnalyticsImportService {
 
     private final ActivationAnalyticsRowRepository rowRepository;
     private final ActivationAnalyticsImportBatchRepository batchRepository;
+    private final MongoTemplate mongoTemplate;
 
     public AdminActivationAnalyticsPreviewResponse preview(MultipartFile file, String uploadedBy) {
+        long totalStart = System.nanoTime();
         ParsedImport parsedImport = parseWorkbook(file, uploadedBy);
 
         List<ParsedRow> validRows = parsedImport.validRowsToStore();
         List<ParsedRow> invalidRows = parsedImport.invalidRowsOnly();
 
-        return new AdminActivationAnalyticsPreviewResponse(
+        AdminActivationAnalyticsPreviewResponse response = new AdminActivationAnalyticsPreviewResponse(
                 parsedImport.sourceFileName(),
                 parsedImport.totalRows(),
                 parsedImport.validNewRows(),
@@ -92,22 +105,40 @@ public class ActivationAnalyticsImportService {
                         .map(this::toPreviewRow)
                         .toList()
         );
+
+        log.info(
+                "activation_import_preview file={} uploadedBy={} totalRows={} validNewRows={} duplicateRows={} invalidRows={} totalMs={}",
+                parsedImport.sourceFileName(),
+                uploadedBy,
+                parsedImport.totalRows(),
+                parsedImport.validNewRows(),
+                parsedImport.duplicateRows(),
+                parsedImport.invalidRows(),
+                elapsedMs(totalStart)
+        );
+        return response;
     }
 
     public AdminActivationAnalyticsImportResponse importFile(MultipartFile file, String uploadedBy) {
+        long totalStart = System.nanoTime();
         ParsedImport parsedImport = parseWorkbook(file, uploadedBy);
 
         String batchId = UUID.randomUUID().toString();
         Instant uploadedAt = Instant.now();
+        List<ParsedRow> validRows = parsedImport.validRowsToStore();
 
-        List<ActivationAnalyticsRowEntity> entities = parsedImport.validRowsToStore().stream()
-                .map(row -> toEntity(row, parsedImport.sourceFileName(), batchId, uploadedBy, uploadedAt))
-                .toList();
-
-        if (!entities.isEmpty()) {
-            rowRepository.saveAll(entities);
+        long entityBuildStart = System.nanoTime();
+        List<ActivationAnalyticsRowEntity> entities = new ArrayList<>(validRows.size());
+        for (ParsedRow row : validRows) {
+            entities.add(toEntity(row, parsedImport.sourceFileName(), batchId, uploadedBy, uploadedAt));
         }
+        long entityBuildMs = elapsedMs(entityBuildStart);
 
+        long saveStart = System.nanoTime();
+        insertRowsInBatches(entities);
+        long saveMs = elapsedMs(saveStart);
+
+        long batchSaveStart = System.nanoTime();
         ActivationAnalyticsImportBatchEntity batch = ActivationAnalyticsImportBatchEntity.builder()
                 .batchId(batchId)
                 .uploadedBy(uploadedBy)
@@ -122,8 +153,9 @@ public class ActivationAnalyticsImportService {
                 .distinctGovernorates(parsedImport.distinctGovernorates())
                 .build();
         batchRepository.save(batch);
+        long batchSaveMs = elapsedMs(batchSaveStart);
 
-        return new AdminActivationAnalyticsImportResponse(
+        AdminActivationAnalyticsImportResponse response = new AdminActivationAnalyticsImportResponse(
                 batchId,
                 parsedImport.sourceFileName(),
                 parsedImport.totalRows(),
@@ -135,12 +167,29 @@ public class ActivationAnalyticsImportService {
                 parsedImport.distinctGovernorates(),
                 uploadedAt
         );
+
+        log.info(
+                "activation_import_commit file={} uploadedBy={} batchId={} insertedRows={} totalRows={} duplicateRows={} invalidRows={} entityBuildMs={} saveMs={} batchSaveMs={} totalMs={}",
+                parsedImport.sourceFileName(),
+                uploadedBy,
+                batchId,
+                entities.size(),
+                parsedImport.totalRows(),
+                parsedImport.duplicateRows(),
+                parsedImport.invalidRows(),
+                entityBuildMs,
+                saveMs,
+                batchSaveMs,
+                elapsedMs(totalStart)
+        );
+        return response;
     }
 
     private ParsedImport parseWorkbook(MultipartFile file, String uploadedBy) {
         validateFile(file);
 
         String sourceFileName = resolveSourceFileName(file);
+        long parseStart = System.nanoTime();
 
         try (InputStream inputStream = file.getInputStream();
              Workbook workbook = WorkbookFactory.create(inputStream)) {
@@ -160,6 +209,7 @@ public class ActivationAnalyticsImportService {
             Map<String, Integer> headerIndexes = resolveHeaderIndexes(headerRow, formatter, evaluator);
             validateRequiredColumns(headerIndexes);
 
+            long extractionStart = System.nanoTime();
             List<SourceRow> sourceRows = new ArrayList<>();
             for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
                 Row row = sheet.getRow(rowIndex);
@@ -171,6 +221,14 @@ public class ActivationAnalyticsImportService {
                 sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
             }
 
+            long extractionMs = elapsedMs(extractionStart);
+            log.info(
+                    "activation_import_parse file={} uploadedBy={} parser=poi extractedRows={} extractionMs={}",
+                    sourceFileName,
+                    uploadedBy,
+                    sourceRows.size(),
+                    extractionMs
+            );
             return buildParsedImport(sourceFileName, sourceRows, uploadedBy);
         } catch (EncryptedDocumentException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Password-protected Excel files are not supported", ex);
@@ -190,17 +248,33 @@ public class ActivationAnalyticsImportService {
 
             log.warn("Failed to read activation analytics file {}", sourceFileName, ex);
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, resolveExcelReadError(ex), ex);
+        } finally {
+            log.info(
+                    "activation_import_parse_complete file={} uploadedBy={} totalParseMs={}",
+                    sourceFileName,
+                    uploadedBy,
+                    elapsedMs(parseStart)
+            );
         }
     }
 
     private ParsedImport parseStructuredTextWorkbook(MultipartFile file, String sourceFileName, String uploadedBy) throws Exception {
+        long parseStart = System.nanoTime();
         byte[] bytes = file.getBytes();
         String content = decodeTextContent(bytes);
         List<String> failures = new ArrayList<>();
 
         if (looksLikeSpreadsheetXml(content)) {
             try {
-                return buildParsedImport(sourceFileName, toSourceRows(parseSpreadsheetXmlMatrix(bytes)), uploadedBy);
+                List<SourceRow> sourceRows = toSourceRows(parseSpreadsheetXmlMatrix(bytes));
+                log.info(
+                        "activation_import_parse file={} uploadedBy={} parser=spreadsheet_xml extractedRows={} extractionMs={}",
+                        sourceFileName,
+                        uploadedBy,
+                        sourceRows.size(),
+                        elapsedMs(parseStart)
+                );
+                return buildParsedImport(sourceFileName, sourceRows, uploadedBy);
             } catch (Exception ex) {
                 failures.add(sanitizeErrorMessage(deepestMessage(ex)));
             }
@@ -208,14 +282,30 @@ public class ActivationAnalyticsImportService {
 
         if (looksLikeHtml(content)) {
             try {
-                return buildParsedImport(sourceFileName, toSourceRows(parseHtmlMatrix(content)), uploadedBy);
+                List<SourceRow> sourceRows = toSourceRows(parseHtmlMatrix(content));
+                log.info(
+                        "activation_import_parse file={} uploadedBy={} parser=html extractedRows={} extractionMs={}",
+                        sourceFileName,
+                        uploadedBy,
+                        sourceRows.size(),
+                        elapsedMs(parseStart)
+                );
+                return buildParsedImport(sourceFileName, sourceRows, uploadedBy);
             } catch (Exception ex) {
                 failures.add(sanitizeErrorMessage(deepestMessage(ex)));
             }
         }
 
         try {
-            return buildParsedImport(sourceFileName, toSourceRows(parseDelimitedMatrix(content)), uploadedBy);
+            List<SourceRow> sourceRows = toSourceRows(parseDelimitedMatrix(content));
+            log.info(
+                    "activation_import_parse file={} uploadedBy={} parser=delimited extractedRows={} extractionMs={}",
+                    sourceFileName,
+                    uploadedBy,
+                    sourceRows.size(),
+                    elapsedMs(parseStart)
+            );
+            return buildParsedImport(sourceFileName, sourceRows, uploadedBy);
         } catch (Exception ex) {
             failures.add(sanitizeErrorMessage(deepestMessage(ex)));
         }
@@ -231,51 +321,82 @@ public class ActivationAnalyticsImportService {
     }
 
     private ParsedImport buildParsedImport(String sourceFileName, List<SourceRow> sourceRows, String uploadedBy) {
-        Set<String> crmCases = sourceRows.stream()
-                .map(row -> ActivationAnalyticsSupport.normalizeLookupValue(row.sourceValues().get("CRM_CASE")))
-                .filter(ActivationAnalyticsSupport::hasText)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-
-        Set<String> existingCrmCases = findExistingCrmCases(uploadedBy, crmCases);
-        Set<String> seenInFile = new LinkedHashSet<>();
-        List<ParsedRow> rows = new ArrayList<>();
+        long duplicateLookupStart = System.nanoTime();
+        Set<String> existingCrmCases = findExistingCrmCases(uploadedBy);
+        long duplicateLookupMs = elapsedMs(duplicateLookupStart);
+        long classificationStart = System.nanoTime();
+        ImportValueCache cache = new ImportValueCache();
+        Set<String> seenInFile = new LinkedHashSet<>(Math.max(16, sourceRows.size()));
+        Set<String> distinctStts = new LinkedHashSet<>();
+        Set<String> distinctGovernorates = new LinkedHashSet<>();
+        List<ParsedRow> rows = new ArrayList<>(sourceRows.size());
+        List<ParsedRow> validRows = new ArrayList<>(sourceRows.size());
+        List<ParsedRow> invalidRowsOnly = new ArrayList<>();
+        int duplicateRows = 0;
+        int invalidRows = 0;
 
         for (SourceRow sourceRow : sourceRows) {
-            ParsedRow row = buildParsedRow(sourceRow.rowNumber(), sourceRow.sourceValues());
-            List<String> issues = new ArrayList<>(row.issues());
+            ParsedRow row = buildParsedRow(sourceRow.rowNumber(), sourceRow.sourceValues(), cache);
+            List<String> existingIssues = row.issues();
+            ArrayList<String> issues = existingIssues.isEmpty()
+                    ? null
+                    : new ArrayList<>(existingIssues);
 
             if (ActivationAnalyticsSupport.hasText(row.crmCaseNormalized())) {
                 if (!seenInFile.add(row.crmCaseNormalized())) {
-                    issues.add("Duplicate CRM_CASE inside the selected file");
+                    if (issues == null) {
+                        issues = new ArrayList<>(2);
+                    }
+                    issues.add(DUPLICATE_IN_FILE_ISSUE);
                 }
                 if (existingCrmCases.contains(row.crmCaseNormalized())) {
-                    issues.add("Duplicate CRM_CASE already imported in the admin activation analytics dataset");
+                    if (issues == null) {
+                        issues = new ArrayList<>(2);
+                    }
+                    issues.add(DUPLICATE_IN_DATASET_ISSUE);
                 }
             }
 
-            rows.add(row.withIssues(issues));
+            ParsedRow finalRow = issues == null ? row : row.withIssues(issues);
+            rows.add(finalRow);
+
+            if (finalRow.validNewRow()) {
+                validRows.add(finalRow);
+                if (ActivationAnalyticsSupport.hasText(finalRow.nameStt())) {
+                    distinctStts.add(finalRow.nameStt());
+                }
+                if (ActivationAnalyticsSupport.hasText(finalRow.gouvernorat())) {
+                    distinctGovernorates.add(finalRow.gouvernorat());
+                }
+                continue;
+            }
+
+            if (finalRow.duplicateOnlyRow()) {
+                duplicateRows += 1;
+                continue;
+            }
+
+            invalidRows += 1;
+            invalidRowsOnly.add(finalRow);
         }
 
-        List<ParsedRow> validRows = rows.stream()
-                .filter(ParsedRow::validNewRow)
-                .toList();
-        int duplicateRows = (int) rows.stream()
-                .filter(ParsedRow::duplicateOnlyRow)
-                .count();
-        int invalidRows = (int) rows.stream()
-                .filter(ParsedRow::invalidOnlyRow)
-                .count();
+        int distinctSttCount = distinctStts.size();
+        int distinctGovernorateCount = distinctGovernorates.size();
 
-        int distinctStts = (int) validRows.stream()
-                .map(ParsedRow::nameStt)
-                .filter(ActivationAnalyticsSupport::hasText)
-                .distinct()
-                .count();
-        int distinctGovernorates = (int) validRows.stream()
-                .map(ParsedRow::gouvernorat)
-                .filter(ActivationAnalyticsSupport::hasText)
-                .distinct()
-                .count();
+        log.info(
+                "activation_import_classification file={} uploadedBy={} totalRows={} existingCrmCases={} duplicateLookupMs={} classificationMs={} validNewRows={} duplicateRows={} invalidRows={} distinctStts={} distinctGovernorates={}",
+                sourceFileName,
+                uploadedBy,
+                sourceRows.size(),
+                existingCrmCases.size(),
+                duplicateLookupMs,
+                elapsedMs(classificationStart),
+                validRows.size(),
+                duplicateRows,
+                invalidRows,
+                distinctSttCount,
+                distinctGovernorateCount
+        );
 
         return new ParsedImport(
                 sourceFileName,
@@ -283,116 +404,145 @@ public class ActivationAnalyticsImportService {
                 validRows.size(),
                 invalidRows,
                 duplicateRows,
-                distinctStts,
-                distinctGovernorates,
-                rows
+                distinctSttCount,
+                distinctGovernorateCount,
+                rows,
+                validRows,
+                invalidRowsOnly
         );
     }
 
-    private ParsedRow buildParsedRow(int rowNumber, Map<String, String> sourceValues) {
-        List<String> issues = new ArrayList<>();
-
-        String crmCase = ActivationAnalyticsSupport.cleanString(sourceValues.get("CRM_CASE"));
+    private ParsedRow buildParsedRow(int rowNumber, Map<String, String> sourceValues, ImportValueCache cache) {
+        String crmCase = cache.clean(sourceValues.get("CRM_CASE"));
         if (!ActivationAnalyticsSupport.hasText(crmCase)) {
-            issues.add("CRM_CASE is required");
+            return buildParsedRow(rowNumber, sourceValues, cache, crmCase, List.of("CRM_CASE is required"));
         }
 
-        String gouvernorat = ActivationAnalyticsSupport.canonicalGovernorate(sourceValues.get("GOUVERNORAT"));
-        String nameStt = ActivationAnalyticsSupport.normalizeSttName(sourceValues.get("NAME_STT"));
+        return buildParsedRow(rowNumber, sourceValues, cache, crmCase, List.of());
+    }
 
-        String dateCreationCrm = ActivationAnalyticsSupport.cleanString(sourceValues.get("DATE_CREATION_CRM"));
-        String openingDateSurTimos = ActivationAnalyticsSupport.cleanString(sourceValues.get("OPENING_DATE_SUR_TIMOS"));
-        String dateAffectationStt = ActivationAnalyticsSupport.cleanString(sourceValues.get("DATE_AFFECTATION_STT"));
-        String datePriseRdv = ActivationAnalyticsSupport.cleanString(sourceValues.get("DATE_PRISE_RDV"));
-        String dateFinTrv = ActivationAnalyticsSupport.cleanString(sourceValues.get("DATE_FIN_TRV"));
+    private ParsedRow buildParsedRow(
+            int rowNumber,
+            Map<String, String> sourceValues,
+            ImportValueCache cache,
+            String crmCase,
+            List<String> issues
+    ) {
+        String gouvernorat = cache.canonicalGovernorate(sourceValues.get("GOUVERNORAT"));
+        String nameStt = cache.normalizeSttName(sourceValues.get("NAME_STT"));
+
+        String dateCreationCrm = cache.clean(sourceValues.get("DATE_CREATION_CRM"));
+        String openingDateSurTimos = cache.clean(sourceValues.get("OPENING_DATE_SUR_TIMOS"));
+        String dateAffectationStt = cache.clean(sourceValues.get("DATE_AFFECTATION_STT"));
+        String datePriseRdv = cache.clean(sourceValues.get("DATE_PRISE_RDV"));
+        String dateFinTrv = cache.clean(sourceValues.get("DATE_FIN_TRV"));
+        LocalDate dateCreationCrmDate = cache.parseDate(dateCreationCrm);
+        LocalDate openingDateSurTimosDate = cache.parseDate(openingDateSurTimos);
+        LocalDate dateAffectationSttDate = cache.parseDate(dateAffectationStt);
+        LocalDate datePriseRdvDate = cache.parseDate(datePriseRdv);
+        LocalDate dateFinTrvDate = cache.parseDate(dateFinTrv);
+        String latitudeSite = cache.clean(sourceValues.get("LATITUDE_SITE"));
+        String longitudeSite = cache.clean(sourceValues.get("LONGITUDE_SITE"));
+        String metrageCable = cache.clean(sourceValues.get("METRAGE_CABLE"));
+        String nombreDePv = cache.clean(sourceValues.get("NOMBRE_DE_PV"));
+        String debitDl = cache.clean(sourceValues.get("DEBIT_DL"));
+        String debitUl = cache.clean(sourceValues.get("DEBIT_UL"));
+        String rsrp = cache.clean(sourceValues.get("RSRP"));
+        String rsrq = cache.clean(sourceValues.get("RSRQ"));
+        String sinr = cache.clean(sourceValues.get("SINR"));
 
         return new ParsedRow(
                 rowNumber,
                 crmCase,
-                ActivationAnalyticsSupport.normalizeLookupValue(crmCase),
+                cache.normalizeLookup(crmCase),
                 dateCreationCrm,
-                ActivationAnalyticsSupport.parseDate(dateCreationCrm),
+                dateCreationCrmDate,
                 openingDateSurTimos,
-                ActivationAnalyticsSupport.parseDate(openingDateSurTimos),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("STATUT")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CLIENT")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CONTACT_CLIENT")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("COMMENTAIRE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("MSISDN")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("LATITUDE_SITE")),
-                ActivationAnalyticsSupport.parseCoordinate(sourceValues.get("LATITUDE_SITE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("LONGITUDE_SITE")),
-                ActivationAnalyticsSupport.parseCoordinate(sourceValues.get("LONGITUDE_SITE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("LOCALITE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("DELEGATION")),
+                openingDateSurTimosDate,
+                cache.clean(sourceValues.get("STATUT")),
+                cache.clean(sourceValues.get("CLIENT")),
+                cache.clean(sourceValues.get("CONTACT_CLIENT")),
+                cache.clean(sourceValues.get("COMMENTAIRE")),
+                cache.clean(sourceValues.get("MSISDN")),
+                latitudeSite,
+                cache.parseCoordinate(latitudeSite),
+                longitudeSite,
+                cache.parseCoordinate(longitudeSite),
+                cache.clean(sourceValues.get("LOCALITE")),
+                cache.clean(sourceValues.get("DELEGATION")),
                 gouvernorat,
-                ActivationAnalyticsSupport.normalizeLookupValue(gouvernorat),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("OFFRE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("DES_PACK")),
+                cache.normalizeLookup(gouvernorat),
+                cache.clean(sourceValues.get("OFFRE")),
+                cache.clean(sourceValues.get("DES_PACK")),
                 nameStt,
-                ActivationAnalyticsSupport.normalizeLookupValue(nameStt),
+                cache.normalizeLookup(nameStt),
                 dateAffectationStt,
-                ActivationAnalyticsSupport.parseDate(dateAffectationStt),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("REP_RDV")),
+                dateAffectationSttDate,
+                cache.clean(sourceValues.get("REP_RDV")),
                 datePriseRdv,
-                ActivationAnalyticsSupport.parseDate(datePriseRdv),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CAUSE_INJOIGNABILITE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CAUSE_ABANDON")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("DETAIL")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CMT_RDV")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("REP_TRAVAUX_STT")),
+                datePriseRdvDate,
+                cache.clean(sourceValues.get("CAUSE_INJOIGNABILITE")),
+                cache.clean(sourceValues.get("CAUSE_ABANDON")),
+                cache.clean(sourceValues.get("DETAIL")),
+                cache.clean(sourceValues.get("CMT_RDV")),
+                cache.clean(sourceValues.get("REP_TRAVAUX_STT")),
                 dateFinTrv,
-                ActivationAnalyticsSupport.parseDate(dateFinTrv),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CMT_TRV_STT")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("REP_ZM")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("CMT_ZM")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("METRAGE_CABLE")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("METRAGE_CABLE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("NOMBRE_DE_PV")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("NOMBRE_DE_PV")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("DEBIT_DL")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("DEBIT_DL")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("DEBIT_UL")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("DEBIT_UL")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("RSRP")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("RSRP")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("RSRQ")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("RSRQ")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("SINR")),
-                ActivationAnalyticsSupport.parseDouble(sourceValues.get("SINR")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("SITESECTEUR")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("TYPE_OFFRE_SPEED")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("TYPE_CLIENT")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("SOURCE")),
-                ActivationAnalyticsSupport.cleanString(sourceValues.get("DESCRIPTION")),
+                dateFinTrvDate,
+                cache.clean(sourceValues.get("CMT_TRV_STT")),
+                cache.clean(sourceValues.get("REP_ZM")),
+                cache.clean(sourceValues.get("CMT_ZM")),
+                metrageCable,
+                cache.parseDouble(metrageCable),
+                nombreDePv,
+                cache.parseDouble(nombreDePv),
+                debitDl,
+                cache.parseDouble(debitDl),
+                debitUl,
+                cache.parseDouble(debitUl),
+                rsrp,
+                cache.parseDouble(rsrp),
+                rsrq,
+                cache.parseDouble(rsrq),
+                sinr,
+                cache.parseDouble(sinr),
+                cache.clean(sourceValues.get("SITESECTEUR")),
+                cache.clean(sourceValues.get("TYPE_OFFRE_SPEED")),
+                cache.clean(sourceValues.get("TYPE_CLIENT")),
+                cache.clean(sourceValues.get("SOURCE")),
+                cache.clean(sourceValues.get("DESCRIPTION")),
                 ActivationAnalyticsSupport.calculateBusinessDays(
-                        ActivationAnalyticsSupport.parseDate(openingDateSurTimos),
-                        ActivationAnalyticsSupport.parseDate(dateAffectationStt)
+                        openingDateSurTimosDate,
+                        dateAffectationSttDate
                 ),
                 ActivationAnalyticsSupport.calculateBusinessDays(
-                        ActivationAnalyticsSupport.parseDate(dateAffectationStt),
-                        ActivationAnalyticsSupport.parseDate(datePriseRdv)
+                        dateAffectationSttDate,
+                        datePriseRdvDate
                 ),
                 ActivationAnalyticsSupport.calculateBusinessDays(
-                        ActivationAnalyticsSupport.parseDate(datePriseRdv),
-                        ActivationAnalyticsSupport.parseDate(dateFinTrv)
+                        datePriseRdvDate,
+                        dateFinTrvDate
                 ),
                 ActivationAnalyticsSupport.calculateBusinessDays(
-                        ActivationAnalyticsSupport.parseDate(openingDateSurTimos),
-                        ActivationAnalyticsSupport.parseDate(dateFinTrv)
+                        openingDateSurTimosDate,
+                        dateFinTrvDate
                 ),
-                Map.copyOf(sourceValues),
-                List.copyOf(issues)
+                issues
         );
     }
 
-    private Set<String> findExistingCrmCases(String uploadedBy, Set<String> crmCases) {
-        if (!ActivationAnalyticsSupport.hasText(uploadedBy) || crmCases.isEmpty()) {
+    private Set<String> findExistingCrmCases(String uploadedBy) {
+        if (!ActivationAnalyticsSupport.hasText(uploadedBy)) {
             return Set.of();
         }
 
-        return rowRepository.findByUploadedByAndCrmCaseNormalizedIn(uploadedBy, crmCases).stream()
-                .map(ActivationAnalyticsRowEntity::getCrmCaseNormalized)
+        Query query = Query.query(Criteria.where("uploadedBy").is(uploadedBy));
+        List<String> existingCrmCases = mongoTemplate.query(ActivationAnalyticsRowEntity.class)
+                .distinct("crmCaseNormalized")
+                .matching(query)
+                .as(String.class)
+                .all();
+
+        return existingCrmCases.stream()
                 .filter(ActivationAnalyticsSupport::hasText)
                 .collect(Collectors.toSet());
     }
@@ -473,8 +623,54 @@ public class ActivationAnalyticsImportService {
                 .rdvBusinessDays(row.rdvBusinessDays())
                 .executionBusinessDays(row.executionBusinessDays())
                 .endToEndBusinessDays(row.endToEndBusinessDays())
-                .sourceValues(row.sourceValues())
+                .completed(ActivationAnalyticsSupport.isCompleted(
+                        row.statut(),
+                        row.repTravauxStt(),
+                        row.dateFinTrvDate()
+                ))
+                .rdvSuccess(ActivationAnalyticsSupport.isRdvSuccess(
+                        row.repRdv(),
+                        row.datePriseRdvDate()
+                ))
+                .injoignable(ActivationAnalyticsSupport.isInjoignable(
+                        row.causeInjoignabilite(),
+                        row.repRdv(),
+                        row.statut(),
+                        row.detail()
+                ))
+                .abandon(ActivationAnalyticsSupport.isAbandon(
+                        row.causeAbandon(),
+                        row.repRdv(),
+                        row.statut(),
+                        row.detail()
+                ))
+                .blocked(ActivationAnalyticsSupport.isBlocked(
+                        row.statut(),
+                        row.detail(),
+                        row.commentaire(),
+                        row.cmtZm(),
+                        row.cmtTrvStt()
+                ))
+                .delayed(ActivationAnalyticsSupport.isDelayed(
+                        row.endToEndBusinessDays(),
+                        row.assignmentBusinessDays(),
+                        row.rdvBusinessDays(),
+                        row.executionBusinessDays()
+                ))
                 .build();
+    }
+
+    private void insertRowsInBatches(List<ActivationAnalyticsRowEntity> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        for (int start = 0; start < entities.size(); start += INSERT_CHUNK_SIZE) {
+            int end = Math.min(start + INSERT_CHUNK_SIZE, entities.size());
+            mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, ActivationAnalyticsRowEntity.class)
+                    .insert(entities.subList(start, end))
+                    .execute();
+        }
     }
 
     private AdminActivationAnalyticsPreviewRowResponse toPreviewRow(ParsedRow row) {
@@ -939,6 +1135,10 @@ public class ActivationAnalyticsImportService {
         return cellNode.getTextContent() == null ? "" : cellNode.getTextContent().trim();
     }
 
+    private long elapsedMs(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
     private static Map<String, List<String>> buildColumnAliases() {
         Map<String, List<String>> aliases = new LinkedHashMap<>();
         aliases.put("CRM_CASE", List.of("CRM_CASE"));
@@ -998,18 +1198,16 @@ public class ActivationAnalyticsImportService {
             int duplicateRows,
             int distinctStts,
             int distinctGovernorates,
-            List<ParsedRow> rows
+            List<ParsedRow> rows,
+            List<ParsedRow> validRowsList,
+            List<ParsedRow> invalidRowsList
     ) {
         List<ParsedRow> validRowsToStore() {
-            return rows.stream()
-                    .filter(ParsedRow::validNewRow)
-                    .toList();
+            return validRowsList;
         }
 
         List<ParsedRow> invalidRowsOnly() {
-            return rows.stream()
-                    .filter(ParsedRow::invalidOnlyRow)
-                    .toList();
+            return invalidRowsList;
         }
     }
 
@@ -1076,7 +1274,6 @@ public class ActivationAnalyticsImportService {
             Integer rdvBusinessDays,
             Integer executionBusinessDays,
             Integer endToEndBusinessDays,
-            Map<String, String> sourceValues,
             List<String> issues
     ) {
         boolean validNewRow() {
@@ -1165,7 +1362,6 @@ public class ActivationAnalyticsImportService {
                     rdvBusinessDays,
                     executionBusinessDays,
                     endToEndBusinessDays,
-                    sourceValues,
                     List.copyOf(newIssues)
             );
         }
@@ -1176,5 +1372,52 @@ public class ActivationAnalyticsImportService {
             return false;
         }
         return issue.toLowerCase(Locale.ROOT).contains("duplicate");
+    }
+
+    private static final class ImportValueCache {
+        private final Map<String, String> cleanedValues = new HashMap<>();
+        private final Map<String, String> normalizedLookupValues = new HashMap<>();
+        private final Map<String, String> canonicalGovernorates = new HashMap<>();
+        private final Map<String, String> normalizedSttValues = new HashMap<>();
+        private final Map<String, LocalDate> parsedDates = new HashMap<>();
+        private final Map<String, Double> parsedDoubles = new HashMap<>();
+        private final Map<String, Double> parsedCoordinates = new HashMap<>();
+
+        String clean(String rawValue) {
+            return cached(cleanedValues, rawValue, ActivationAnalyticsSupport::cleanString);
+        }
+
+        String normalizeLookup(String rawValue) {
+            return cached(normalizedLookupValues, rawValue, ActivationAnalyticsSupport::normalizeLookupValue);
+        }
+
+        String canonicalGovernorate(String rawValue) {
+            return cached(canonicalGovernorates, rawValue, ActivationAnalyticsSupport::canonicalGovernorate);
+        }
+
+        String normalizeSttName(String rawValue) {
+            return cached(normalizedSttValues, rawValue, ActivationAnalyticsSupport::normalizeSttName);
+        }
+
+        LocalDate parseDate(String rawValue) {
+            return cached(parsedDates, rawValue, ActivationAnalyticsSupport::parseDate);
+        }
+
+        Double parseDouble(String rawValue) {
+            return cached(parsedDoubles, rawValue, ActivationAnalyticsSupport::parseDouble);
+        }
+
+        Double parseCoordinate(String rawValue) {
+            return cached(parsedCoordinates, rawValue, ActivationAnalyticsSupport::parseCoordinate);
+        }
+
+        private <T> T cached(Map<String, T> cache, String rawValue, Function<String, T> loader) {
+            if (cache.containsKey(rawValue)) {
+                return cache.get(rawValue);
+            }
+            T value = loader.apply(rawValue);
+            cache.put(rawValue, value);
+            return value;
+        }
     }
 }
