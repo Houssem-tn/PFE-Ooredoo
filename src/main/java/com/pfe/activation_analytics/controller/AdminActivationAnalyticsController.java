@@ -1,14 +1,19 @@
 package com.pfe.activation_analytics.controller;
 
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsChartsResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsDashboardResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsImportResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsPreviewResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowsPageResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSummaryResponse;
 import com.pfe.activation_analytics.dto.SaveActivationAnalyticsStudyRequest;
 import com.pfe.activation_analytics.dto.SavedActivationAnalyticsStudyResponse;
 import com.pfe.activation_analytics.service.ActivationAnalyticsDashboardService;
 import com.pfe.activation_analytics.service.ActivationAnalyticsImportService;
 import com.pfe.activation_analytics.service.SavedActivationAnalyticsStudyService;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -20,11 +25,15 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.function.Supplier;
+
 @RestController
 @RequestMapping("/api/v1/admin/activation-analytics")
 @RequiredArgsConstructor
 @PreAuthorize("hasAuthority('ROLE_ADMIN')")
 public class AdminActivationAnalyticsController {
+
+    private static final Logger log = LoggerFactory.getLogger(AdminActivationAnalyticsController.class);
 
     private final ActivationAnalyticsImportService importService;
     private final ActivationAnalyticsDashboardService dashboardService;
@@ -35,7 +44,7 @@ public class AdminActivationAnalyticsController {
             @RequestParam("file") MultipartFile file,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(importService.preview(file, authentication.getName()));
+        return timed("preview", () -> importService.preview(file, authentication.getName()));
     }
 
     @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -43,7 +52,36 @@ public class AdminActivationAnalyticsController {
             @RequestParam("file") MultipartFile file,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(importService.importFile(file, authentication.getName()));
+        return timed("import", () -> importService.importFile(file, authentication.getName()));
+    }
+
+    @GetMapping("/summary")
+    public ResponseEntity<AdminActivationAnalyticsSummaryResponse> getSummary(
+            @RequestParam(required = false) String stt,
+            @RequestParam(required = false) String gouvernorat,
+            Authentication authentication
+    ) {
+        return timed("summary", () -> dashboardService.getSummary(authentication.getName(), stt, gouvernorat));
+    }
+
+    @GetMapping("/charts")
+    public ResponseEntity<AdminActivationAnalyticsChartsResponse> getCharts(
+            @RequestParam(required = false) String stt,
+            @RequestParam(required = false) String gouvernorat,
+            Authentication authentication
+    ) {
+        return timed("charts", () -> dashboardService.getCharts(authentication.getName(), stt, gouvernorat));
+    }
+
+    @GetMapping("/rows")
+    public ResponseEntity<AdminActivationAnalyticsRowsPageResponse> getRows(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size,
+            @RequestParam(required = false) String stt,
+            @RequestParam(required = false) String gouvernorat,
+            Authentication authentication
+    ) {
+        return timed("rows", () -> dashboardService.getRows(authentication.getName(), stt, gouvernorat, page, size));
     }
 
     @GetMapping("/dashboard")
@@ -52,7 +90,7 @@ public class AdminActivationAnalyticsController {
             @RequestParam(required = false) String gouvernorat,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(dashboardService.getDashboard(authentication.getName(), stt, gouvernorat));
+        return timed("dashboard", () -> dashboardService.getDashboard(authentication.getName(), stt, gouvernorat));
     }
 
     @PostMapping("/save-study")
@@ -60,12 +98,61 @@ public class AdminActivationAnalyticsController {
             @org.springframework.web.bind.annotation.RequestBody(required = false) SaveActivationAnalyticsStudyRequest request,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(savedStudyService.saveCurrentStudy(authentication.getName(), request));
+        return timed("save-study", () -> savedStudyService.saveCurrentStudy(authentication.getName(), request));
     }
 
     @GetMapping("/saved-studies")
     public ResponseEntity<java.util.List<SavedActivationAnalyticsStudyResponse>> listSavedStudies(Authentication authentication) {
-        return ResponseEntity.ok(savedStudyService.listSavedStudies(authentication.getName()));
+        return timed("saved-studies", () -> savedStudyService.listSavedStudies(authentication.getName()));
+    }
+
+    @GetMapping("/saved-studies/{studyId}/summary")
+    public ResponseEntity<AdminActivationAnalyticsSummaryResponse> getSavedStudySummary(
+            @org.springframework.web.bind.annotation.PathVariable String studyId,
+            @RequestParam(required = false) String stt,
+            @RequestParam(required = false) String gouvernorat,
+            Authentication authentication
+    ) {
+        return timed("saved-summary", () -> savedStudyService.getSavedStudySummary(
+                authentication.getName(),
+                studyId,
+                stt,
+                gouvernorat
+        ));
+    }
+
+    @GetMapping("/saved-studies/{studyId}/charts")
+    public ResponseEntity<AdminActivationAnalyticsChartsResponse> getSavedStudyCharts(
+            @org.springframework.web.bind.annotation.PathVariable String studyId,
+            @RequestParam(required = false) String stt,
+            @RequestParam(required = false) String gouvernorat,
+            Authentication authentication
+    ) {
+        return timed("saved-charts", () -> savedStudyService.getSavedStudyCharts(
+                authentication.getName(),
+                studyId,
+                stt,
+                gouvernorat
+        ));
+    }
+
+    @GetMapping("/saved-studies/{studyId}/rows")
+    public ResponseEntity<AdminActivationAnalyticsRowsPageResponse> getSavedStudyRows(
+            @org.springframework.web.bind.annotation.PathVariable String studyId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size,
+            @RequestParam(required = false) String stt,
+            @RequestParam(required = false) String gouvernorat,
+            Authentication authentication
+    ) {
+        return timed("saved-rows", () -> savedStudyService.getSavedStudyRows(
+                authentication.getName(),
+                studyId,
+                stt,
+                gouvernorat,
+                page,
+                size
+        ));
     }
 
     @GetMapping("/saved-studies/{studyId}/dashboard")
@@ -75,11 +162,24 @@ public class AdminActivationAnalyticsController {
             @RequestParam(required = false) String gouvernorat,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(savedStudyService.getSavedStudyDashboard(
+        return timed("saved-dashboard", () -> savedStudyService.getSavedStudyDashboard(
                 authentication.getName(),
                 studyId,
                 stt,
                 gouvernorat
         ));
+    }
+
+    private <T> ResponseEntity<T> timed(String endpoint, Supplier<T> supplier) {
+        long start = System.nanoTime();
+        try {
+            return ResponseEntity.ok(supplier.get());
+        } finally {
+            log.info("activation_analytics_endpoint endpoint={} responseMs={}", endpoint, elapsedMs(start));
+        }
+    }
+
+    private long elapsedMs(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
     }
 }

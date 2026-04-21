@@ -3,23 +3,38 @@ package com.pfe.activation_analytics.service;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsAlertResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsBatchResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsCauseItemResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsChartsResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsDashboardResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsGovernorateItemResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsKpiResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsPipelineStageResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsQualitySliceResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowListItemResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowsPageResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSttItemResponse;
+import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSummaryResponse;
 import com.pfe.activation_analytics.entity.ActivationAnalyticsImportBatchEntity;
 import com.pfe.activation_analytics.entity.ActivationAnalyticsRowEntity;
 import com.pfe.activation_analytics.repository.ActivationAnalyticsImportBatchRepository;
 import com.pfe.activation_analytics.repository.ActivationAnalyticsRowRepository;
 import lombok.RequiredArgsConstructor;
+import org.bson.Document;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationExpression;
+import org.springframework.data.mongodb.core.aggregation.ConditionalOperators;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -31,6 +46,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ActivationAnalyticsDashboardService {
 
+    private static final Logger log = LoggerFactory.getLogger(ActivationAnalyticsDashboardService.class);
+    private static final int ROW_PAGE_MAX_SIZE = 200;
     private static final int END_TO_END_DELAY_THRESHOLD_DAYS = 5;
     private static final int ASSIGNMENT_DELAY_THRESHOLD_DAYS = 2;
     private static final int RDV_DELAY_THRESHOLD_DAYS = 2;
@@ -42,20 +59,48 @@ public class ActivationAnalyticsDashboardService {
 
     private final ActivationAnalyticsRowRepository rowRepository;
     private final ActivationAnalyticsImportBatchRepository batchRepository;
+    private final MongoTemplate mongoTemplate;
 
     public AdminActivationAnalyticsDashboardResponse getDashboard(String uploadedBy, String stt, String governorate) {
-        List<ActivationAnalyticsImportBatchEntity> batchEntities = batchRepository.findAllByUploadedByOrderByUploadedAtDesc(uploadedBy);
-        List<ActivationAnalyticsRowEntity> sourceRows = rowRepository.findByUploadedByAndValidRowTrue(uploadedBy);
+        return merge(getSummary(uploadedBy, stt, governorate), getCharts(uploadedBy, stt, governorate));
+    }
 
-        return buildDashboard(
-                sourceRows,
+    public AdminActivationAnalyticsSummaryResponse getSummary(String uploadedBy, String stt, String governorate) {
+        List<ActivationAnalyticsImportBatchEntity> batchEntities = batchRepository.findAllByUploadedByOrderByUploadedAtDesc(uploadedBy);
+        return buildSummaryView(
+                uploadedBy,
+                null,
+                stt,
+                governorate,
                 rowRepository.countByUploadedBy(uploadedBy),
                 rowRepository.countByUploadedByAndValidRowTrue(uploadedBy),
                 batchRepository.countByUploadedBy(uploadedBy),
                 batchEntities,
-                stt,
-                governorate
+                "live_summary"
         );
+    }
+
+    public AdminActivationAnalyticsChartsResponse getCharts(String uploadedBy, String stt, String governorate) {
+        return buildChartsView(
+                uploadedBy,
+                null,
+                stt,
+                governorate,
+                batchRepository.findTopByUploadedByOrderByUploadedAtDesc(uploadedBy)
+                        .map(batch -> List.of(batch))
+                        .orElse(List.of()),
+                "live_charts"
+        );
+    }
+
+    public AdminActivationAnalyticsRowsPageResponse getRows(
+            String uploadedBy,
+            String stt,
+            String governorate,
+            int page,
+            int size
+    ) {
+        return getRowsPage(uploadedBy, null, stt, governorate, page, size, "live_rows");
     }
 
     public AdminActivationAnalyticsDashboardResponse getSavedStudyDashboard(
@@ -64,39 +109,183 @@ public class ActivationAnalyticsDashboardService {
             String stt,
             String governorate
     ) {
+        return merge(
+                getSavedStudySummary(uploadedBy, batchIds, stt, governorate),
+                getSavedStudyCharts(uploadedBy, batchIds, stt, governorate)
+        );
+    }
+
+    public AdminActivationAnalyticsSummaryResponse getSavedStudySummary(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate
+    ) {
         if (batchIds == null || batchIds.isEmpty()) {
-            return buildDashboard(List.of(), 0, 0, 0, List.of(), stt, governorate);
+            return emptySummary(0, 0, 0, null, List.of(), List.of(), List.of(), stt, governorate);
         }
 
         List<ActivationAnalyticsImportBatchEntity> batchEntities =
                 batchRepository.findByUploadedByAndBatchIdInOrderByUploadedAtDesc(uploadedBy, batchIds);
-        List<ActivationAnalyticsRowEntity> sourceRows =
-                rowRepository.findByUploadedByAndBatchIdInAndValidRowTrue(uploadedBy, batchIds);
-
-        return buildDashboard(
-                sourceRows,
-                sourceRows.size(),
-                sourceRows.size(),
+        return buildSummaryView(
+                uploadedBy,
+                batchIds,
+                stt,
+                governorate,
+                batchEntities.stream().mapToInt(batch -> valueOrZero(batch.getInsertedRows())).sum(),
+                batchEntities.stream().mapToInt(batch -> valueOrZero(batch.getInsertedRows())).sum(),
                 batchEntities.size(),
                 batchEntities,
-                stt,
-                governorate
+                "saved_summary"
         );
     }
 
-    private AdminActivationAnalyticsDashboardResponse buildDashboard(
-            List<ActivationAnalyticsRowEntity> sourceRows,
+    public AdminActivationAnalyticsChartsResponse getSavedStudyCharts(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate
+    ) {
+        if (batchIds == null || batchIds.isEmpty()) {
+            return emptyCharts();
+        }
+
+        List<ActivationAnalyticsImportBatchEntity> batchEntities =
+                batchRepository.findByUploadedByAndBatchIdInOrderByUploadedAtDesc(uploadedBy, batchIds);
+        return buildChartsView(
+                uploadedBy,
+                batchIds,
+                stt,
+                governorate,
+                batchEntities,
+                "saved_charts"
+        );
+    }
+
+    public AdminActivationAnalyticsRowsPageResponse getSavedStudyRows(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate,
+            int page,
+            int size
+    ) {
+        return getRowsPage(uploadedBy, batchIds, stt, governorate, page, size, "saved_rows");
+    }
+
+    public AdminActivationAnalyticsSummaryResponse toSummary(AdminActivationAnalyticsDashboardResponse dashboard) {
+        if (dashboard == null) {
+            return emptySummary(0, 0, 0, null, List.of(), List.of(), List.of(), null, null);
+        }
+
+        return new AdminActivationAnalyticsSummaryResponse(
+                dashboard.storedRows(),
+                dashboard.validStoredRows(),
+                dashboard.batchCount(),
+                dashboard.latestBatch(),
+                dashboard.recentBatches(),
+                dashboard.availableStts(),
+                dashboard.availableGovernorates(),
+                dashboard.selectedStt(),
+                dashboard.selectedGovernorate(),
+                dashboard.kpis(),
+                dashboard.rdvSuccessRate(),
+                dashboard.averageDebitDl(),
+                dashboard.averageDebitUl(),
+                dashboard.averageRsrp(),
+                dashboard.averageRsrq(),
+                dashboard.averageSinr(),
+                dashboard.averageMetrageCable(),
+                dashboard.averageNombreDePv()
+        );
+    }
+
+    public AdminActivationAnalyticsChartsResponse toCharts(AdminActivationAnalyticsDashboardResponse dashboard) {
+        if (dashboard == null) {
+            return emptyCharts();
+        }
+
+        return new AdminActivationAnalyticsChartsResponse(
+                dashboard.bestStt(),
+                dashboard.worstStt(),
+                dashboard.bestGovernorate(),
+                dashboard.worstGovernorate(),
+                dashboard.mostDelayedStage(),
+                dashboard.sttRanking(),
+                dashboard.governorateBreakdown(),
+                dashboard.topInjoignabiliteCauses(),
+                dashboard.topAbandonCauses(),
+                dashboard.pipelineStages(),
+                dashboard.qualityByStt(),
+                dashboard.qualityByGovernorate(),
+                dashboard.alerts(),
+                dashboard.insights()
+        );
+    }
+
+    public AdminActivationAnalyticsDashboardResponse merge(
+            AdminActivationAnalyticsSummaryResponse summary,
+            AdminActivationAnalyticsChartsResponse charts
+    ) {
+        AdminActivationAnalyticsSummaryResponse safeSummary = summary == null
+                ? emptySummary(0, 0, 0, null, List.of(), List.of(), List.of(), null, null)
+                : summary;
+        AdminActivationAnalyticsChartsResponse safeCharts = charts == null ? emptyCharts() : charts;
+
+        return new AdminActivationAnalyticsDashboardResponse(
+                safeSummary.storedRows(),
+                safeSummary.validStoredRows(),
+                safeSummary.batchCount(),
+                safeSummary.latestBatch(),
+                safeSummary.recentBatches(),
+                safeSummary.availableStts(),
+                safeSummary.availableGovernorates(),
+                safeSummary.selectedStt(),
+                safeSummary.selectedGovernorate(),
+                safeSummary.kpis(),
+                safeSummary.rdvSuccessRate(),
+                safeCharts.bestStt(),
+                safeCharts.worstStt(),
+                safeCharts.bestGovernorate(),
+                safeCharts.worstGovernorate(),
+                safeCharts.mostDelayedStage(),
+                safeSummary.averageDebitDl(),
+                safeSummary.averageDebitUl(),
+                safeSummary.averageRsrp(),
+                safeSummary.averageRsrq(),
+                safeSummary.averageSinr(),
+                safeSummary.averageMetrageCable(),
+                safeSummary.averageNombreDePv(),
+                safeCharts.sttRanking(),
+                safeCharts.governorateBreakdown(),
+                safeCharts.topInjoignabiliteCauses(),
+                safeCharts.topAbandonCauses(),
+                safeCharts.pipelineStages(),
+                safeCharts.qualityByStt(),
+                safeCharts.qualityByGovernorate(),
+                safeCharts.alerts(),
+                safeCharts.insights()
+        );
+    }
+
+    private AdminActivationAnalyticsSummaryResponse buildSummaryView(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate,
             long storedRows,
             long validStoredRows,
             long batchCount,
             List<ActivationAnalyticsImportBatchEntity> batchEntities,
-            String stt,
-            String governorate
+            String purpose
     ) {
-        List<String> availableStts = distinctValues(sourceRows, ActivationAnalyticsRowEntity::getNameStt);
-        List<String> availableGovernorates = distinctValues(sourceRows, ActivationAnalyticsRowEntity::getGouvernorat);
+        long totalStart = System.nanoTime();
+        List<String> availableStts = loadDistinctValues(uploadedBy, batchIds, "nameStt");
+        List<String> availableGovernorates = loadDistinctValues(uploadedBy, batchIds, "gouvernorat");
         String selectedStt = resolveSelection(stt, availableStts);
         String selectedGovernorate = resolveSelection(governorate, availableGovernorates);
+        SummaryMetrics summaryMetrics = aggregateSummaryMetrics(uploadedBy, batchIds, selectedStt, selectedGovernorate);
+        int totalCases = Math.toIntExact(summaryMetrics.totalCases());
 
         AdminActivationAnalyticsBatchResponse latestBatch = batchEntities.stream()
                 .findFirst()
@@ -107,13 +296,15 @@ public class ActivationAnalyticsDashboardService {
                 .map(this::toBatchResponse)
                 .toList();
 
-        List<ActivationAnalyticsRowEntity> rows = sourceRows.stream()
-                .filter(row -> matchesSelection(row.getNameSttNormalized(), selectedStt))
-                .filter(row -> matchesSelection(row.getGouvernoratNormalized(), selectedGovernorate))
-                .toList();
-
-        if (rows.isEmpty()) {
-            return emptyDashboard(
+        if (summaryMetrics.totalCases() == 0) {
+            log.info(
+                    "activation_dashboard_summary purpose={} uploadedBy={} totalCases=0 queryMs={} totalMs={}",
+                    purpose,
+                    uploadedBy,
+                    summaryMetrics.queryMs(),
+                    elapsedMs(totalStart)
+            );
+            return emptySummary(
                     storedRows,
                     validStoredRows,
                     batchCount,
@@ -126,39 +317,119 @@ public class ActivationAnalyticsDashboardService {
             );
         }
 
-        int totalCases = rows.size();
-        long completedCases = rows.stream().filter(this::isCompleted).count();
-        long delayedCases = rows.stream().filter(this::isDelayed).count();
-        long blockedCases = rows.stream().filter(this::isBlocked).count();
-        long injoignableCases = rows.stream().filter(this::isInjoignable).count();
-        long abandonCases = rows.stream().filter(this::isAbandon).count();
-        long rdvSuccessCases = rows.stream().filter(this::isRdvSuccess).count();
-
-        List<AdminActivationAnalyticsSttItemResponse> sttRanking = buildSttRanking(rows, totalCases);
-        List<AdminActivationAnalyticsGovernorateItemResponse> governorateBreakdown = buildGovernorateBreakdown(rows, totalCases);
-        List<AdminActivationAnalyticsCauseItemResponse> topInjoignabiliteCauses =
-                buildCauseRanking(rows, ActivationAnalyticsRowEntity::getCauseInjoignabilite);
-        List<AdminActivationAnalyticsCauseItemResponse> topAbandonCauses =
-                buildCauseRanking(rows, ActivationAnalyticsRowEntity::getCauseAbandon);
-        List<AdminActivationAnalyticsPipelineStageResponse> pipelineStages = buildPipelineStages(rows);
-        List<AdminActivationAnalyticsQualitySliceResponse> qualityByStt =
-                buildQualitySlices(rows, ActivationAnalyticsRowEntity::getNameStt, "Unassigned");
-        List<AdminActivationAnalyticsQualitySliceResponse> qualityByGovernorate =
-                buildQualitySlices(rows, ActivationAnalyticsRowEntity::getGouvernorat, "Unknown");
-
         AdminActivationAnalyticsKpiResponse kpis = new AdminActivationAnalyticsKpiResponse(
                 totalCases,
-                percentage(completedCases, totalCases),
-                averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getAssignmentBusinessDays).toList()),
-                averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getRdvBusinessDays).toList()),
-                averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getExecutionBusinessDays).toList()),
-                averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getEndToEndBusinessDays).toList()),
-                percentage(delayedCases, totalCases),
-                percentage(blockedCases, totalCases),
-                percentage(injoignableCases, totalCases),
-                percentage(abandonCases, totalCases),
-                distinctCount(rows, ActivationAnalyticsRowEntity::getNameStt),
-                distinctCount(rows, ActivationAnalyticsRowEntity::getGouvernorat)
+                percentage(summaryMetrics.completedCases(), summaryMetrics.totalCases()),
+                roundNullable(summaryMetrics.averageAssignmentSla()),
+                roundNullable(summaryMetrics.averageRdvDelay()),
+                roundNullable(summaryMetrics.averageExecutionSla()),
+                roundNullable(summaryMetrics.averageEndToEndSla()),
+                percentage(summaryMetrics.delayedCases(), summaryMetrics.totalCases()),
+                percentage(summaryMetrics.blockedCases(), summaryMetrics.totalCases()),
+                percentage(summaryMetrics.injoignableCases(), summaryMetrics.totalCases()),
+                percentage(summaryMetrics.abandonCases(), summaryMetrics.totalCases()),
+                summaryMetrics.distinctSttCount(),
+                summaryMetrics.distinctGovernorateCount()
+        );
+
+        AdminActivationAnalyticsSummaryResponse response = new AdminActivationAnalyticsSummaryResponse(
+                storedRows,
+                validStoredRows,
+                batchCount,
+                latestBatch,
+                recentBatches,
+                availableStts,
+                availableGovernorates,
+                selectedStt,
+                selectedGovernorate,
+                kpis,
+                percentage(summaryMetrics.rdvSuccessCases(), summaryMetrics.totalCases()),
+                roundNullable(summaryMetrics.averageDebitDl()),
+                roundNullable(summaryMetrics.averageDebitUl()),
+                roundNullable(summaryMetrics.averageRsrp()),
+                roundNullable(summaryMetrics.averageRsrq()),
+                roundNullable(summaryMetrics.averageSinr()),
+                roundNullable(summaryMetrics.averageMetrageCable()),
+                roundNullable(summaryMetrics.averageNombreDePv())
+        );
+
+        log.info(
+                "activation_dashboard_summary purpose={} uploadedBy={} totalCases={} queryMs={} totalMs={}",
+                purpose,
+                uploadedBy,
+                summaryMetrics.totalCases(),
+                summaryMetrics.queryMs(),
+                elapsedMs(totalStart)
+        );
+        return response;
+    }
+
+    private AdminActivationAnalyticsChartsResponse buildChartsView(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate,
+            List<ActivationAnalyticsImportBatchEntity> batchEntities,
+            String purpose
+    ) {
+        long totalStart = System.nanoTime();
+        SummaryMetrics summaryMetrics = aggregateSummaryMetrics(uploadedBy, batchIds, stt, governorate);
+        if (summaryMetrics.totalCases() == 0) {
+            log.info(
+                    "activation_dashboard_charts purpose={} uploadedBy={} totalCases=0 queryMs={} totalMs={}",
+                    purpose,
+                    uploadedBy,
+                    summaryMetrics.queryMs(),
+                    elapsedMs(totalStart)
+            );
+            return emptyCharts();
+        }
+        int totalCases = Math.toIntExact(summaryMetrics.totalCases());
+
+        GroupedQueryResult sttGroups = aggregateGroupsByField(
+                uploadedBy,
+                batchIds,
+                stt,
+                governorate,
+                "nameSttNormalized",
+                "nameStt"
+        );
+        GroupedQueryResult governorateGroups = aggregateGroupsByField(
+                uploadedBy,
+                batchIds,
+                stt,
+                governorate,
+                "gouvernoratNormalized",
+                "gouvernorat"
+        );
+        GovernorateTopSttResult governorateTopStts = aggregateGovernorateTopStts(uploadedBy, batchIds, stt, governorate);
+        List<AdminActivationAnalyticsSttItemResponse> sttRanking =
+                toSttRanking(sttGroups.documents(), summaryMetrics.totalCases());
+        List<AdminActivationAnalyticsGovernorateItemResponse> governorateBreakdown =
+                toGovernorateBreakdown(governorateGroups.documents(), governorateTopStts.values(), totalCases);
+        TimedCauseRanking topInjoignabiliteCauses =
+                aggregateCauseRanking(uploadedBy, batchIds, stt, governorate, "causeInjoignabilite");
+        TimedCauseRanking topAbandonCauses =
+                aggregateCauseRanking(uploadedBy, batchIds, stt, governorate, "causeAbandon");
+        List<AdminActivationAnalyticsPipelineStageResponse> pipelineStages = buildPipelineStages(summaryMetrics);
+        List<AdminActivationAnalyticsQualitySliceResponse> qualityByStt =
+                toQualitySlices(sttGroups.documents(), "Unassigned");
+        List<AdminActivationAnalyticsQualitySliceResponse> qualityByGovernorate =
+                toQualitySlices(governorateGroups.documents(), "Unknown");
+
+        AdminActivationAnalyticsKpiResponse chartKpis = new AdminActivationAnalyticsKpiResponse(
+                totalCases,
+                percentage(summaryMetrics.completedCases(), summaryMetrics.totalCases()),
+                roundNullable(summaryMetrics.averageAssignmentSla()),
+                roundNullable(summaryMetrics.averageRdvDelay()),
+                roundNullable(summaryMetrics.averageExecutionSla()),
+                roundNullable(summaryMetrics.averageEndToEndSla()),
+                percentage(summaryMetrics.delayedCases(), summaryMetrics.totalCases()),
+                percentage(summaryMetrics.blockedCases(), summaryMetrics.totalCases()),
+                percentage(summaryMetrics.injoignableCases(), summaryMetrics.totalCases()),
+                percentage(summaryMetrics.abandonCases(), summaryMetrics.totalCases()),
+                summaryMetrics.distinctSttCount(),
+                summaryMetrics.distinctGovernorateCount()
         );
 
         String bestStt = selectBestStt(sttRanking).map(AdminActivationAnalyticsSttItemResponse::sttName).orElse(null);
@@ -175,55 +446,576 @@ public class ActivationAnalyticsDashboardService {
                 .map(AdminActivationAnalyticsPipelineStageResponse::label)
                 .orElse(null);
 
-        Double averageDebitDl = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getDebitDlValue).toList());
-        Double averageDebitUl = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getDebitUlValue).toList());
-        Double averageRsrp = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getRsrpValue).toList());
-        Double averageRsrq = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getRsrqValue).toList());
-        Double averageSinr = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getSinrValue).toList());
-        Double averageMetrageCable = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getMetrageCableValue).toList());
-        Double averageNombreDePv = averageDoubles(rows.stream().map(ActivationAnalyticsRowEntity::getNombreDePvValue).toList());
-
+        AdminActivationAnalyticsBatchResponse latestBatch = batchEntities.stream()
+                .findFirst()
+                .map(this::toBatchResponse)
+                .orElse(null);
         List<AdminActivationAnalyticsAlertResponse> alerts =
-                buildAlerts(kpis, sttRanking, governorateBreakdown, mostDelayedStage);
-        List<String> insights = buildInsights(sttRanking, governorateBreakdown, pipelineStages, latestBatch);
+                buildAlerts(chartKpis, sttRanking, governorateBreakdown, mostDelayedStage);
+        List<String> insights = buildInsights(
+                sttRanking,
+                governorateBreakdown,
+                pipelineStages,
+                latestBatch
+        );
 
-        return new AdminActivationAnalyticsDashboardResponse(
-                storedRows,
-                validStoredRows,
-                batchCount,
-                latestBatch,
-                recentBatches,
-                availableStts,
-                availableGovernorates,
-                selectedStt,
-                selectedGovernorate,
-                kpis,
-                percentage(rdvSuccessCases, totalCases),
+        long queryMs = summaryMetrics.queryMs()
+                + sttGroups.queryMs()
+                + governorateGroups.queryMs()
+                + governorateTopStts.queryMs()
+                + topInjoignabiliteCauses.queryMs()
+                + topAbandonCauses.queryMs();
+
+        AdminActivationAnalyticsChartsResponse response = new AdminActivationAnalyticsChartsResponse(
                 bestStt,
                 worstStt,
                 bestGovernorate,
                 worstGovernorate,
                 mostDelayedStage,
-                averageDebitDl,
-                averageDebitUl,
-                averageRsrp,
-                averageRsrq,
-                averageSinr,
-                averageMetrageCable,
-                averageNombreDePv,
                 sttRanking,
                 governorateBreakdown,
-                topInjoignabiliteCauses,
-                topAbandonCauses,
+                topInjoignabiliteCauses.items(),
+                topAbandonCauses.items(),
                 pipelineStages,
                 qualityByStt,
                 qualityByGovernorate,
                 alerts,
                 insights
         );
+
+        log.info(
+                "activation_dashboard_charts purpose={} uploadedBy={} totalCases={} queryMs={} totalMs={}",
+                purpose,
+                uploadedBy,
+                summaryMetrics.totalCases(),
+                queryMs,
+                elapsedMs(totalStart)
+        );
+        return response;
     }
 
-    private AdminActivationAnalyticsDashboardResponse emptyDashboard(
+    private SummaryMetrics aggregateSummaryMetrics(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate
+    ) {
+        long queryStart = System.nanoTime();
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(buildRowsCriteria(uploadedBy, batchIds, stt, governorate)),
+                Aggregation.group()
+                        .count().as("totalCases")
+                        .sum(sumTrue("completed")).as("completedCases")
+                        .sum(sumTrue("delayed")).as("delayedCases")
+                        .sum(sumTrue("blocked")).as("blockedCases")
+                        .sum(sumTrue("injoignable")).as("injoignableCases")
+                        .sum(sumTrue("abandon")).as("abandonCases")
+                        .sum(sumTrue("rdvSuccess")).as("rdvSuccessCases")
+                        .sum(sumPresent("assignmentBusinessDays")).as("assignmentMeasuredCases")
+                        .sum(sumPresent("rdvBusinessDays")).as("rdvMeasuredCases")
+                        .sum(sumPresent("executionBusinessDays")).as("executionMeasuredCases")
+                        .sum(sumPresent("endToEndBusinessDays")).as("endToEndMeasuredCases")
+                        .avg("assignmentBusinessDays").as("averageAssignmentSla")
+                        .avg("rdvBusinessDays").as("averageRdvDelay")
+                        .avg("executionBusinessDays").as("averageExecutionSla")
+                        .avg("endToEndBusinessDays").as("averageEndToEndSla")
+                        .avg("debitDlValue").as("averageDebitDl")
+                        .avg("debitUlValue").as("averageDebitUl")
+                        .avg("rsrpValue").as("averageRsrp")
+                        .avg("rsrqValue").as("averageRsrq")
+                        .avg("sinrValue").as("averageSinr")
+                        .avg("metrageCableValue").as("averageMetrageCable")
+                        .avg("nombreDePvValue").as("averageNombreDePv")
+                        .addToSet("nameStt").as("sttValues")
+                        .addToSet("gouvernorat").as("governorateValues")
+        );
+
+        Document document = mongoTemplate.aggregate(aggregation, ActivationAnalyticsRowEntity.class, Document.class)
+                .getUniqueMappedResult();
+        long queryMs = elapsedMs(queryStart);
+        if (document == null) {
+            return SummaryMetrics.empty(queryMs);
+        }
+
+        return new SummaryMetrics(
+                readLong(document, "totalCases"),
+                readLong(document, "completedCases"),
+                readLong(document, "delayedCases"),
+                readLong(document, "blockedCases"),
+                readLong(document, "injoignableCases"),
+                readLong(document, "abandonCases"),
+                readLong(document, "rdvSuccessCases"),
+                readLong(document, "assignmentMeasuredCases"),
+                readLong(document, "rdvMeasuredCases"),
+                readLong(document, "executionMeasuredCases"),
+                readLong(document, "endToEndMeasuredCases"),
+                readDouble(document, "averageAssignmentSla"),
+                readDouble(document, "averageRdvDelay"),
+                readDouble(document, "averageExecutionSla"),
+                readDouble(document, "averageEndToEndSla"),
+                readDouble(document, "averageDebitDl"),
+                readDouble(document, "averageDebitUl"),
+                readDouble(document, "averageRsrp"),
+                readDouble(document, "averageRsrq"),
+                readDouble(document, "averageSinr"),
+                readDouble(document, "averageMetrageCable"),
+                readDouble(document, "averageNombreDePv"),
+                sanitizeDistinctLabels(document.get("sttValues")).size(),
+                sanitizeDistinctLabels(document.get("governorateValues")).size(),
+                queryMs
+        );
+    }
+
+    private GroupedQueryResult aggregateGroupsByField(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate,
+            String normalizedField,
+            String labelField
+    ) {
+        long queryStart = System.nanoTime();
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(buildRowsCriteria(uploadedBy, batchIds, stt, governorate)),
+                Aggregation.group(normalizedField)
+                        .first(labelField).as("label")
+                        .count().as("caseCount")
+                        .avg("assignmentBusinessDays").as("averageAssignmentSla")
+                        .avg("rdvBusinessDays").as("averageRdvDelay")
+                        .avg("executionBusinessDays").as("averageExecutionSla")
+                        .avg("endToEndBusinessDays").as("averageEndToEndSla")
+                        .avg("debitDlValue").as("averageDebitDl")
+                        .avg("debitUlValue").as("averageDebitUl")
+                        .avg("rsrpValue").as("averageRsrp")
+                        .avg("rsrqValue").as("averageRsrq")
+                        .avg("sinrValue").as("averageSinr")
+                        .avg("metrageCableValue").as("averageMetrageCable")
+                        .avg("nombreDePvValue").as("averageNombreDePv")
+                        .sum(sumTrue("rdvSuccess")).as("rdvSuccessCases")
+                        .sum(sumTrue("completed")).as("completedCases")
+                        .sum(sumTrue("abandon")).as("abandonCases")
+                        .sum(sumTrue("injoignable")).as("injoignableCases")
+                        .sum(sumTrue("delayed")).as("delayedCases")
+                        .addToSet("nameStt").as("sttValues")
+        );
+
+        List<Document> documents = mongoTemplate.aggregate(aggregation, ActivationAnalyticsRowEntity.class, Document.class)
+                .getMappedResults();
+        return new GroupedQueryResult(documents, elapsedMs(queryStart));
+    }
+
+    private GovernorateTopSttResult aggregateGovernorateTopStts(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate
+    ) {
+        long queryStart = System.nanoTime();
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(buildRowsCriteria(uploadedBy, batchIds, stt, governorate)),
+                Aggregation.group("gouvernoratNormalized", "nameSttNormalized")
+                        .first("gouvernorat").as("governorate")
+                        .first("nameStt").as("sttName")
+                        .count().as("caseCount")
+        );
+
+        Map<String, GovernorateTopStt> ranking = new LinkedHashMap<>();
+        List<Document> documents = mongoTemplate.aggregate(aggregation, ActivationAnalyticsRowEntity.class, Document.class)
+                .getMappedResults();
+        for (Document document : documents) {
+            Document identifier = document.get("_id", Document.class);
+            String governorateKey = bucketKey(
+                    identifier == null ? null : ActivationAnalyticsSupport.cleanString(identifier.getString("gouvernoratNormalized")),
+                    document.getString("governorate"),
+                    "unknown"
+            );
+            String sttName = fallbackLabel(document.getString("sttName"), "Unassigned");
+            long caseCount = readLong(document, "caseCount");
+
+            GovernorateTopStt current = ranking.get(governorateKey);
+            if (current == null
+                    || caseCount > current.caseCount()
+                    || (caseCount == current.caseCount()
+                    && sttName.compareToIgnoreCase(current.sttName()) < 0)) {
+                ranking.put(governorateKey, new GovernorateTopStt(sttName, caseCount));
+            }
+        }
+
+        long queryMs = elapsedMs(queryStart);
+        Map<String, String> result = new LinkedHashMap<>();
+        ranking.forEach((key, value) -> result.put(key, value.sttName()));
+        return new GovernorateTopSttResult(result, queryMs);
+    }
+
+    private TimedCauseRanking aggregateCauseRanking(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate,
+            String fieldName
+    ) {
+        long queryStart = System.nanoTime();
+        Criteria criteria = buildRowsCriteria(uploadedBy, batchIds, stt, governorate);
+        criteria.and(fieldName).ne(null).ne("");
+
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(criteria),
+                Aggregation.group(fieldName)
+                        .count().as("count")
+                        .first(fieldName).as("label"),
+                Aggregation.sort(Sort.by(Sort.Order.desc("count")))
+        );
+
+        List<Document> documents = mongoTemplate.aggregate(aggregation, ActivationAnalyticsRowEntity.class, Document.class)
+                .getMappedResults();
+        long totalCauses = 0;
+        List<CauseAggregate> aggregates = new ArrayList<>();
+        for (Document document : documents) {
+            String label = ActivationAnalyticsSupport.cleanString(document.getString("label"));
+            if (!ActivationAnalyticsSupport.hasText(label)) {
+                continue;
+            }
+            long count = readLong(document, "count");
+            totalCauses += count;
+            aggregates.add(new CauseAggregate(label, count));
+        }
+
+        long totalCauseCount = totalCauses;
+        List<AdminActivationAnalyticsCauseItemResponse> items = aggregates.stream()
+                .limit(6)
+                .map(item -> new AdminActivationAnalyticsCauseItemResponse(
+                        item.label(),
+                        (int) item.count(),
+                        percentage(item.count(), totalCauseCount)
+                ))
+                .toList();
+        return new TimedCauseRanking(items, elapsedMs(queryStart));
+    }
+
+    private List<String> loadDistinctValues(String uploadedBy, Collection<String> batchIds, String fieldName) {
+        Query query = Query.query(buildRowsCriteria(uploadedBy, batchIds, null, null));
+        List<String> values = mongoTemplate.query(ActivationAnalyticsRowEntity.class)
+                .distinct(fieldName)
+                .matching(query)
+                .as(String.class)
+                .all();
+
+        LinkedHashMap<String, String> sanitized = new LinkedHashMap<>();
+        for (String value : values) {
+            String cleaned = ActivationAnalyticsSupport.cleanString(value);
+            if (!ActivationAnalyticsSupport.hasText(cleaned)) {
+                continue;
+            }
+            sanitized.putIfAbsent(ActivationAnalyticsSupport.normalizeLookupValue(cleaned), cleaned);
+        }
+
+        return sanitized.values().stream()
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+    }
+
+    private List<AdminActivationAnalyticsSttItemResponse> toSttRanking(List<Document> documents, long totalCases) {
+        return documents.stream()
+                .map(document -> {
+                    int caseCount = (int) readLong(document, "caseCount");
+                    return new AdminActivationAnalyticsSttItemResponse(
+                            fallbackLabel(document.getString("label"), "Unassigned"),
+                            caseCount,
+                            percentage(caseCount, totalCases),
+                            roundNullable(readDouble(document, "averageAssignmentSla")),
+                            roundNullable(readDouble(document, "averageRdvDelay")),
+                            roundNullable(readDouble(document, "averageExecutionSla")),
+                            roundNullable(readDouble(document, "averageEndToEndSla")),
+                            percentage(readLong(document, "rdvSuccessCases"), caseCount),
+                            percentage(readLong(document, "completedCases"), caseCount),
+                            percentage(readLong(document, "abandonCases"), caseCount),
+                            percentage(readLong(document, "injoignableCases"), caseCount),
+                            percentage(readLong(document, "delayedCases"), caseCount)
+                    );
+                })
+                .sorted(sttPerformanceComparator())
+                .toList();
+    }
+
+    private List<AdminActivationAnalyticsGovernorateItemResponse> toGovernorateBreakdown(
+            List<Document> documents,
+            Map<String, String> governorateTopStts,
+            long totalCases
+    ) {
+        return documents.stream()
+                .map(document -> {
+                    int caseCount = (int) readLong(document, "caseCount");
+                    String label = fallbackLabel(document.getString("label"), "Unknown");
+                    String key = bucketKey(
+                            document.get("_id") == null ? null : document.get("_id").toString(),
+                            label,
+                            "unknown"
+                    );
+                    return new AdminActivationAnalyticsGovernorateItemResponse(
+                            label,
+                            caseCount,
+                            percentage(caseCount, totalCases),
+                            roundNullable(readDouble(document, "averageAssignmentSla")),
+                            roundNullable(readDouble(document, "averageRdvDelay")),
+                            roundNullable(readDouble(document, "averageExecutionSla")),
+                            roundNullable(readDouble(document, "averageEndToEndSla")),
+                            percentage(readLong(document, "rdvSuccessCases"), caseCount),
+                            percentage(readLong(document, "completedCases"), caseCount),
+                            percentage(readLong(document, "delayedCases"), caseCount),
+                            sanitizeDistinctLabels(document.get("sttValues")).size(),
+                            governorateTopStts.get(key)
+                    );
+                })
+                .sorted(Comparator.comparing(AdminActivationAnalyticsGovernorateItemResponse::caseCount).reversed()
+                        .thenComparing(
+                                AdminActivationAnalyticsGovernorateItemResponse::gouvernorat,
+                                Comparator.nullsLast(String::compareToIgnoreCase)
+                        ))
+                .toList();
+    }
+
+    private List<AdminActivationAnalyticsQualitySliceResponse> toQualitySlices(
+            List<Document> documents,
+            String fallbackLabel
+    ) {
+        return documents.stream()
+                .map(document -> new AdminActivationAnalyticsQualitySliceResponse(
+                        fallbackLabel(document.getString("label"), fallbackLabel),
+                        (int) readLong(document, "caseCount"),
+                        roundNullable(readDouble(document, "averageDebitDl")),
+                        roundNullable(readDouble(document, "averageDebitUl")),
+                        roundNullable(readDouble(document, "averageRsrp")),
+                        roundNullable(readDouble(document, "averageRsrq")),
+                        roundNullable(readDouble(document, "averageSinr")),
+                        roundNullable(readDouble(document, "averageMetrageCable")),
+                        roundNullable(readDouble(document, "averageNombreDePv"))
+                ))
+                .sorted(Comparator.comparing(AdminActivationAnalyticsQualitySliceResponse::caseCount).reversed()
+                        .thenComparing(
+                                AdminActivationAnalyticsQualitySliceResponse::label,
+                                Comparator.nullsLast(String::compareToIgnoreCase)
+                        ))
+                .limit(8)
+                .toList();
+    }
+
+    private List<AdminActivationAnalyticsPipelineStageResponse> buildPipelineStages(SummaryMetrics metrics) {
+        return List.of(
+                new AdminActivationAnalyticsPipelineStageResponse(
+                        "assignment",
+                        "Assignment delay",
+                        roundNullable(metrics.averageAssignmentSla()),
+                        (int) metrics.assignmentMeasuredCases()
+                ),
+                new AdminActivationAnalyticsPipelineStageResponse(
+                        "rdv",
+                        "RDV delay",
+                        roundNullable(metrics.averageRdvDelay()),
+                        (int) metrics.rdvMeasuredCases()
+                ),
+                new AdminActivationAnalyticsPipelineStageResponse(
+                        "execution",
+                        "Execution delay",
+                        roundNullable(metrics.averageExecutionSla()),
+                        (int) metrics.executionMeasuredCases()
+                ),
+                new AdminActivationAnalyticsPipelineStageResponse(
+                        "end_to_end",
+                        "End-to-end SLA",
+                        roundNullable(metrics.averageEndToEndSla()),
+                        (int) metrics.endToEndMeasuredCases()
+                )
+        );
+    }
+
+    private Criteria buildRowsCriteria(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate
+    ) {
+        Criteria criteria = Criteria.where("uploadedBy").is(uploadedBy).and("validRow").is(true);
+        if (batchIds != null && !batchIds.isEmpty()) {
+            criteria.and("batchId").in(batchIds);
+        }
+
+        String normalizedStt = ActivationAnalyticsSupport.normalizeLookupValue(stt);
+        if (ActivationAnalyticsSupport.hasText(normalizedStt)) {
+            criteria.and("nameSttNormalized").is(normalizedStt);
+        }
+
+        String normalizedGovernorate = ActivationAnalyticsSupport.normalizeLookupValue(governorate);
+        if (ActivationAnalyticsSupport.hasText(normalizedGovernorate)) {
+            criteria.and("gouvernoratNormalized").is(normalizedGovernorate);
+        }
+        return criteria;
+    }
+
+    private AggregationExpression sumTrue(String fieldName) {
+        return ConditionalOperators.when(Criteria.where(fieldName).is(true)).then(1).otherwise(0);
+    }
+
+    private AggregationExpression sumPresent(String fieldName) {
+        return ConditionalOperators.when(Criteria.where(fieldName).ne(null)).then(1).otherwise(0);
+    }
+
+    private long readLong(Document document, String fieldName) {
+        Object value = document.get(fieldName);
+        return value instanceof Number number ? number.longValue() : 0L;
+    }
+
+    private Double readDouble(Document document, String fieldName) {
+        Object value = document.get(fieldName);
+        return value instanceof Number number ? number.doubleValue() : null;
+    }
+
+    private List<String> sanitizeDistinctLabels(Object rawValues) {
+        if (!(rawValues instanceof List<?> values) || values.isEmpty()) {
+            return List.of();
+        }
+
+        LinkedHashMap<String, String> sanitized = new LinkedHashMap<>();
+        for (Object rawValue : values) {
+            String cleaned = rawValue == null ? null : ActivationAnalyticsSupport.cleanString(rawValue.toString());
+            if (!ActivationAnalyticsSupport.hasText(cleaned)) {
+                continue;
+            }
+            sanitized.putIfAbsent(ActivationAnalyticsSupport.normalizeLookupValue(cleaned), cleaned);
+        }
+        return List.copyOf(sanitized.values());
+    }
+
+    private String fallbackLabel(String value, String fallback) {
+        String cleaned = ActivationAnalyticsSupport.cleanString(value);
+        return ActivationAnalyticsSupport.hasText(cleaned) ? cleaned : fallback;
+    }
+
+    private String bucketKey(String normalizedValue, String label, String fallback) {
+        String cleanedNormalizedValue = ActivationAnalyticsSupport.cleanString(normalizedValue);
+        if (ActivationAnalyticsSupport.hasText(cleanedNormalizedValue)) {
+            return cleanedNormalizedValue;
+        }
+
+        String cleanedLabel = ActivationAnalyticsSupport.cleanString(label);
+        if (ActivationAnalyticsSupport.hasText(cleanedLabel)) {
+            String normalizedLabel = ActivationAnalyticsSupport.normalizeLookupValue(cleanedLabel);
+            if (ActivationAnalyticsSupport.hasText(normalizedLabel)) {
+                return normalizedLabel;
+            }
+        }
+        return fallback;
+    }
+
+    private Double roundNullable(Double value) {
+        return value == null ? null : ActivationAnalyticsSupport.round2(value);
+    }
+
+    private AdminActivationAnalyticsRowsPageResponse getRowsPage(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate,
+            int page,
+            int size,
+            String purpose
+    ) {
+        long totalStart = System.nanoTime();
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(size, 1), ROW_PAGE_MAX_SIZE);
+
+        Query countQuery = buildRowsQuery(uploadedBy, batchIds, stt, governorate);
+        long countStart = System.nanoTime();
+        long totalElements = mongoTemplate.count(countQuery, ActivationAnalyticsRowEntity.class);
+        long countMs = elapsedMs(countStart);
+
+        Query pageQuery = buildRowsQuery(uploadedBy, batchIds, stt, governorate);
+        pageQuery.with(Sort.by(
+                Sort.Order.desc("uploadedAt"),
+                Sort.Order.desc("batchId"),
+                Sort.Order.asc("rowNumber")
+        ));
+        pageQuery.skip((long) safePage * safeSize);
+        pageQuery.limit(safeSize);
+        pageQuery.fields()
+                .include("batchId")
+                .include("uploadedAt")
+                .include("sourceFileName")
+                .include("rowNumber")
+                .include("crmCase")
+                .include("gouvernorat")
+                .include("nameStt")
+                .include("statut")
+                .include("assignmentBusinessDays")
+                .include("rdvBusinessDays")
+                .include("executionBusinessDays")
+                .include("endToEndBusinessDays");
+
+        long fetchStart = System.nanoTime();
+        List<AdminActivationAnalyticsRowListItemResponse> items = mongoTemplate.find(pageQuery, ActivationAnalyticsRowEntity.class).stream()
+                .map(this::toRowListItem)
+                .toList();
+        long fetchMs = elapsedMs(fetchStart);
+
+        int totalPages = totalElements == 0 ? 0 : (int) Math.ceil((double) totalElements / safeSize);
+        log.info(
+                "activation_dashboard_rows purpose={} uploadedBy={} page={} size={} totalElements={} countMs={} fetchMs={} totalMs={}",
+                purpose,
+                uploadedBy,
+                safePage,
+                safeSize,
+                totalElements,
+                countMs,
+                fetchMs,
+                elapsedMs(totalStart)
+        );
+
+        return new AdminActivationAnalyticsRowsPageResponse(items, totalElements, totalPages, safePage, safeSize);
+    }
+
+    private Query buildRowsQuery(
+            String uploadedBy,
+            Collection<String> batchIds,
+            String stt,
+            String governorate
+    ) {
+        Query query = Query.query(Criteria.where("uploadedBy").is(uploadedBy).and("validRow").is(true));
+
+        if (batchIds != null && !batchIds.isEmpty()) {
+            query.addCriteria(Criteria.where("batchId").in(batchIds));
+        }
+
+        String normalizedStt = ActivationAnalyticsSupport.normalizeLookupValue(stt);
+        if (ActivationAnalyticsSupport.hasText(normalizedStt)) {
+            query.addCriteria(Criteria.where("nameSttNormalized").is(normalizedStt));
+        }
+
+        String normalizedGovernorate = ActivationAnalyticsSupport.normalizeLookupValue(governorate);
+        if (ActivationAnalyticsSupport.hasText(normalizedGovernorate)) {
+            query.addCriteria(Criteria.where("gouvernoratNormalized").is(normalizedGovernorate));
+        }
+
+        return query;
+    }
+
+    private AdminActivationAnalyticsRowListItemResponse toRowListItem(ActivationAnalyticsRowEntity entity) {
+        return new AdminActivationAnalyticsRowListItemResponse(
+                entity.getId(),
+                entity.getBatchId(),
+                entity.getUploadedAt(),
+                entity.getSourceFileName(),
+                entity.getRowNumber(),
+                entity.getCrmCase(),
+                entity.getGouvernorat(),
+                entity.getNameStt(),
+                entity.getStatut(),
+                entity.getAssignmentBusinessDays(),
+                entity.getRdvBusinessDays(),
+                entity.getExecutionBusinessDays(),
+                entity.getEndToEndBusinessDays()
+        );
+    }
+
+    private AdminActivationAnalyticsSummaryResponse emptySummary(
             long storedRows,
             long validStoredRows,
             long batchCount,
@@ -234,7 +1026,7 @@ public class ActivationAnalyticsDashboardService {
             String selectedStt,
             String selectedGovernorate
     ) {
-        return new AdminActivationAnalyticsDashboardResponse(
+        return new AdminActivationAnalyticsSummaryResponse(
                 storedRows,
                 validStoredRows,
                 batchCount,
@@ -252,7 +1044,12 @@ public class ActivationAnalyticsDashboardService {
                 null,
                 null,
                 null,
-                null,
+                null
+        );
+    }
+
+    private AdminActivationAnalyticsChartsResponse emptyCharts() {
+        return new AdminActivationAnalyticsChartsResponse(
                 null,
                 null,
                 null,
@@ -628,77 +1425,66 @@ public class ActivationAnalyticsDashboardService {
     }
 
     private boolean isCompleted(ActivationAnalyticsRowEntity row) {
-        return row.getDateFinTrvDate() != null
-                || hasPositiveSignal(row.getRepTravauxStt())
-                || ActivationAnalyticsSupport.containsKeyword(
-                        row.getStatut(),
-                        "completed",
-                        "termine",
-                        "terminÃ©",
-                        "cloture",
-                        "clÃ´ture",
-                        "done"
-                );
+        if (row.getCompleted() != null) {
+            return row.getCompleted();
+        }
+        return ActivationAnalyticsSupport.isCompleted(row.getStatut(), row.getRepTravauxStt(), row.getDateFinTrvDate());
     }
 
     private boolean isRdvSuccess(ActivationAnalyticsRowEntity row) {
-        return row.getDatePriseRdvDate() != null
-                || hasPositiveSignal(row.getRepRdv())
-                || ActivationAnalyticsSupport.containsKeyword(row.getRepRdv(), "rdv pris", "rdv confirme", "rdv confirmÃ©");
+        if (row.getRdvSuccess() != null) {
+            return row.getRdvSuccess();
+        }
+        return ActivationAnalyticsSupport.isRdvSuccess(row.getRepRdv(), row.getDatePriseRdvDate());
     }
 
     private boolean isInjoignable(ActivationAnalyticsRowEntity row) {
-        return ActivationAnalyticsSupport.hasText(row.getCauseInjoignabilite())
-                || ActivationAnalyticsSupport.containsKeyword(row.getRepRdv(), "injoignable", "unreachable", "no answer")
-                || ActivationAnalyticsSupport.containsKeyword(row.getStatut(), "injoignable")
-                || ActivationAnalyticsSupport.containsKeyword(row.getDetail(), "injoignable");
-    }
-
-    private boolean isAbandon(ActivationAnalyticsRowEntity row) {
-        return ActivationAnalyticsSupport.hasText(row.getCauseAbandon())
-                || ActivationAnalyticsSupport.containsKeyword(row.getRepRdv(), "abandon")
-                || ActivationAnalyticsSupport.containsKeyword(row.getStatut(), "abandon")
-                || ActivationAnalyticsSupport.containsKeyword(row.getDetail(), "abandon");
-    }
-
-    private boolean isBlocked(ActivationAnalyticsRowEntity row) {
-        return ActivationAnalyticsSupport.containsKeyword(row.getStatut(), "gele", "gelÃ©", "bloque", "bloquÃ©", "blocked")
-                || ActivationAnalyticsSupport.containsKeyword(row.getDetail(), "gele", "gelÃ©", "bloque", "bloquÃ©", "blocked")
-                || ActivationAnalyticsSupport.containsKeyword(row.getCommentaire(), "gele", "gelÃ©", "bloque", "bloquÃ©", "blocked")
-                || ActivationAnalyticsSupport.containsKeyword(row.getCmtZm(), "gele", "gelÃ©", "bloque", "bloquÃ©", "blocked")
-                || ActivationAnalyticsSupport.containsKeyword(row.getCmtTrvStt(), "gele", "gelÃ©", "bloque", "bloquÃ©", "blocked");
-    }
-
-    private boolean isDelayed(ActivationAnalyticsRowEntity row) {
-        if (row.getEndToEndBusinessDays() != null) {
-            return row.getEndToEndBusinessDays() > END_TO_END_DELAY_THRESHOLD_DAYS;
+        if (row.getInjoignable() != null) {
+            return row.getInjoignable();
         }
-
-        return valueAbove(row.getAssignmentBusinessDays(), ASSIGNMENT_DELAY_THRESHOLD_DAYS)
-                || valueAbove(row.getRdvBusinessDays(), RDV_DELAY_THRESHOLD_DAYS)
-                || valueAbove(row.getExecutionBusinessDays(), EXECUTION_DELAY_THRESHOLD_DAYS);
-    }
-
-    private boolean hasPositiveSignal(String value) {
-        return ActivationAnalyticsSupport.containsKeyword(
-                value,
-                "oui",
-                "ok",
-                "success",
-                "succÃ¨s",
-                "succes",
-                "confirm",
-                "confirme",
-                "confirmÃ©",
-                "favorable",
-                "realise",
-                "rÃ©alisÃ©",
-                "pris"
+        return ActivationAnalyticsSupport.isInjoignable(
+                row.getCauseInjoignabilite(),
+                row.getRepRdv(),
+                row.getStatut(),
+                row.getDetail()
         );
     }
 
-    private boolean valueAbove(Integer value, int threshold) {
-        return value != null && value > threshold;
+    private boolean isAbandon(ActivationAnalyticsRowEntity row) {
+        if (row.getAbandon() != null) {
+            return row.getAbandon();
+        }
+        return ActivationAnalyticsSupport.isAbandon(
+                row.getCauseAbandon(),
+                row.getRepRdv(),
+                row.getStatut(),
+                row.getDetail()
+        );
+    }
+
+    private boolean isBlocked(ActivationAnalyticsRowEntity row) {
+        if (row.getBlocked() != null) {
+            return row.getBlocked();
+        }
+        return ActivationAnalyticsSupport.isBlocked(
+                row.getStatut(),
+                row.getDetail(),
+                row.getCommentaire(),
+                row.getCmtZm(),
+                row.getCmtTrvStt()
+        );
+    }
+
+    private boolean isDelayed(ActivationAnalyticsRowEntity row) {
+        if (row.getDelayed() != null) {
+            return row.getDelayed();
+        }
+        if (row.getEndToEndBusinessDays() != null) {
+            return row.getEndToEndBusinessDays() > END_TO_END_DELAY_THRESHOLD_DAYS;
+        }
+        return valueAbove(row.getAssignmentBusinessDays(), ASSIGNMENT_DELAY_THRESHOLD_DAYS)
+                || valueAbove(row.getRdvBusinessDays(), RDV_DELAY_THRESHOLD_DAYS)
+                || valueAbove(row.getExecutionBusinessDays(), EXECUTION_DELAY_THRESHOLD_DAYS);
     }
 
     private int distinctCount(List<ActivationAnalyticsRowEntity> rows, Function<ActivationAnalyticsRowEntity, String> extractor) {
@@ -737,5 +1523,96 @@ public class ActivationAnalyticsDashboardService {
 
     private int valueOrZero(Integer value) {
         return value == null ? 0 : value;
+    }
+
+    private boolean valueAbove(Integer value, int threshold) {
+        return value != null && value > threshold;
+    }
+
+    private long elapsedMs(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
+    private record SummaryMetrics(
+            long totalCases,
+            long completedCases,
+            long delayedCases,
+            long blockedCases,
+            long injoignableCases,
+            long abandonCases,
+            long rdvSuccessCases,
+            long assignmentMeasuredCases,
+            long rdvMeasuredCases,
+            long executionMeasuredCases,
+            long endToEndMeasuredCases,
+            Double averageAssignmentSla,
+            Double averageRdvDelay,
+            Double averageExecutionSla,
+            Double averageEndToEndSla,
+            Double averageDebitDl,
+            Double averageDebitUl,
+            Double averageRsrp,
+            Double averageRsrq,
+            Double averageSinr,
+            Double averageMetrageCable,
+            Double averageNombreDePv,
+            int distinctSttCount,
+            int distinctGovernorateCount,
+            long queryMs
+    ) {
+        static SummaryMetrics empty(long queryMs) {
+            return new SummaryMetrics(
+                    0L, 0L, 0L, 0L, 0L, 0L, 0L,
+                    0L, 0L, 0L, 0L,
+                    null, null, null, null,
+                    null, null, null, null, null, null, null,
+                    0, 0, queryMs
+            );
+        }
+    }
+
+    private record GroupedQueryResult(
+            List<Document> documents,
+            long queryMs
+    ) {
+    }
+
+    private record GovernorateTopStt(
+            String sttName,
+            long caseCount
+    ) {
+    }
+
+    private record GovernorateTopSttResult(
+            Map<String, String> values,
+            long queryMs
+    ) {
+    }
+
+    private record CauseAggregate(
+            String label,
+            long count
+    ) {
+    }
+
+    private record TimedCauseRanking(
+            List<AdminActivationAnalyticsCauseItemResponse> items,
+            long queryMs
+    ) {
+    }
+
+    private record DashboardContext(
+            List<ActivationAnalyticsRowEntity> sourceRows,
+            List<ActivationAnalyticsRowEntity> filteredRows,
+            long storedRows,
+            long validStoredRows,
+            long batchCount,
+            AdminActivationAnalyticsBatchResponse latestBatch,
+            List<AdminActivationAnalyticsBatchResponse> recentBatches,
+            List<String> availableStts,
+            List<String> availableGovernorates,
+            String selectedStt,
+            String selectedGovernorate
+    ) {
     }
 }
