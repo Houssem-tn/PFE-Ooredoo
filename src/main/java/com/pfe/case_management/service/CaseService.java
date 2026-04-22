@@ -20,8 +20,11 @@ import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.case_management.enums.ExecutionMode;
+import com.pfe.case_management.enums.ExecutorRole;
 import com.pfe.case_management.enums.SlaStatus;
 import com.pfe.case_management.model.RdvInfo;
+import com.pfe.case_management.model.CaseTimelineEvent;
 import com.pfe.case_management.model.TechnicalMetrics;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.model.ZmValidation;
@@ -36,6 +39,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -84,22 +88,34 @@ public class CaseService {
     private static final Set<CaseStatus> ASSIGN_TECH_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
+        CaseStatus.NOT_REACHABLE,
+        CaseStatus.REJECTED_BY_ZM
+    );
+
+    private static final Set<CaseStatus> SELF_EXECUTION_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
         CaseStatus.NOT_REACHABLE,
         CaseStatus.REJECTED_BY_ZM
     );
 
     private static final Set<CaseStatus> SET_RDV_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RDV_SET,
         CaseStatus.NOT_REACHABLE
     );
 
     private static final Set<CaseStatus> COMPLETE_WORK_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RDV_SET
     );
 
     private static final Set<CaseStatus> WORK_PROOF_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RDV_SET,
         CaseStatus.WORK_DONE,
@@ -197,6 +213,7 @@ public class CaseService {
             scoped = repository.findByType(type);
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -204,6 +221,7 @@ public class CaseService {
             scoped = repository.findByTypeAndZmEmailIgnoreCase(type, getCurrentUsername());
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -211,6 +229,7 @@ public class CaseService {
             scoped = repository.findByTypeAndSttEmailIgnoreCase(type, getCurrentUsername());
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -218,6 +237,7 @@ public class CaseService {
             scoped = repository.findByTypeAndTechEmailIgnoreCase(type, getCurrentUsername());
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -230,7 +250,7 @@ public class CaseService {
         if (currentUserHasRole("ROLE_ADMIN")) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         String current = getCurrentUsername();
@@ -238,19 +258,19 @@ public class CaseService {
         if (currentUserHasRole("ROLE_ZM") && equalsIgnoreCase(c.getZmEmail(), current)) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         if (currentUserHasRole("ROLE_STT") && equalsIgnoreCase(c.getSttEmail(), current)) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         if (currentUserHasRole("ROLE_TECH") && equalsIgnoreCase(c.getTechEmail(), current)) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to access this case");
@@ -304,7 +324,7 @@ public class CaseService {
         c.setDateAffectationStt(Instant.now());
 
         if (sttChanged) {
-            clearTechAssignment(c);
+            resetExecutionState(c);
         }
 
         c.setStatus(CaseStatus.ASSIGNED_TO_STT);
@@ -328,7 +348,7 @@ public class CaseService {
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
         notificationEventService.onCaseAssignedToStt(saved, triggeredBy);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity assignToTech(String caseId, AssignTechRequest request) {
@@ -363,11 +383,19 @@ public class CaseService {
         c.setTechId(tech.getId());
         c.setTechEmail(tech.getEmail());
         c.setTechName(tech.getFullName());
-        c.setDateAffectationTech(Instant.now());
+        Instant assignmentTime = Instant.now();
+        c.setDateAffectationTech(assignmentTime);
+        c.setExecutorId(tech.getId());
+        c.setExecutorRole(ExecutorRole.TECH);
+        c.setExecutionMode(ExecutionMode.TECH_EXECUTION);
 
-        c.setStatus(CaseStatus.ASSIGNED_TO_TECH);
-        c.setUpdatedAt(Instant.now());
-        slaTrackingService.startRdvSla(c, c.getDateAffectationTech());
+        boolean preserveProgressState = previousStatus == CaseStatus.RDV_SET || previousStatus == CaseStatus.NOT_REACHABLE;
+        if (!preserveProgressState) {
+            c.setStatus(CaseStatus.ASSIGNED_TO_TECH);
+            slaTrackingService.startRdvSla(c, assignmentTime);
+        }
+
+        c.setUpdatedAt(assignmentTime);
 
         caseTimelineService.append(
             c,
@@ -379,14 +407,67 @@ public class CaseService {
             c.getStatus(),
             timelineData(
                 "assigneeRole", "ROLE_TECH",
-                "assigneeEmail", c.getTechEmail()
+                "assigneeEmail", c.getTechEmail(),
+                "executorRole", ExecutorRole.TECH.name(),
+                "executionMode", ExecutionMode.TECH_EXECUTION.name()
             )
         );
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
         notificationEventService.onCaseAssignedToTech(saved, triggeredBy);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
+    }
+
+    public CaseEntity executeMyself(String caseId) {
+        CaseEntity c = getCaseOrThrow(caseId);
+        String triggeredBy = getCurrentUsername();
+        CaseStatus previousStatus = c.getStatus();
+
+        ensureCurrentUserCanActAsAssignedStt(c);
+        ensureStatusIn(
+                c,
+                SELF_EXECUTION_ALLOWED_STATUSES,
+                "Case cannot switch to STT self-execution in current state"
+        );
+
+        if (isBlank(c.getSttId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must be assigned to an STT first");
+        }
+
+        Instant switchTime = Instant.now();
+        clearTechAssignment(c);
+        c.setExecutorId(c.getSttId());
+        c.setExecutorRole(ExecutorRole.STT);
+        c.setExecutionMode(ExecutionMode.STT_SELF_EXECUTION);
+
+        boolean preserveProgressState = previousStatus == CaseStatus.RDV_SET || previousStatus == CaseStatus.NOT_REACHABLE;
+        if (!preserveProgressState) {
+            c.setStatus(CaseStatus.ASSIGNED_TO_STT);
+            slaTrackingService.startRdvSla(c, switchTime);
+        }
+
+        c.setUpdatedAt(switchTime);
+
+        caseTimelineService.append(
+                c,
+                CaseTimelineEventType.ASSIGNMENT_UPDATED,
+                "Execution switched to STT",
+                "Assigned STT " + safe(c.getSttName(), c.getSttEmail()) + " will execute this case directly",
+                triggeredBy,
+                previousStatus,
+                c.getStatus(),
+                timelineData(
+                        "assigneeRole", "ROLE_STT",
+                        "assigneeEmail", c.getSttEmail(),
+                        "executorRole", ExecutorRole.STT.name(),
+                        "executionMode", ExecutionMode.STT_SELF_EXECUTION.name()
+                )
+        );
+
+        CaseEntity saved = repository.save(c);
+        enrichWorkProofReadValues(saved);
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity setRdv(String caseId, SetRdvRequest request) {
@@ -394,13 +475,7 @@ public class CaseService {
         String actor = getCurrentUsername();
         CaseStatus previousStatus = c.getStatus();
 
-        if (currentUserHasRole("ROLE_STT")) {
-            ensureCurrentUserCanActAsAssignedStt(c);
-        } else if (currentUserHasRole("ROLE_TECH")) {
-            ensureCurrentUserCanActAsAssignedTech(c);
-        } else if (!currentUserHasRole("ROLE_ADMIN")) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
-        }
+        ensureCurrentUserCanExecuteCase(c);
 
         ensureStatusIn(c, SET_RDV_ALLOWED_STATUSES, "RDV update is not allowed in current state");
 
@@ -475,7 +550,7 @@ public class CaseService {
             notificationEventService.onSlaBreached(saved);
         }
 
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity completeWork(String caseId, CompleteWorkRequest request) {
@@ -483,13 +558,7 @@ public class CaseService {
         String actor = getCurrentUsername();
         CaseStatus previousStatus = c.getStatus();
 
-        if (currentUserHasRole("ROLE_TECH")) {
-            ensureCurrentUserCanActAsAssignedTech(c);
-        } else if (currentUserHasRole("ROLE_STT")) {
-            ensureCurrentUserCanActAsAssignedStt(c);
-        } else if (!currentUserHasRole("ROLE_ADMIN")) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
-        }
+        ensureCurrentUserCanExecuteCase(c);
 
         ensureStatusIn(c, COMPLETE_WORK_ALLOWED_STATUSES, "Work completion is not allowed in current state");
         validateLocationSnapshot(
@@ -543,7 +612,7 @@ public class CaseService {
             )
         );
 
-        return repository.save(c);
+        return sanitizeCaseForCurrentViewer(repository.save(c));
     }
 
     public CaseEntity uploadWorkProof(
@@ -558,13 +627,7 @@ public class CaseService {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
 
-        if (currentUserHasRole("ROLE_TECH")) {
-            ensureCurrentUserCanActAsAssignedTech(c);
-        } else if (currentUserHasRole("ROLE_STT")) {
-            ensureCurrentUserCanActAsAssignedStt(c);
-        } else if (!currentUserHasRole("ROLE_ADMIN")) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
-        }
+        ensureCurrentUserCanExecuteCase(c);
 
         ensureStatusIn(c, WORK_PROOF_ALLOWED_STATUSES, "Work proof upload is not allowed in current state");
         validateLocationSnapshot(latitude, longitude, "Work proof location is invalid");
@@ -604,7 +667,7 @@ public class CaseService {
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity validateByZm(String caseId, ValidateZmRequest request) {
@@ -644,7 +707,7 @@ public class CaseService {
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity closeCase(String caseId) {
@@ -677,7 +740,7 @@ public class CaseService {
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     private void ensureStatusIn(CaseEntity caseEntity, Set<CaseStatus> allowedStatuses, String message) {
@@ -805,6 +868,59 @@ public class CaseService {
         }
     }
 
+    private void ensureCurrentUserCanExecuteCase(CaseEntity c) {
+        if (currentUserHasRole("ROLE_ADMIN")) {
+            return;
+        }
+
+        if (currentUserHasRole("ROLE_STT")) {
+            ensureCurrentUserCanActAsAssignedStt(c);
+
+            if (!isSttSelfExecution(c)) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "This case is not currently in STT self-execution mode"
+                );
+            }
+            return;
+        }
+
+        if (currentUserHasRole("ROLE_TECH")) {
+            ensureCurrentUserCanActAsAssignedTech(c);
+
+            if (!isTechExecution(c)) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "This case is not assigned to you as the active executor"
+                );
+            }
+            return;
+        }
+
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
+    }
+
+    private boolean isSttSelfExecution(CaseEntity c) {
+        return c != null
+                && c.getExecutionMode() == ExecutionMode.STT_SELF_EXECUTION
+                && c.getExecutorRole() == ExecutorRole.STT
+                && equalsSafe(c.getExecutorId(), c.getSttId());
+    }
+
+    private boolean isTechExecution(CaseEntity c) {
+        if (c == null || isBlank(c.getTechId())) {
+            return false;
+        }
+
+        if (c.getExecutionMode() == null && c.getExecutorRole() == null && isBlank(c.getExecutorId())) {
+            return true;
+        }
+
+        return c.getExecutionMode() == ExecutionMode.TECH_EXECUTION
+                && c.getExecutorRole() == ExecutorRole.TECH
+                && equalsSafe(c.getExecutorId(), c.getTechId());
+    }
+
     private boolean currentUserHasRole(String role) {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
@@ -855,6 +971,18 @@ public class CaseService {
         c.setTechEmail(null);
         c.setTechName(null);
         c.setDateAffectationTech(null);
+    }
+
+    private void clearExecutionDecision(CaseEntity c) {
+        c.setExecutorId(null);
+        c.setExecutorRole(null);
+        c.setExecutionMode(null);
+    }
+
+    private void resetExecutionState(CaseEntity c) {
+        clearTechAssignment(c);
+        clearExecutionDecision(c);
+        c.setSlaTracking(null);
     }
 
     private boolean isBlank(String value) {
@@ -979,6 +1107,91 @@ public class CaseService {
                 metadata.getLocationAccuracyMeters(),
                 metadata.getCaptureSource()
         );
+    }
+
+    private void sanitizeCaseListForCurrentViewer(List<CaseEntity> cases) {
+        if (cases == null || cases.isEmpty()) {
+            return;
+        }
+
+        for (CaseEntity caseEntity : cases) {
+            sanitizeCaseForCurrentViewer(caseEntity);
+        }
+    }
+
+    private CaseEntity sanitizeCaseForCurrentViewer(CaseEntity caseEntity) {
+        if (caseEntity == null || canViewCapturedGps(caseEntity)) {
+            return caseEntity;
+        }
+
+        redactCapturedGps(caseEntity);
+        return caseEntity;
+    }
+
+    private boolean canViewCapturedGps(CaseEntity caseEntity) {
+        if (caseEntity == null) {
+            return false;
+        }
+
+        if (currentUserHasRole("ROLE_ADMIN")) {
+            return true;
+        }
+
+        return currentUserHasRole("ROLE_ZM") && equalsIgnoreCase(caseEntity.getZmEmail(), getCurrentUsername());
+    }
+
+    private void redactCapturedGps(CaseEntity caseEntity) {
+        if (caseEntity == null) {
+            return;
+        }
+
+        if (caseEntity.getWork() != null) {
+            caseEntity.getWork().setLocationLatitude(null);
+            caseEntity.getWork().setLocationLongitude(null);
+            caseEntity.getWork().setLocationCapturedAt(null);
+            caseEntity.getWork().setLocationAccuracyMeters(null);
+        }
+
+        if (caseEntity.getTimeline() != null) {
+            caseEntity.getTimeline().forEach(this::redactTimelineGpsData);
+        }
+
+        if (caseEntity.getWorkProofs() != null && !caseEntity.getWorkProofs().isEmpty()) {
+            List<CaseProofFileResponse> sanitizedProofs = new ArrayList<>();
+
+            for (CaseProofFileResponse proof : caseEntity.getWorkProofs()) {
+                sanitizedProofs.add(new CaseProofFileResponse(
+                        proof.fileId(),
+                        proof.originalFilename(),
+                        proof.contentType(),
+                        proof.size(),
+                        proof.uploadedBy(),
+                        proof.createdAt(),
+                        proof.viewUrl(),
+                        proof.downloadUrl(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        proof.captureSource()
+                ));
+            }
+
+            caseEntity.setWorkProofs(List.copyOf(sanitizedProofs));
+        }
+    }
+
+    private void redactTimelineGpsData(CaseTimelineEvent event) {
+        if (event == null || event.getData() == null || event.getData().isEmpty()) {
+            return;
+        }
+
+        Map<String, Object> sanitized = new LinkedHashMap<>(event.getData());
+        sanitized.remove("locationLatitude");
+        sanitized.remove("locationLongitude");
+        sanitized.remove("locationCapturedAt");
+        sanitized.remove("locationAccuracyMeters");
+        event.setData(sanitized);
     }
 
     private List<String> safeGovernorates(List<String> governorates) {

@@ -2,6 +2,8 @@ package com.pfe.case_management.entity;
 
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.case_management.enums.ExecutionMode;
+import com.pfe.case_management.enums.ExecutorRole;
 import com.pfe.case_management.model.RdvInfo;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.case_management.model.CaseTimelineEvent;
@@ -72,6 +74,11 @@ public class CaseEntity {
     private String sttEmail;
     private String sttName;
     private Instant dateAffectationStt;
+
+    // Execution
+    private String executorId;
+    private ExecutorRole executorRole;
+    private ExecutionMode executionMode;
 
     // Assignment: TECH
     private String techId;

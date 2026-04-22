@@ -155,6 +155,8 @@ public class NotificationPayloadFactory {
         data.put("caseType", caseEntity.getType() != null ? caseEntity.getType().name() : null);
         data.put("caseStatus", caseEntity.getStatus() != null ? caseEntity.getStatus().name() : null);
         data.put("assigneeRole", assigneeRole);
+        data.put("executorRole", caseEntity.getExecutorRole() != null ? caseEntity.getExecutorRole().name() : null);
+        data.put("executionMode", caseEntity.getExecutionMode() != null ? caseEntity.getExecutionMode().name() : null);
         data.put("routeHint", "/cases/activation");
 
         NotificationMessageDto dto = new NotificationMessageDto();

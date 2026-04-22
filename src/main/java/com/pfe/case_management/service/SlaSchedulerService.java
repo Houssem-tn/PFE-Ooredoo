@@ -37,7 +37,7 @@ public class SlaSchedulerService {
     public void monitorRdvSla() {
         List<CaseEntity> candidates = caseRepository.findByTypeAndStatusIn(
                 CaseType.ACTIVATION,
-                List.of(CaseStatus.ASSIGNED_TO_TECH, CaseStatus.NOT_REACHABLE)
+                List.of(CaseStatus.ASSIGNED_TO_STT, CaseStatus.ASSIGNED_TO_TECH, CaseStatus.NOT_REACHABLE)
         );
 
         if (candidates.isEmpty()) {

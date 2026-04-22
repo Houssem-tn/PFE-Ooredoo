@@ -69,6 +69,11 @@ public class CaseController {
         return ResponseEntity.ok(caseService.assignToTech(id, request));
     }
 
+    @PostMapping("/{id}/execute-myself")
+    public ResponseEntity<CaseEntity> executeMyself(@PathVariable String id) {
+        return ResponseEntity.ok(caseService.executeMyself(id));
+    }
+
     @PostMapping("/{id}/rdv")
     public ResponseEntity<CaseEntity> setRdv(
             @PathVariable String id,

@@ -98,6 +98,8 @@ public class CasePdfExportService {
         addField(lines, "STT assigned at", formatInstant(c.getDateAffectationStt()));
         addField(lines, "TECH", person(c.getTechName(), c.getTechEmail()));
         addField(lines, "TECH assigned at", formatInstant(c.getDateAffectationTech()));
+        addField(lines, "Executor role", humanizeToken(c.getExecutorRole() != null ? c.getExecutorRole().name() : null));
+        addField(lines, "Execution mode", humanizeToken(c.getExecutionMode() != null ? c.getExecutionMode().name() : null));
 
         addSlaSection(lines, c.getSlaTracking());
         addRdvSection(lines, c.getRdv());

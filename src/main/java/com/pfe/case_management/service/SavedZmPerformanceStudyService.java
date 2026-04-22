@@ -108,8 +108,10 @@ public class SavedZmPerformanceStudyService {
             String savedStudyId,
             String zoneManager,
             String governorate,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo,
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo,
             String invalidReason,
             Integer invalidPage,
             Integer invalidPageSize
@@ -118,7 +120,8 @@ public class SavedZmPerformanceStudyService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Saved study id is required");
         }
 
-        validateUploadedRange(uploadedFrom, uploadedTo);
+        validateDateRange("Open Date", openDateFrom, openDateTo);
+        validateDateRange("Affectation Date", affectationDateFrom, affectationDateTo);
 
         SavedZmPerformanceStudyEntity study = savedZmPerformanceStudyRepository.findByIdAndSavedBy(savedStudyId.trim(), savedBy)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved study was not found"));
@@ -136,15 +139,26 @@ public class SavedZmPerformanceStudyService {
             query.addCriteria(Criteria.where("gouvernorat").regex("^" + java.util.regex.Pattern.quote(governorate.trim()) + "$", "i"));
         }
 
-        if (uploadedFrom != null || uploadedTo != null) {
-            Criteria uploadedAtCriteria = Criteria.where("uploadedAt");
-            if (uploadedFrom != null) {
-                uploadedAtCriteria = uploadedAtCriteria.gte(uploadedFrom.atStartOfDay().toInstant(ZoneOffset.UTC));
+        if (openDateFrom != null || openDateTo != null) {
+            Criteria openDateCriteria = Criteria.where("openDateSurTimosDate");
+            if (openDateFrom != null) {
+                openDateCriteria = openDateCriteria.gte(openDateFrom);
             }
-            if (uploadedTo != null) {
-                uploadedAtCriteria = uploadedAtCriteria.lte(uploadedTo.plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC).minusNanos(1));
+            if (openDateTo != null) {
+                openDateCriteria = openDateCriteria.lte(openDateTo);
             }
-            query.addCriteria(uploadedAtCriteria);
+            query.addCriteria(openDateCriteria);
+        }
+
+        if (affectationDateFrom != null || affectationDateTo != null) {
+            Criteria affectationDateCriteria = Criteria.where("dateAffectationSttDate");
+            if (affectationDateFrom != null) {
+                affectationDateCriteria = affectationDateCriteria.gte(affectationDateFrom);
+            }
+            if (affectationDateTo != null) {
+                affectationDateCriteria = affectationDateCriteria.lte(affectationDateTo);
+            }
+            query.addCriteria(affectationDateCriteria);
         }
 
         List<ImportedTodoEntity> rows = mongoTemplate.find(query, ImportedTodoEntity.class);
@@ -319,9 +333,9 @@ public class SavedZmPerformanceStudyService {
         return Math.max(1, Math.min(totalPages, invalidPage));
     }
 
-    private void validateUploadedRange(LocalDate uploadedFrom, LocalDate uploadedTo) {
-        if (uploadedFrom != null && uploadedTo != null && uploadedTo.isBefore(uploadedFrom)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Uploaded To date must be on or after Uploaded From date");
+    private void validateDateRange(String label, LocalDate from, LocalDate to) {
+        if (from != null && to != null && to.isBefore(from)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, label + " To date must be on or after " + label + " From date");
         }
     }
 
