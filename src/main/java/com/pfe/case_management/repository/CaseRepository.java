@@ -21,4 +21,6 @@ public interface CaseRepository extends MongoRepository<CaseEntity, String> {
     List<CaseEntity> findByTypeAndStatusIn(CaseType type, List<CaseStatus> statuses);
 
     Optional<CaseEntity> findByCrmCase(String crmCase);
+
+    long countByTypeAndZmIdAndStatusIn(CaseType type, String zmId, List<CaseStatus> statuses);
 }

@@ -8,6 +8,7 @@ import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowsPageResponse
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSummaryResponse;
 import com.pfe.activation_analytics.dto.SaveActivationAnalyticsStudyRequest;
 import com.pfe.activation_analytics.dto.SavedActivationAnalyticsStudyResponse;
+import com.pfe.activation_analytics.model.ActivationImportProcessingMode;
 import com.pfe.activation_analytics.service.ActivationAnalyticsDashboardService;
 import com.pfe.activation_analytics.service.ActivationAnalyticsImportService;
 import com.pfe.activation_analytics.service.SavedActivationAnalyticsStudyService;
@@ -50,9 +51,10 @@ public class AdminActivationAnalyticsController {
     @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<AdminActivationAnalyticsImportResponse> importFile(
             @RequestParam("file") MultipartFile file,
+            @RequestParam(name = "mode", defaultValue = "ANALYTICS") ActivationImportProcessingMode mode,
             Authentication authentication
     ) {
-        return timed("import", () -> importService.importFile(file, authentication.getName()));
+        return timed("import", () -> importService.importFile(file, authentication.getName(), mode));
     }
 
     @GetMapping("/summary")

@@ -80,6 +80,13 @@ public class CaseEntity {
     private ExecutorRole executorRole;
     private ExecutionMode executionMode;
 
+    // Imported source snapshot
+    private String sourceAssignedSttName;
+    private String sourceStatut;
+    private String sourceRepTravauxStt;
+    private String sourceGovernorate;
+    private Instant sourceLastImportedAt;
+
     // Assignment: TECH
     private String techId;
     private String techEmail;

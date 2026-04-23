@@ -3,7 +3,9 @@ package com.pfe.activation_analytics.service;
 import java.text.Normalizer;
 import java.time.DayOfWeek;
 import java.time.DateTimeException;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
@@ -303,6 +305,10 @@ final class ActivationAnalyticsSupport {
 
     static Double asDouble(Integer value) {
         return value == null ? null : value.doubleValue();
+    }
+
+    static Instant toInstant(LocalDate value) {
+        return value == null ? null : value.atStartOfDay().toInstant(ZoneOffset.UTC);
     }
 
     static boolean containsKeyword(String value, String... keywords) {
