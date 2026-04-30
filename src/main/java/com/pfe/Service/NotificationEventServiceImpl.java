@@ -89,6 +89,21 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     }
 
     @Override
+    public void onComplaintImportCompleted(String recipientEmail, int processedRows, int importedRows, int skippedRows) {
+        if (isBlank(recipientEmail)) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildComplaintImportCompleted(
+                recipientEmail.trim().toLowerCase(),
+                processedRows,
+                importedRows,
+                skippedRows
+        );
+        sendToRecipient(recipientEmail, payload);
+    }
+
+    @Override
     public void onSlaWarning(CaseEntity caseEntity) {
         if (caseEntity == null) {
             return;

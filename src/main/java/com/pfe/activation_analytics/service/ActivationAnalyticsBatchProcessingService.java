@@ -5,6 +5,7 @@ import com.pfe.activation_analytics.entity.ActivationAnalyticsRowEntity;
 import com.pfe.activation_analytics.model.ActivationImportSharedResult;
 import com.pfe.activation_analytics.model.ActivationImportSharedRow;
 import com.pfe.activation_analytics.repository.ActivationAnalyticsImportBatchRepository;
+import com.pfe.case_management.enums.CaseType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.mongodb.core.BulkOperations;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -43,6 +44,7 @@ public class ActivationAnalyticsBatchProcessingService {
                 .batchId(batchId)
                 .uploadedBy(uploadedBy)
                 .uploadedAt(uploadedAt)
+                .caseType(CaseType.ACTIVATION)
                 .fileName(sharedResult.sourceFileName())
                 .totalRows(sharedResult.totalRows())
                 .insertedRows(entities.size())
@@ -81,6 +83,7 @@ public class ActivationAnalyticsBatchProcessingService {
                 .batchId(batchId)
                 .uploadedBy(uploadedBy)
                 .uploadedAt(uploadedAt)
+                .caseType(CaseType.ACTIVATION)
                 .sourceFileName(sourceFileName)
                 .rowNumber(row.rowNumber())
                 .validRow(row.analyticsInsertableRow())

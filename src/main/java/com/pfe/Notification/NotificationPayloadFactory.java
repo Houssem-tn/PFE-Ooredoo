@@ -3,6 +3,7 @@ package com.pfe.Notification;
 import com.pfe.Dto.NotificationMessageDto;
 import com.pfe.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
+import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import org.springframework.stereotype.Component;
 
@@ -40,7 +41,7 @@ public class NotificationPayloadFactory {
         return buildCasePayload(
                 "CASE_ASSIGNED_TO_ZM",
                 "New case assigned by Admin",
-                "Activation case " + safe(caseEntity.getCrmCase()) + " has been assigned to you as ZM",
+                caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as ZM",
                 caseEntity,
                 triggeredBy,
                 "ROLE_ZM"
@@ -51,7 +52,7 @@ public class NotificationPayloadFactory {
         return buildCasePayload(
                 "CASE_ASSIGNED_TO_STT",
                 "New case assigned by ZM",
-                "Activation case " + safe(caseEntity.getCrmCase()) + " has been assigned to you as STT",
+                caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as STT",
                 caseEntity,
                 triggeredBy,
                 "ROLE_STT"
@@ -62,11 +63,39 @@ public class NotificationPayloadFactory {
         return buildCasePayload(
                 "CASE_ASSIGNED_TO_TECH",
                 "New case assigned by STT",
-                "Activation case " + safe(caseEntity.getCrmCase()) + " has been assigned to you as TECH",
+                caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as TECH",
                 caseEntity,
                 triggeredBy,
                 "ROLE_TECH"
         );
+    }
+
+    public NotificationMessageDto buildComplaintImportCompleted(
+            String triggeredBy,
+            int processedRows,
+            int importedRows,
+            int skippedRows
+    ) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("caseType", CaseType.PLAINTE.name());
+        data.put("processedRows", processedRows);
+        data.put("importedRows", importedRows);
+        data.put("skippedRows", skippedRows);
+        data.put("routeHint", "/admin/cases/complaint");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("COMPLAINT_IMPORT_COMPLETED");
+        dto.setTitle("Plainte import completed");
+        dto.setMessage("Plainte import completed: " + processedRows + " rows processed, "
+                + importedRows + " imported, " + skippedRows + " skipped.");
+        dto.setEntityType("CASE_IMPORT");
+        dto.setEntityId(null);
+        dto.setStatus("COMPLETED");
+        dto.setTriggeredBy(triggeredBy);
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+
+        return dto;
     }
 
     public NotificationMessageDto buildSlaWarning(CaseEntity caseEntity) {
@@ -157,7 +186,7 @@ public class NotificationPayloadFactory {
         data.put("assigneeRole", assigneeRole);
         data.put("executorRole", caseEntity.getExecutorRole() != null ? caseEntity.getExecutorRole().name() : null);
         data.put("executionMode", caseEntity.getExecutionMode() != null ? caseEntity.getExecutionMode().name() : null);
-        data.put("routeHint", "/cases/activation");
+        data.put("routeHint", routeHint(caseEntity));
 
         NotificationMessageDto dto = new NotificationMessageDto();
         dto.setEventType(eventType);
@@ -175,5 +204,25 @@ public class NotificationPayloadFactory {
 
     private String safe(String value) {
         return value == null || value.isBlank() ? "-" : value;
+    }
+
+    private String caseLabel(CaseEntity caseEntity) {
+        if (caseEntity != null && caseEntity.getType() == CaseType.PLAINTE) {
+            return "Complaint case";
+        }
+
+        if (caseEntity != null && caseEntity.getType() == CaseType.RESILIATION) {
+            return "Resiliation case";
+        }
+
+        return "Activation case";
+    }
+
+    private String routeHint(CaseEntity caseEntity) {
+        if (caseEntity != null && caseEntity.getType() == CaseType.PLAINTE) {
+            return "/cases/complaint";
+        }
+
+        return "/cases/activation";
     }
 }

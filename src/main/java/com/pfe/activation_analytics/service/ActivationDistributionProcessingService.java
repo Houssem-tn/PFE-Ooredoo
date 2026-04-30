@@ -85,7 +85,7 @@ public class ActivationDistributionProcessingService {
     }
 
     private DistributionOutcome upsertActionableCase(ActivationImportSharedRow row, String importedBy) {
-        Optional<CaseEntity> existingCase = caseRepository.findByCrmCase(row.crmCase());
+        Optional<CaseEntity> existingCase = caseRepository.findByTypeAndCrmCase(CaseType.ACTIVATION, row.crmCase());
         if (existingCase.isPresent()) {
             CaseEntity caseEntity = existingCase.get();
             syncSourceSnapshot(caseEntity, row, importedBy);
@@ -178,7 +178,7 @@ public class ActivationDistributionProcessingService {
     }
 
     private void syncExistingCaseSourceOnly(ActivationImportSharedRow row, String importedBy, String message) {
-        caseRepository.findByCrmCase(row.crmCase()).ifPresent(caseEntity -> {
+        caseRepository.findByTypeAndCrmCase(CaseType.ACTIVATION, row.crmCase()).ifPresent(caseEntity -> {
             syncSourceSnapshot(caseEntity, row, importedBy);
             caseTimelineService.append(
                     caseEntity,

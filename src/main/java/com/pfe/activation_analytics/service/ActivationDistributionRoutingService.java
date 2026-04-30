@@ -4,10 +4,10 @@ import com.pfe.Entity.AccountStatus;
 import com.pfe.Entity.AppUser;
 import com.pfe.Entity.UserRole;
 import com.pfe.Repository.UserRepository;
-import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.support.TunisiaGovernorateSupport;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -31,21 +31,26 @@ public class ActivationDistributionRoutingService {
             return RoutingDecision.noGovernorate();
         }
 
-        List<AppUser> candidates = userRepository.findByRoleAndAssignedGovernoratesIn(UserRole.ROLE_ZM, List.of(governorate))
+        String normalizedGovernorate = TunisiaGovernorateSupport.canonicalize(governorate);
+        if (!ActivationAnalyticsSupport.hasText(normalizedGovernorate)) {
+            return RoutingDecision.noGovernorate();
+        }
+
+        List<AppUser> candidates = userRepository.findByRoleOrderByFullNameAsc(UserRole.ROLE_ZM)
                 .stream()
                 .filter(user -> user.getRole() == UserRole.ROLE_ZM)
                 .filter(user -> user.getStatus() == AccountStatus.APPROVED)
                 .filter(AppUser::isEnabled)
-                .filter(user -> safeGovernorates(user.getAssignedGovernorates()).contains(governorate))
+                .filter(user -> TunisiaGovernorateSupport.containsEquivalent(user.getAssignedGovernorates(), normalizedGovernorate))
                 .toList();
 
         if (candidates.isEmpty()) {
-            return RoutingDecision.unassigned(governorate);
+            return RoutingDecision.unassigned(normalizedGovernorate);
         }
 
         if (candidates.size() == 1) {
             AppUser chosen = candidates.get(0);
-            return new RoutingDecision(governorate, chosen, countActiveWorkload(chosen.getId()), 1);
+            return new RoutingDecision(normalizedGovernorate, chosen, countActiveWorkload(chosen.getId()), 1);
         }
 
         AppUser chosen = candidates.stream()
@@ -54,7 +59,7 @@ public class ActivationDistributionRoutingService {
                         .thenComparing(user -> displayName(user), String.CASE_INSENSITIVE_ORDER))
                 .orElse(candidates.get(0));
 
-        return new RoutingDecision(governorate, chosen, countActiveWorkload(chosen.getId()), candidates.size());
+        return new RoutingDecision(normalizedGovernorate, chosen, countActiveWorkload(chosen.getId()), candidates.size());
     }
 
     private long countActiveWorkload(String zmId) {
@@ -72,10 +77,6 @@ public class ActivationDistributionRoutingService {
             return user.getFullName().trim();
         }
         return user.getEmail() == null ? "" : user.getEmail().trim().toLowerCase();
-    }
-
-    private List<String> safeGovernorates(List<String> governorates) {
-        return governorates == null ? List.of() : governorates;
     }
 
     public record RoutingDecision(

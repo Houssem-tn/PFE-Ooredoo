@@ -6,9 +6,9 @@ public class TechnicalMetrics {
     private Integer nombrePv;
     private Double debitDl;
     private Double debitUl;
-    private Integer rsrp;
-    private Integer rsrq;
-    private Integer sinr;
+    private Double rsrp;
+    private Double rsrq;
+    private Double sinr;
 
     public Double getMetrageCable() {
         return metrageCable;
@@ -42,27 +42,27 @@ public class TechnicalMetrics {
         this.debitUl = debitUl;
     }
 
-    public Integer getRsrp() {
+    public Double getRsrp() {
         return rsrp;
     }
 
-    public void setRsrp(Integer rsrp) {
+    public void setRsrp(Double rsrp) {
         this.rsrp = rsrp;
     }
 
-    public Integer getRsrq() {
+    public Double getRsrq() {
         return rsrq;
     }
 
-    public void setRsrq(Integer rsrq) {
+    public void setRsrq(Double rsrq) {
         this.rsrq = rsrq;
     }
 
-    public Integer getSinr() {
+    public Double getSinr() {
         return sinr;
     }
 
-    public void setSinr(Integer sinr) {
+    public void setSinr(Double sinr) {
         this.sinr = sinr;
     }
 // getters/setters

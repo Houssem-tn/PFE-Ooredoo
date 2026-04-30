@@ -12,6 +12,8 @@ public interface NotificationEventService {
 
     void onCaseAssignedToTech(CaseEntity caseEntity, String triggeredBy);
 
+    void onComplaintImportCompleted(String recipientEmail, int processedRows, int importedRows, int skippedRows);
+
     void onSlaWarning(CaseEntity caseEntity);
 
     void onSlaBreached(CaseEntity caseEntity);

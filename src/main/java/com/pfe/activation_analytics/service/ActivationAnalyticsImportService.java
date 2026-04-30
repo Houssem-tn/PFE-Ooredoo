@@ -8,6 +8,7 @@ import com.pfe.activation_analytics.entity.ActivationAnalyticsRowEntity;
 import com.pfe.activation_analytics.model.ActivationImportProcessingMode;
 import com.pfe.activation_analytics.model.ActivationImportSharedResult;
 import com.pfe.activation_analytics.model.ActivationImportSharedRow;
+import com.pfe.case_management.enums.CaseType;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
@@ -548,7 +549,7 @@ public class ActivationAnalyticsImportService {
             return Set.of();
         }
 
-        Query query = Query.query(Criteria.where("uploadedBy").is(uploadedBy));
+        Query query = Query.query(Criteria.where("uploadedBy").is(uploadedBy).and("caseType").is(CaseType.ACTIVATION));
         List<String> existingCrmCases = mongoTemplate.query(ActivationAnalyticsRowEntity.class)
                 .distinct("crmCaseNormalized")
                 .matching(query)

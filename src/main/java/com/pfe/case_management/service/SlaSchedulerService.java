@@ -35,10 +35,15 @@ public class SlaSchedulerService {
 
     @Scheduled(fixedDelayString = "${app.sla.scheduler-delay-ms:30000}")
     public void monitorRdvSla() {
-        List<CaseEntity> candidates = caseRepository.findByTypeAndStatusIn(
+        List<CaseEntity> candidates = new ArrayList<>();
+        candidates.addAll(caseRepository.findByTypeAndStatusIn(
                 CaseType.ACTIVATION,
                 List.of(CaseStatus.ASSIGNED_TO_STT, CaseStatus.ASSIGNED_TO_TECH, CaseStatus.NOT_REACHABLE)
-        );
+        ));
+        candidates.addAll(caseRepository.findByTypeAndStatusIn(
+                CaseType.PLAINTE,
+                List.of(CaseStatus.ASSIGNED_TO_STT, CaseStatus.ASSIGNED_TO_TECH, CaseStatus.NOT_REACHABLE)
+        ));
 
         if (candidates.isEmpty()) {
             return;

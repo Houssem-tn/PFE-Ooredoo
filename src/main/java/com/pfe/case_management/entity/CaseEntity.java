@@ -4,6 +4,8 @@ import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.enums.ExecutionMode;
 import com.pfe.case_management.enums.ExecutorRole;
+import com.pfe.case_management.model.ComplaintDiagnosisInfo;
+import com.pfe.case_management.model.ComplaintResolutionInfo;
 import com.pfe.case_management.model.RdvInfo;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.case_management.model.CaseTimelineEvent;
@@ -45,6 +47,7 @@ public class CaseEntity {
     // Client
     private String clientName;
     private String clientPhone;
+    private String contactCl2;
     private String msisdn;
     private String commentaire;
 
@@ -62,6 +65,14 @@ public class CaseEntity {
     // Commercial / offer
     private String offre;
     private String desPack;
+    private String typeOffreSpeed;
+    private String typeClient;
+    private String source;
+
+    // Complaint business snapshot
+    private String complaintDetail;
+    private String complaintDescription;
+    private Instant openDateActivation;
 
     // Assignment: ZM
     private String zmId;
@@ -100,6 +111,8 @@ public class CaseEntity {
     private WorkInfo work;
     private ZmValidation zmValidation;
     private TechnicalMetrics metrics;
+    private ComplaintDiagnosisInfo diagnosis;
+    private ComplaintResolutionInfo resolution;
 
     @Transient
     private List<CaseProofFileResponse> workProofs;
