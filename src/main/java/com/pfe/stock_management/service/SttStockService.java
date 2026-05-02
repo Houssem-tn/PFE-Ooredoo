@@ -5,15 +5,19 @@ import com.pfe.Entity.AppUser;
 import com.pfe.Entity.UserRole;
 import com.pfe.Repository.UserRepository;
 import com.pfe.Service.NotificationEventService;
+import com.pfe.stock_management.dto.DistributableDpmDto;
+import com.pfe.stock_management.dto.DistributableDpmItemDto;
 import com.pfe.stock_management.dto.DistributeToTechRequest;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
+import com.pfe.stock_management.enums.DpmStatus;
 import com.pfe.stock_management.model.DistributionItem;
 import com.pfe.stock_management.model.DpmItem;
 import com.pfe.stock_management.model.SttStockItem;
 import com.pfe.stock_management.model.TechStockItem;
+import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.SttDistributionRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
 import com.pfe.stock_management.repository.TechStockRepository;
@@ -25,6 +29,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -37,6 +42,7 @@ public class SttStockService {
     private final SttStockRepository sttStockRepository;
     private final TechStockRepository techStockRepository;
     private final SttDistributionRepository distributionRepository;
+    private final DpmRepository dpmRepository;
     private final UserRepository userRepository;
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
@@ -75,7 +81,7 @@ public class SttStockService {
         AppUser stt = findByEmail(callerEmail);
 
         AppUser tech;
-        if (stt.isSelfExecutor() && request.getTechId().equals(stt.getId())) {
+        if (request.getTechId().equals(stt.getId())) {
             tech = stt;
         } else {
             tech = userRepository.findByIdAndRoleAndStatusAndEnabled(
@@ -83,6 +89,33 @@ public class SttStockService {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "TECH not found or not active"));
             if (!stt.getId().equals(tech.getAssignedSttId())) {
                 throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This TECH is not assigned to you");
+            }
+        }
+
+        // Per-DPM validation
+        if (request.getDpmId() != null && !request.getDpmId().isBlank()) {
+            DpmRequest dpm = dpmRepository.findById(request.getDpmId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "DPM not found"));
+            if (!dpm.getSttId().equals(stt.getId())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This DPM does not belong to you");
+            }
+            Map<String, Integer> confirmed = dpm.getItems().stream()
+                    .filter(i -> i.getConfirmedQuantity() != null && i.getConfirmedQuantity() > 0)
+                    .collect(Collectors.toMap(DpmItem::getEquipmentId, DpmItem::getConfirmedQuantity));
+            Map<String, Integer> alreadyDistributed = new HashMap<>();
+            for (SttDistribution d : distributionRepository.findByDpmId(request.getDpmId())) {
+                for (DistributionItem di : d.getItems()) {
+                    alreadyDistributed.merge(di.getEquipmentId(), di.getQuantity(), Integer::sum);
+                }
+            }
+            for (var itemReq : request.getItems()) {
+                int remaining = confirmed.getOrDefault(itemReq.getEquipmentId(), 0)
+                        - alreadyDistributed.getOrDefault(itemReq.getEquipmentId(), 0);
+                if (itemReq.getQuantity() > remaining) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Exceeds remaining DPM quantity for equipment " + itemReq.getEquipmentId()
+                                    + ": remaining=" + remaining + ", requested=" + itemReq.getQuantity());
+                }
             }
         }
 
@@ -128,6 +161,7 @@ public class SttStockService {
                 .techId(tech.getId())
                 .techName(tech.getFullName())
                 .techEmail(tech.getEmail())
+                .dpmId(request.getDpmId())
                 .items(distributionItems)
                 .distributedAt(Instant.now())
                 .notes(request.getNotes())
@@ -158,6 +192,50 @@ public class SttStockService {
 
     public List<SttDistribution> getDistributionHistoryForStt(String sttId) {
         return distributionRepository.findBySttIdOrderByDistributedAtDesc(sttId);
+    }
+
+    public List<DistributableDpmDto> getDistributableDpms(String sttId) {
+        List<DpmRequest> dpms = dpmRepository.findBySttIdOrderByCreatedAtDesc(sttId).stream()
+                .filter(d -> d.getStatus() == DpmStatus.FULLY_CONFIRMED
+                          || d.getStatus() == DpmStatus.PARTIALLY_CONFIRMED)
+                .toList();
+
+        return dpms.stream().map(dpm -> {
+            Map<String, Integer> alreadyDistributed = new HashMap<>();
+            for (SttDistribution dist : distributionRepository.findByDpmId(dpm.getId())) {
+                for (DistributionItem di : dist.getItems()) {
+                    alreadyDistributed.merge(di.getEquipmentId(), di.getQuantity(), Integer::sum);
+                }
+            }
+            List<DistributableDpmItemDto> items = dpm.getItems().stream()
+                    .filter(i -> i.getConfirmedQuantity() != null && i.getConfirmedQuantity() > 0)
+                    .map(i -> {
+                        int confirmed = i.getConfirmedQuantity();
+                        int distributed = alreadyDistributed.getOrDefault(i.getEquipmentId(), 0);
+                        int remaining = Math.max(0, confirmed - distributed);
+                        return DistributableDpmItemDto.builder()
+                                .equipmentId(i.getEquipmentId())
+                                .equipmentName(i.getEquipmentName())
+                                .confirmedQuantity(confirmed)
+                                .distributedQuantity(distributed)
+                                .remainingQuantity(remaining)
+                                .build();
+                    })
+                    .filter(i -> i.getRemainingQuantity() > 0)
+                    .toList();
+
+            return DistributableDpmDto.builder()
+                    .id(dpm.getId())
+                    .dpmNumber(dpm.getDpmNumber())
+                    .zmName(dpm.getZmName())
+                    .status(dpm.getStatus())
+                    .createdAt(dpm.getCreatedAt())
+                    .confirmedAt(dpm.getConfirmedAt())
+                    .items(items)
+                    .build();
+        })
+        .filter(dto -> !dto.getItems().isEmpty())
+        .toList();
     }
 
     public List<SttStock> getAllSttStocks() {

@@ -24,6 +24,7 @@ public class SttDistribution {
     private String techId;
     private String techName;
     private String techEmail;
+    private String dpmId;
 
     @Builder.Default
     private List<DistributionItem> items = new ArrayList<>();

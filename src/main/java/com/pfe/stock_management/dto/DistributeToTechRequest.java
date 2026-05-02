@@ -16,6 +16,8 @@ public class DistributeToTechRequest {
     @NotBlank
     private String techId;
 
+    private String dpmId;
+
     @NotEmpty
     @Valid
     private List<DistributionItemRequest> items;
