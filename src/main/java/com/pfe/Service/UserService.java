@@ -122,6 +122,7 @@ public class UserService {
 
         if (req.role() != null) u.setRole(req.role());
         if (req.enabled() != null) u.setEnabled(req.enabled());
+        if (req.canCreateDpm() != null) u.setCanCreateDpm(req.canCreateDpm());
 
         if (req.password() != null && !req.password().isBlank()) {
             u.setPassword(encoder.encode(req.password()));
@@ -221,6 +222,17 @@ public class UserService {
 
         return repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(UserRole.ROLE_TECH, sttId)
                 .stream()
+                .map(mapper::toDto)
+                .toList();
+    }
+
+    public List<UserDTO> findMyTechs(String sttEmail) {
+        AppUser stt = repo.findByEmail(sttEmail.toLowerCase())
+                .orElseThrow(() -> new NotFoundException("STT not found: " + sttEmail));
+
+        return repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(UserRole.ROLE_TECH, stt.getId())
+                .stream()
+                .filter(u -> u.getStatus() == AccountStatus.APPROVED && u.isEnabled())
                 .map(mapper::toDto)
                 .toList();
     }

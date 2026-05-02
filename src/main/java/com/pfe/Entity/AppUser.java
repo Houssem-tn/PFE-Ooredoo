@@ -75,6 +75,13 @@ public class AppUser {
     private String profileImageFileId;
     private String profileImageUrl;
     private String profileThumbnailUrl;
+
+    @Builder.Default
+    private boolean canCreateDpm = false;
+
+    @Builder.Default
+    private boolean selfExecutor = false;
+
     @CreatedDate
     private Instant createdAt;
 

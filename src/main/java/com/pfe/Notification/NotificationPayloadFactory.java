@@ -5,6 +5,8 @@ import com.pfe.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.model.SlaTrackingInfo;
+import com.pfe.stock_management.entity.DpmRequest;
+import com.pfe.stock_management.entity.SttDistribution;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -199,6 +201,91 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
 
+        return dto;
+    }
+
+    public NotificationMessageDto buildDpmCreated(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("zmName", dpm.getZmName());
+        data.put("itemCount", dpm.getItems() != null ? dpm.getItems().size() : 0);
+        data.put("routeHint", "/stt/stock/incoming-dpms");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_CREATED");
+        dto.setTitle("New DPM request received");
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " from ZM " + safe(dpm.getZmName()) + " is awaiting your confirmation");
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus(dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        dto.setTriggeredBy(dpm.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildDpmConfirmed(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("sttName", dpm.getSttName());
+        data.put("status", dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        data.put("routeHint", "/zm/stock/my-tracking");
+
+        String statusLabel = dpm.getStatus() != null && dpm.getStatus().name().contains("PARTIAL")
+                ? "partially confirmed" : "fully confirmed";
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_CONFIRMED");
+        dto.setTitle("DPM " + statusLabel);
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " has been " + statusLabel + " by STT " + safe(dpm.getSttName()));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus(dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        dto.setTriggeredBy(dpm.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildDpmRejected(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("sttName", dpm.getSttName());
+        data.put("routeHint", "/zm/stock/my-tracking");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_REJECTED");
+        dto.setTitle("DPM rejected");
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " has been rejected by STT " + safe(dpm.getSttName()));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus("REJECTED");
+        dto.setTriggeredBy(dpm.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildStockDistributed(SttDistribution distribution) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("distributionId", distribution.getId());
+        data.put("sttId", distribution.getSttId());
+        data.put("itemCount", distribution.getItems() != null ? distribution.getItems().size() : 0);
+        data.put("routeHint", "/tech/stock/my-stock");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("STOCK_DISTRIBUTED");
+        dto.setTitle("Stock received from STT");
+        dto.setMessage("Equipment has been distributed to you by your STT");
+        dto.setEntityType("DISTRIBUTION");
+        dto.setEntityId(distribution.getId());
+        dto.setStatus("DISTRIBUTED");
+        dto.setTriggeredBy(distribution.getDistributedBy());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
         return dto;
     }
 

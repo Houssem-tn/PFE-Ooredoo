@@ -8,6 +8,8 @@ import com.pfe.Notification.NotificationDestinationResolver;
 import com.pfe.Notification.NotificationPayloadFactory;
 import com.pfe.Notification.WebSocketNotificationSender;
 import com.pfe.case_management.entity.CaseEntity;
+import com.pfe.stock_management.entity.DpmRequest;
+import com.pfe.stock_management.entity.SttDistribution;
 import org.springframework.stereotype.Service;
 
 import java.util.HashSet;
@@ -133,6 +135,34 @@ public class NotificationEventServiceImpl implements NotificationEventService {
 
         sendToRecipients(payload, caseEntity.getSttEmail(), caseEntity.getZmEmail());
         sendToRole(UserRole.ROLE_ADMIN, payload);
+    }
+
+    @Override
+    public void onDpmCreated(DpmRequest dpm) {
+        if (dpm == null || isBlank(dpm.getSttEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildDpmCreated(dpm);
+        sendToRecipient(dpm.getSttEmail(), payload);
+    }
+
+    @Override
+    public void onDpmConfirmed(DpmRequest dpm) {
+        if (dpm == null || isBlank(dpm.getZmEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildDpmConfirmed(dpm);
+        sendToRecipient(dpm.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onDpmRejected(DpmRequest dpm) {
+        if (dpm == null || isBlank(dpm.getZmEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildDpmRejected(dpm);
+        sendToRecipient(dpm.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onStockDistributedToTech(SttDistribution distribution) {
+        if (distribution == null || isBlank(distribution.getTechEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildStockDistributed(distribution);
+        sendToRecipient(distribution.getTechEmail(), payload);
     }
 
     private void sendToRecipients(NotificationMessageDto payload, String... emails) {

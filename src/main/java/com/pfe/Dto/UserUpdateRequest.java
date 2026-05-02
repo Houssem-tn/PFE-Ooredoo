@@ -11,5 +11,6 @@ String fullName,
 String email,
 UserRole role,
 Boolean enabled,
+Boolean canCreateDpm,
 @Size(min = 6, max = 120) String password
 ) {}

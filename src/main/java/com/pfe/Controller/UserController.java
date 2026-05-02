@@ -101,6 +101,12 @@ public class UserController {
         return service.findMyTechsByStt(authentication.getName(), sttId);
     }
 
+    @GetMapping("/me/techs")
+    @PreAuthorize("hasAuthority('ROLE_STT')")
+    public List<UserDTO> myTechs(Authentication authentication) {
+        return service.findMyTechs(authentication.getName());
+    }
+
     @PutMapping("/me/coverage-request")
     @PreAuthorize("hasAuthority('ROLE_STT')")
     public UserDTO requestCoverage(Authentication authentication,

@@ -17,6 +17,7 @@ public record UserDTO(
 
         AccountStatus status,
         boolean enabled,
+        boolean canCreateDpm,
 
         Instant validatedAt,
         String validatedBy,
