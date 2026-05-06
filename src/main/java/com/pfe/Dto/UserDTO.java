@@ -5,6 +5,7 @@ import com.pfe.Entity.UserRole;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 public record UserDTO(
         String id,
@@ -35,6 +36,7 @@ public record UserDTO(
         List<String> assignedGovernorates,
         List<String> coveredGovernorates,
         List<String> requestedGovernorates,
+        Map<String, List<String>> coverageByModule,
 
         String profileImageFileId,
         String profileImageUrl,

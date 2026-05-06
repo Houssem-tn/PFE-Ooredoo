@@ -13,9 +13,17 @@ public class TechStockItem {
 
     private String equipmentId;
     private String equipmentName;
+    private String unit;
 
     @Builder.Default
     private int receivedQuantity = 0;
 
+    @Builder.Default
+    private int usedQuantity = 0;
+
     private Instant lastReceivedAt;
+
+    public int getRemainingQuantity() {
+        return receivedQuantity - usedQuantity;
+    }
 }

@@ -1,5 +1,6 @@
 package com.pfe.stock_management.entity;
 
+import com.pfe.stock_management.enums.StockUnit;
 import lombok.*;
 import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.annotation.Id;
@@ -22,7 +23,7 @@ public class Equipment {
 
     private String name;
     private String description;
-    private String unit;
+    private StockUnit unit;
 
     private String imageFileId;
 

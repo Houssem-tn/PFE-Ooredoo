@@ -13,6 +13,7 @@ public class SttStockItem {
 
     private String equipmentId;
     private String equipmentName;
+    private String unit;
 
     @Builder.Default
     private int totalReceived = 0;

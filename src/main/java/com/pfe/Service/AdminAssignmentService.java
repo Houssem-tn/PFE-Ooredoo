@@ -2,12 +2,15 @@ package com.pfe.Service;
 
 import com.pfe.Dto.AssignGovernoratesToZmRequest;
 import com.pfe.Entity.AppUser;
+import com.pfe.Entity.CaseModuleType;
 import com.pfe.Entity.UserRole;
 import com.pfe.Repository.UserRepository;
 import com.pfe.support.TunisiaGovernorateSupport;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +41,24 @@ public class AdminAssignmentService {
         return userRepository.save(zm);
     }
 
+    public AppUser assignCoverageByModule(String zmId, CaseModuleType moduleType, List<String> governorates) {
+        AppUser zm = userRepository.findById(zmId.trim())
+                .orElseThrow(() -> new IllegalArgumentException("ZM not found"));
+
+        if (zm.getRole() != UserRole.ROLE_ZM) {
+            throw new IllegalStateException("Selected user is not a ZM");
+        }
+
+        List<String> normalized = normalizeGovernoratesAllowEmpty(governorates);
+        ensureModuleGovernoratesAreAvailable(zmId, moduleType, normalized);
+
+        if (zm.getCoverageByModule() == null) {
+            zm.setCoverageByModule(new HashMap<>());
+        }
+        zm.getCoverageByModule().put(moduleType.name(), normalized);
+        return userRepository.save(zm);
+    }
+
     public AppUser assignCoverageAreasToStt(String sttId, List<String> coveredGovernorates) {
         AppUser stt = userRepository.findById(sttId.trim())
                 .orElseThrow(() -> new IllegalArgumentException("STT not found"));
@@ -54,6 +75,47 @@ public class AdminAssignmentService {
                         .toList()
         );
         return userRepository.save(stt);
+    }
+
+    private void ensureModuleGovernoratesAreAvailable(String currentZmId, CaseModuleType moduleType, Collection<String> governorates) {
+        if (governorates.isEmpty()) {
+            return;
+        }
+
+        String moduleKey = moduleType.name();
+        Map<String, String> conflicts = new LinkedHashMap<>();
+
+        for (AppUser otherZm : userRepository.findByRoleOrderByFullNameAsc(UserRole.ROLE_ZM)) {
+            if (otherZm.getId() == null || otherZm.getId().equals(currentZmId)) {
+                continue;
+            }
+
+            List<String> otherGovs;
+            Map<String, List<String>> otherCoverage = otherZm.getCoverageByModule();
+            if (otherCoverage != null && otherCoverage.containsKey(moduleKey)
+                    && otherCoverage.get(moduleKey) != null && !otherCoverage.get(moduleKey).isEmpty()) {
+                otherGovs = safeGovernorates(otherCoverage.get(moduleKey));
+            } else if (CaseModuleType.ACT == moduleType) {
+                otherGovs = safeGovernorates(otherZm.getAssignedGovernorates());
+            } else {
+                continue;
+            }
+
+            for (String governorate : safeGovernorates(new ArrayList<>(governorates))) {
+                if (TunisiaGovernorateSupport.containsEquivalent(otherGovs, governorate)) {
+                    conflicts.putIfAbsent(governorate, displayName(otherZm));
+                }
+            }
+        }
+
+        if (!conflicts.isEmpty()) {
+            String conflictSummary = conflicts.entrySet().stream()
+                    .map(entry -> entry.getKey() + " (" + entry.getValue() + ")")
+                    .collect(Collectors.joining(", "));
+            throw new IllegalStateException(
+                    "Governorates already assigned to another ZM for module " + moduleKey + ": " + conflictSummary
+            );
+        }
     }
 
     private List<String> normalizeGovernoratesAllowEmpty(List<String> governorates) {

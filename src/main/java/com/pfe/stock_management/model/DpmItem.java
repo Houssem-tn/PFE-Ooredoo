@@ -12,6 +12,7 @@ public class DpmItem {
     private String equipmentId;
     private String equipmentName;
     private String equipmentImageUrl;
+    private String unit;
 
     private int requestedQuantity;
     private Integer confirmedQuantity;

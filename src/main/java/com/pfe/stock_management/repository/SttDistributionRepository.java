@@ -12,4 +12,6 @@ public interface SttDistributionRepository extends MongoRepository<SttDistributi
     List<SttDistribution> findByTechIdOrderByDistributedAtDesc(String techId);
 
     List<SttDistribution> findByDpmId(String dpmId);
+
+    List<SttDistribution> findByDpmIdOrderByDistributedAtAsc(String dpmId);
 }

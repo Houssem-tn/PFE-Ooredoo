@@ -8,7 +8,12 @@ import com.pfe.Service.NotificationEventService;
 import com.pfe.stock_management.dto.ConfirmDpmRequest;
 import com.pfe.stock_management.dto.CreateDpmRequest;
 import com.pfe.stock_management.dto.DpmItemConfirmation;
+import com.pfe.stock_management.dto.DpmTrackingDto;
+import com.pfe.stock_management.dto.ZmDpmAuditItem;
+import com.pfe.stock_management.dto.ZmStockAuditDto;
+import com.pfe.stock_management.model.DistributionItem;
 import com.pfe.stock_management.entity.DpmRequest;
+import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.entity.Equipment;
 import com.pfe.stock_management.enums.DpmStatus;
 import com.pfe.stock_management.enums.StockMovementType;
@@ -16,6 +21,7 @@ import com.pfe.stock_management.model.DpmItem;
 import com.pfe.stock_management.model.DpmTimelineEvent;
 import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.EquipmentRepository;
+import com.pfe.stock_management.repository.SttDistributionRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -37,6 +43,7 @@ public class DpmService {
     private final DpmRepository dpmRepository;
     private final EquipmentRepository equipmentRepository;
     private final UserRepository userRepository;
+    private final SttDistributionRepository distributionRepository;
     private final SttStockService sttStockService;
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
@@ -182,6 +189,62 @@ public class DpmService {
         return dpmRepository.findBySttIdOrderByCreatedAtDesc(sttId);
     }
 
+    public DpmTrackingDto getDpmTracking(String dpmId) {
+        DpmRequest dpm = getById(dpmId);
+        List<SttDistribution> distributions =
+                distributionRepository.findByDpmIdOrderByDistributedAtAsc(dpmId);
+        return DpmTrackingDto.builder()
+                .dpm(dpm)
+                .techDistributions(distributions)
+                .build();
+    }
+
+    public ZmStockAuditDto getZmStockAudit(String zmId) {
+        AppUser zm = userRepository.findById(zmId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "ZM not found: " + zmId));
+
+        List<DpmRequest> dpms = dpmRepository.findByZmIdOrderByCreatedAtDesc(zmId);
+
+        List<ZmDpmAuditItem> auditItems = dpms.stream().map(dpm -> {
+            List<SttDistribution> dists = distributionRepository.findByDpmIdOrderByDistributedAtAsc(dpm.getId());
+
+            // Per-equipment distributed quantities
+            java.util.Map<String, Integer> distributedByEq = new java.util.HashMap<>();
+            for (SttDistribution d : dists) {
+                for (DistributionItem di : d.getItems()) {
+                    distributedByEq.merge(di.getEquipmentId(), di.getQuantity(), Integer::sum);
+                }
+            }
+            // overDistributed = any equipment has distributed > confirmed
+            boolean overDistributed = dpm.getItems().stream().anyMatch(item -> {
+                int conf = item.getConfirmedQuantity() != null ? item.getConfirmedQuantity() : 0;
+                int dist = distributedByEq.getOrDefault(item.getEquipmentId(), 0);
+                return dist > conf;
+            });
+
+            return ZmDpmAuditItem.builder()
+                    .dpm(dpm)
+                    .distributions(dists)
+                    .partiallyConfirmed(dpm.getStatus() == DpmStatus.PARTIALLY_CONFIRMED)
+                    .overDistributed(overDistributed)
+                    .build();
+        }).collect(Collectors.toList());
+
+        return ZmStockAuditDto.builder()
+                .zmId(zm.getId())
+                .zmName(zm.getFullName())
+                .zmEmail(zm.getEmail())
+                .totalDpms(dpms.size())
+                .pendingCount(dpms.stream().filter(d -> d.getStatus() == DpmStatus.PENDING_STT_CONFIRMATION).count())
+                .confirmedCount(dpms.stream().filter(d -> d.getStatus() == DpmStatus.FULLY_CONFIRMED
+                        || d.getStatus() == DpmStatus.PARTIALLY_CONFIRMED).count())
+                .rejectedCount(dpms.stream().filter(d -> d.getStatus() == DpmStatus.REJECTED).count())
+                .cancelledCount(dpms.stream().filter(d -> d.getStatus() == DpmStatus.CANCELLED).count())
+                .warningCount(auditItems.stream().filter(i -> i.isPartiallyConfirmed() || i.isOverDistributed()).count())
+                .dpms(auditItems)
+                .build();
+    }
+
     private List<DpmItem> buildDpmItems(CreateDpmRequest request) {
         return request.getItems().stream().map(itemReq -> {
             Equipment eq = equipmentRepository.findById(itemReq.getEquipmentId())
@@ -191,6 +254,7 @@ public class DpmService {
                     .equipmentId(eq.getId())
                     .equipmentName(eq.getName())
                     .equipmentImageUrl(eq.getImageFileId() != null ? "/api/v1/files/" + eq.getImageFileId() + "/view" : null)
+                    .unit(eq.getUnit() != null ? eq.getUnit().name() : null)
                     .requestedQuantity(itemReq.getRequestedQuantity())
                     .build();
         }).collect(Collectors.toList());

@@ -3,6 +3,7 @@ package com.pfe.Controller;
 import com.pfe.Dto.AssignGovernoratesToZmRequest;
 import com.pfe.Dto.UserDTO;
 import com.pfe.Entity.AppUser;
+import com.pfe.Entity.CaseModuleType;
 import com.pfe.Service.AdminAssignmentService;
 import com.pfe.mapper.UserMapper;
 import jakarta.validation.Valid;
@@ -45,6 +46,18 @@ public class AdminAssignmentController {
     @PutMapping("/assign-coverage-areas-to-stt")
     public ResponseEntity<UserDTO> assignCoverageAreasToStt(@Valid @RequestBody AssignCoverageAreasToSttRequest req) {
         AppUser updated = adminAssignmentService.assignCoverageAreasToStt(req.sttId(), req.coveredGovernorates());
+        return ResponseEntity.ok(userMapper.toDto(updated));
+    }
+
+    record ModuleCoverageBody(List<String> governorates) {}
+
+    @PutMapping("/users/{zmId}/coverage/{moduleType}")
+    public ResponseEntity<UserDTO> assignCoverageByModule(
+            @PathVariable String zmId,
+            @PathVariable CaseModuleType moduleType,
+            @RequestBody(required = false) ModuleCoverageBody body) {
+        List<String> governorates = (body != null && body.governorates() != null) ? body.governorates() : List.of();
+        AppUser updated = adminAssignmentService.assignCoverageByModule(zmId, moduleType, governorates);
         return ResponseEntity.ok(userMapper.toDto(updated));
     }
 }

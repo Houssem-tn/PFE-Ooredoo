@@ -3,9 +3,11 @@ package com.pfe.stock_management.controller;
 import com.pfe.Entity.AppUser;
 import com.pfe.Entity.UserRole;
 import com.pfe.Repository.UserRepository;
+import com.pfe.stock_management.dto.DpmTrackingDto;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
+import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.service.DpmService;
 import com.pfe.stock_management.service.SttStockService;
 import lombok.RequiredArgsConstructor;
@@ -44,6 +46,16 @@ public class ZmStockController {
         return ResponseEntity.ok(dpm);
     }
 
+    @GetMapping("/my-dpms/{id}/tracking")
+    public ResponseEntity<DpmTrackingDto> getDpmTracking(@PathVariable String id) {
+        AppUser zm = currentZm();
+        DpmTrackingDto tracking = dpmService.getDpmTracking(id);
+        if (!tracking.getDpm().getZmId().equals(zm.getId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not your DPM");
+        }
+        return ResponseEntity.ok(tracking);
+    }
+
     @GetMapping("/my-stts-stocks")
     public ResponseEntity<List<SttStock>> getMySttStocks() {
         AppUser zm = currentZm();
@@ -68,6 +80,16 @@ public class ZmStockController {
                 .flatMap(sttId -> sttStockService.getTechStocksForStt(sttId).stream())
                 .toList();
         return ResponseEntity.ok(stocks);
+    }
+
+    @GetMapping("/my-techs-usages")
+    public ResponseEntity<List<TechStockUsage>> getMyTechsUsages() {
+        AppUser zm = currentZm();
+        List<String> sttIds = dpmService.getDpmsForZm(zm.getId()).stream()
+                .map(DpmRequest::getSttId)
+                .distinct()
+                .toList();
+        return ResponseEntity.ok(sttStockService.getTechUsagesForStts(sttIds));
     }
 
     private AppUser currentZm() {

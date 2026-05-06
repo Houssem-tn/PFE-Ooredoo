@@ -8,7 +8,9 @@ import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.springframework.beans.factory.annotation.Autowired;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Mapper(componentModel = "spring")
 public abstract class UserMapper {
@@ -21,6 +23,7 @@ public abstract class UserMapper {
     @Mapping(target = "assignedGovernorates", expression = "java(normalizeGovernorates(user.getAssignedGovernorates()))")
     @Mapping(target = "coveredGovernorates", expression = "java(normalizeGovernorates(user.getCoveredGovernorates()))")
     @Mapping(target = "requestedGovernorates", expression = "java(normalizeGovernorates(user.getRequestedGovernorates()))")
+    @Mapping(target = "coverageByModule", expression = "java(normalizeCoverageByModule(user.getCoverageByModule()))")
     public abstract UserDTO toDto(AppUser user);
 
     protected String resolveProfileImageUrl(AppUser user) {
@@ -38,5 +41,16 @@ public abstract class UserMapper {
 
     protected List<String> normalizeGovernorates(List<String> governorates) {
         return TunisiaGovernorateSupport.normalizeStoredValues(governorates);
+    }
+
+    protected Map<String, List<String>> normalizeCoverageByModule(Map<String, List<String>> coverageByModule) {
+        if (coverageByModule == null || coverageByModule.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : coverageByModule.entrySet()) {
+            result.put(entry.getKey(), TunisiaGovernorateSupport.normalizeStoredValues(entry.getValue()));
+        }
+        return result;
     }
 }

@@ -2,6 +2,7 @@ package com.pfe.case_management.service;
 
 import com.pfe.Entity.AccountStatus;
 import com.pfe.Entity.AppUser;
+import com.pfe.Entity.CaseModuleType;
 import com.pfe.Entity.FileEntityType;
 import com.pfe.Entity.FileMetadata;
 import com.pfe.Entity.FileRole;
@@ -164,7 +165,7 @@ public class CaseService {
 
         Instant now = Instant.now();
         String governorate = normalizeGovernorate(request.gouvernorat());
-        AppUser ownerZm = resolveOwnerZm(governorate);
+        AppUser ownerZm = resolveOwnerZm(governorate, request.type());
 
         CaseEntity entity = CaseEntity.builder()
                 .type(request.type())
@@ -1285,7 +1286,7 @@ public class CaseService {
     }
 
     public AppUser resolveOwnerZmForGovernorate(String governorate) {
-        return resolveOwnerZm(governorate);
+        return resolveOwnerZm(governorate, CaseType.PLAINTE);
     }
 
     public String normalizeGovernorateValue(String governorate) {
@@ -1296,14 +1297,15 @@ public class CaseService {
         return sttCoversGovernorate(stt, governorate);
     }
 
-    private AppUser resolveOwnerZm(String governorate) {
+    private AppUser resolveOwnerZm(String governorate, CaseType caseType) {
         String normalizedGovernorate = normalizeGovernorate(governorate);
+        String moduleKey = CaseModuleType.fromCaseType(caseType).name();
 
         List<AppUser> matches = userRepository.findByRoleOrderByFullNameAsc(UserRole.ROLE_ZM).stream()
                 .filter(user -> user.getRole() == UserRole.ROLE_ZM)
                 .filter(user -> user.getStatus() == AccountStatus.APPROVED)
                 .filter(AppUser::isEnabled)
-                .filter(user -> TunisiaGovernorateSupport.containsEquivalent(user.getAssignedGovernorates(), normalizedGovernorate))
+                .filter(user -> zmCoversGovernorateForModule(user, normalizedGovernorate, moduleKey))
                 .toList();
 
         if (matches.isEmpty()) {
@@ -1329,6 +1331,21 @@ public class CaseService {
         }
 
         return TunisiaGovernorateSupport.containsEquivalent(stt.getCoveredGovernorates(), governorate);
+    }
+
+    private boolean zmCoversGovernorateForModule(AppUser zm, String normalizedGovernorate, String moduleKey) {
+        Map<String, List<String>> coverage = zm.getCoverageByModule();
+        if (coverage != null && coverage.containsKey(moduleKey)) {
+            List<String> moduleGovs = coverage.get(moduleKey);
+            if (moduleGovs != null && !moduleGovs.isEmpty()) {
+                return TunisiaGovernorateSupport.containsEquivalent(moduleGovs, normalizedGovernorate);
+            }
+        }
+        // Backward compat: for ACT, fall back to legacy assignedGovernorates when module coverage is not yet set
+        if ("ACT".equals(moduleKey)) {
+            return TunisiaGovernorateSupport.containsEquivalent(zm.getAssignedGovernorates(), normalizedGovernorate);
+        }
+        return false;
     }
 
     private String normalizeGovernorate(String governorate) {

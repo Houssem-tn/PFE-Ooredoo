@@ -2,8 +2,11 @@ package com.pfe.stock_management.controller;
 
 import com.pfe.Entity.AppUser;
 import com.pfe.Repository.UserRepository;
+import com.pfe.stock_management.dto.DeclareTechUsageRequest;
+import com.pfe.stock_management.dto.DeclareTechUsageResponse;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.service.SttStockService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -25,6 +28,12 @@ public class TechStockController {
     public ResponseEntity<TechStock> getMyStock() {
         AppUser tech = currentTech();
         return ResponseEntity.ok(sttStockService.getStockForTech(tech.getId()));
+    }
+
+    @PostMapping("/usage")
+    public ResponseEntity<DeclareTechUsageResponse> declareUsage(@Valid @RequestBody DeclareTechUsageRequest request) {
+        AppUser tech = currentTech();
+        return ResponseEntity.ok(sttStockService.declareUsage(tech, request));
     }
 
     private AppUser currentTech() {
