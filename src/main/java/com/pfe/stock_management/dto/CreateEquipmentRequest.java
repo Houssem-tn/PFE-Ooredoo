@@ -1,5 +1,6 @@
 package com.pfe.stock_management.dto;
 
+import com.pfe.stock_management.enums.EquipmentCategory;
 import com.pfe.stock_management.enums.StockUnit;
 import jakarta.validation.constraints.NotBlank;
 import lombok.*;
@@ -15,4 +16,5 @@ public class CreateEquipmentRequest {
 
     private String description;
     private StockUnit unit;
+    private EquipmentCategory category;
 }

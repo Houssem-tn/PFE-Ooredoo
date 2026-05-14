@@ -165,6 +165,20 @@ public class CasePdfExportService {
         addField(lines, "Work GPS", coordinates(work.getLocationLatitude(), work.getLocationLongitude()));
         addField(lines, "Location captured at", formatInstant(work.getLocationCapturedAt()));
         addField(lines, "Location accuracy", accuracy(work.getLocationAccuracyMeters()));
+
+        if (work.getUsedEquipment() == null || work.getUsedEquipment().isEmpty()) {
+            addField(lines, "Used equipment", "None");
+            return;
+        }
+
+        int index = 1;
+        for (var item : work.getUsedEquipment()) {
+            String label = firstNonBlank(item.getEquipmentName(), item.getEquipmentId());
+            String value = label + " x" + item.getQuantity()
+                    + (item.getUnit() != null && !item.getUnit().isBlank() ? " " + item.getUnit() : "");
+            addField(lines, "Used equipment " + index, value);
+            index++;
+        }
     }
 
     private void addMetricsSection(List<PdfLine> lines, TechnicalMetrics metrics) {
@@ -480,6 +494,16 @@ public class CasePdfExportService {
 
         String rendered = String.valueOf(value).trim();
         return rendered.isEmpty() ? "-" : rendered;
+    }
+
+    private String firstNonBlank(String primary, String fallback) {
+        if (!isBlank(primary)) {
+            return primary.trim();
+        }
+        if (!isBlank(fallback)) {
+            return fallback.trim();
+        }
+        return "-";
     }
 
     private String yesNo(Boolean value) {

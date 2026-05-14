@@ -48,6 +48,7 @@ public class EquipmentService {
                 .name(request.getName())
                 .description(request.getDescription())
                 .unit(request.getUnit())
+                .category(request.getCategory())
                 .createdBy(caller)
                 .active(true)
                 .build();
@@ -79,6 +80,7 @@ public class EquipmentService {
         eq.setName(request.getName());
         eq.setDescription(request.getDescription());
         eq.setUnit(request.getUnit());
+        eq.setCategory(request.getCategory());
 
         if (image != null && !image.isEmpty()) {
             String caller = currentUser();

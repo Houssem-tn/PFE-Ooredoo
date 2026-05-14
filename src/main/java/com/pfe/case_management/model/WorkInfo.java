@@ -3,6 +3,7 @@ package com.pfe.case_management.model;
 import lombok.*;
 
 import java.time.Instant;
+import java.util.List;
 
 @Getter
 @Setter
@@ -60,4 +61,6 @@ public class WorkInfo {
     private Double locationLongitude;
     private Instant locationCapturedAt;
     private Double locationAccuracyMeters;
+    private List<UsedEquipmentItem> usedEquipment;
+    private String stockAppliedTechId;
 }

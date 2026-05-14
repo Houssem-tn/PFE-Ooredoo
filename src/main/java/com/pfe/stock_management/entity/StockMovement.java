@@ -25,12 +25,17 @@ public class StockMovement {
     private String toActorId;
     private String toActorRole;
 
+    private String technicianId;
+    private String caseId;
     private String equipmentId;
     private String equipmentName;
     private int quantity;
 
     private String referenceId;
+    private String comment;
 
+    private Instant createdAt;
+    private String createdBy;
     private Instant performedAt;
     private String performedBy;
 }

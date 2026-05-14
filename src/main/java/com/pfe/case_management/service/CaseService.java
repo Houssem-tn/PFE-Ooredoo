@@ -33,9 +33,11 @@ import com.pfe.case_management.model.ComplaintResolutionInfo;
 import com.pfe.case_management.model.RdvInfo;
 import com.pfe.case_management.model.CaseTimelineEvent;
 import com.pfe.case_management.model.TechnicalMetrics;
+import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.model.ZmValidation;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.stock_management.service.SttStockService;
 import com.pfe.support.TunisiaGovernorateSupport;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -43,6 +45,7 @@ import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -155,6 +158,7 @@ public class CaseService {
     private final CaseTimelineService caseTimelineService;
     private final FileStorageService fileStorageService;
     private final CasePdfExportService casePdfExportService;
+    private final SttStockService sttStockService;
 
     public CaseEntity createCase(CreateCaseRequest request) {
         ensureCurrentUserHasRole("ROLE_ADMIN");
@@ -592,10 +596,12 @@ public class CaseService {
         return sanitizeCaseForCurrentViewer(saved);
     }
 
+    @Transactional
     public CaseEntity completeWork(String caseId, CompleteWorkRequest request) {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
         CaseStatus previousStatus = c.getStatus();
+        Instant now = Instant.now();
 
         ensureCurrentUserCanExecuteCase(c);
 
@@ -609,16 +615,39 @@ public class CaseService {
                 "Work submission location is invalid"
         );
 
-        WorkInfo work = new WorkInfo();
+        if (!isTechExecution(c) && request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Used equipment can only be submitted when the active executor is a technician"
+            );
+        }
+
+        AppUser executingTechnician = null;
+        List<UsedEquipmentItem> usedEquipment = List.of();
+        if (isTechExecution(c)) {
+            executingTechnician = resolveAssignedTechnician(c);
+            usedEquipment = sttStockService.syncCaseUsageForWorkSubmission(
+                    c,
+                    executingTechnician,
+                    request.usedEquipment(),
+                    actor
+            );
+        }
+
+        WorkInfo work = c.getWork() != null ? c.getWork() : new WorkInfo();
         work.setRepTravauxStt(request.repTravauxStt());
         work.setDateFinTrv(request.dateFinTrv());
         work.setCmtTrvStt(request.cmtTrvStt());
-        work.setUpdatedAt(Instant.now());
-        work.setUpdatedBy(getCurrentUsername());
+        work.setUpdatedAt(now);
+        work.setUpdatedBy(actor);
         work.setLocationLatitude(request.locationLatitude());
         work.setLocationLongitude(request.locationLongitude());
         work.setLocationCapturedAt(request.locationCapturedAt());
         work.setLocationAccuracyMeters(request.locationAccuracyMeters());
+        work.setUsedEquipment(usedEquipment);
+        work.setStockAppliedTechId(
+                executingTechnician != null && !usedEquipment.isEmpty() ? executingTechnician.getId() : null
+        );
 
         TechnicalMetrics metrics = new TechnicalMetrics();
         metrics.setMetrageCable(request.metrageCable());
@@ -634,14 +663,14 @@ public class CaseService {
         if (isComplaint(c)) {
             ComplaintResolutionInfo resolution = ensureComplaintResolution(c);
             resolution.setResolutionComment(trimToNull(request.cmtTrvStt()));
-            resolution.setSubmittedAt(Instant.now());
+            resolution.setSubmittedAt(now);
             resolution.setSubmittedBy(actor);
             resolution.setValidationStatus(ResolutionValidationStatus.PENDING);
             c.setStatus(CaseStatus.RESOLUTION_SUBMITTED);
         } else {
             c.setStatus(CaseStatus.WORK_DONE);
         }
-        c.setUpdatedAt(Instant.now());
+        c.setUpdatedAt(now);
 
         caseTimelineService.append(
             c,
@@ -659,7 +688,9 @@ public class CaseService {
                 "locationLatitude", request.locationLatitude(),
                 "locationLongitude", request.locationLongitude(),
                 "locationCapturedAt", request.locationCapturedAt(),
-                "locationAccuracyMeters", request.locationAccuracyMeters()
+                "locationAccuracyMeters", request.locationAccuracyMeters(),
+                "usedEquipmentCount", usedEquipment.size(),
+                "usedEquipmentQuantity", usedEquipment.stream().mapToInt(UsedEquipmentItem::getQuantity).sum()
             )
         );
 
@@ -721,6 +752,7 @@ public class CaseService {
         return sanitizeCaseForCurrentViewer(saved);
     }
 
+    @Transactional
     public CaseEntity validateByZm(String caseId, ValidateZmRequest request) {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
@@ -728,6 +760,15 @@ public class CaseService {
 
         ensureCurrentUserCanActAsAssignedZm(c);
         ensureStatusIn(c, validateByZmAllowedStatuses(c), "ZM validation is only allowed after work completion");
+
+        if (!Boolean.TRUE.equals(request.approved())) {
+            sttStockService.releaseCaseUsageReservation(
+                    c,
+                    actor,
+                    "zm_rejected_before_final_validation",
+                    true
+            );
+        }
 
         ZmValidation validation = new ZmValidation();
         validation.setApproved(Boolean.TRUE.equals(request.approved()));
@@ -885,6 +926,7 @@ public class CaseService {
         return sanitizeCaseForCurrentViewer(saved);
     }
 
+    @Transactional
     public CaseEntity reopenComplaintCase(String caseId, ReopenComplaintRequest request) {
         CaseEntity c = getCaseOrThrow(caseId);
         ensureComplaintCase(c);
@@ -898,6 +940,15 @@ public class CaseService {
                 c,
                 EnumSet.of(CaseStatus.CLOSED, CaseStatus.VALIDATED_BY_ZM, CaseStatus.RESOLUTION_SUBMITTED),
                 "Only resolved complaints can be reopened"
+        );
+
+        sttStockService.releaseCaseUsageReservation(
+                c,
+                actor,
+                previousStatus == CaseStatus.RESOLUTION_SUBMITTED
+                        ? "complaint_reopened_before_final_validation"
+                        : "complaint_reopened_after_validation",
+                previousStatus == CaseStatus.RESOLUTION_SUBMITTED
         );
 
         c.setStatus(CaseStatus.REOPENED);
@@ -1196,17 +1247,27 @@ public class CaseService {
     }
 
     private boolean isTechExecution(CaseEntity c) {
-        if (c == null || isBlank(c.getTechId())) {
+        if (c == null) {
+            return false;
+        }
+        // Imported cases may only carry techEmail (no techId) — accept either as a tech assignment.
+        boolean hasTechAssignment = !isBlank(c.getTechId()) || !isBlank(c.getTechEmail());
+        if (!hasTechAssignment) {
             return false;
         }
 
+        // Simple assignment: no explicit execution-mode fields were stored (e.g. imported cases).
         if (c.getExecutionMode() == null && c.getExecutorRole() == null && isBlank(c.getExecutorId())) {
             return true;
         }
 
+        // Formal TECH_EXECUTION: executor must match the tech assignment.
+        // When techId is absent, any TECH_EXECUTION assignment is accepted (email match was done at assignment time).
+        boolean executorMatchesTech = isBlank(c.getTechId())
+                || equalsSafe(c.getExecutorId(), c.getTechId());
         return c.getExecutionMode() == ExecutionMode.TECH_EXECUTION
                 && c.getExecutorRole() == ExecutorRole.TECH
-                && equalsSafe(c.getExecutorId(), c.getTechId());
+                && executorMatchesTech;
     }
 
     private boolean currentUserHasRole(String role) {
@@ -1244,6 +1305,22 @@ public class CaseService {
         if (user.getStatus() != AccountStatus.APPROVED || !user.isEnabled()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
         }
+    }
+
+    private AppUser resolveAssignedTechnician(CaseEntity caseEntity) {
+        AppUser technician;
+        if (!isBlank(caseEntity.getTechId())) {
+            technician = userRepository.findById(caseEntity.getTechId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assigned technician not found"));
+        } else if (!isBlank(caseEntity.getTechEmail())) {
+            technician = userRepository.findByEmail(caseEntity.getTechEmail())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assigned technician not found"));
+        } else {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No technician assigned to this case");
+        }
+
+        ensureUserHasRole(technician, UserRole.ROLE_TECH, "Assigned executor is not a technician");
+        return technician;
     }
 
     private void clearSttAssignment(CaseEntity c) {

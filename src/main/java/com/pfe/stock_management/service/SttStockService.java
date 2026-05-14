@@ -5,19 +5,23 @@ import com.pfe.Entity.AppUser;
 import com.pfe.Entity.UserRole;
 import com.pfe.Repository.UserRepository;
 import com.pfe.Service.NotificationEventService;
+import com.pfe.case_management.dto.UsedEquipmentRequestItem;
 import com.pfe.case_management.entity.CaseEntity;
+import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.stock_management.dto.DeclareTechUsageRequest;
 import com.pfe.stock_management.dto.DeclareTechUsageResponse;
 import com.pfe.stock_management.dto.DistributableDpmDto;
 import com.pfe.stock_management.dto.DistributableDpmItemDto;
 import com.pfe.stock_management.dto.DistributeToTechRequest;
+import com.pfe.stock_management.dto.PendingDistributionDto;
 import com.pfe.stock_management.dto.TechUsageItemRequest;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
+import com.pfe.stock_management.enums.DistributionStatus;
 import com.pfe.stock_management.enums.DpmStatus;
 import com.pfe.stock_management.model.DistributionItem;
 import com.pfe.stock_management.model.DpmItem;
@@ -29,7 +33,14 @@ import com.pfe.stock_management.repository.SttDistributionRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
 import com.pfe.stock_management.repository.TechStockRepository;
 import com.pfe.stock_management.repository.TechStockUsageRepository;
+import com.pfe.stock_management.model.ConsumedEquipmentItem;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -42,11 +53,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class SttStockService {
+    private static final Logger log = LoggerFactory.getLogger(SttStockService.class);
 
     private final SttStockRepository sttStockRepository;
     private final TechStockRepository techStockRepository;
@@ -57,6 +70,8 @@ public class SttStockService {
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
     private final TechStockUsageRepository techStockUsageRepository;
+    private final MongoTemplate mongoTemplate;
+    private final CaseStockConsumptionService caseStockConsumptionService;
 
     public void applyDpmConfirmation(DpmRequest dpm) {
         SttStock stock = sttStockRepository.findBySttId(dpm.getSttId())
@@ -168,15 +183,16 @@ public class SttStockService {
         sttStock.setLastUpdatedAt(Instant.now());
         sttStockRepository.save(sttStock);
 
-        updateTechStock(tech, stt.getId(), distributionItems);
-
         SttDistribution distribution = SttDistribution.builder()
                 .sttId(stt.getId())
+                .sttName(stt.getFullName())
+                .sttEmail(stt.getEmail())
                 .techId(tech.getId())
                 .techName(tech.getFullName())
                 .techEmail(tech.getEmail())
                 .dpmId(request.getDpmId())
                 .items(distributionItems)
+                .status(DistributionStatus.PENDING_TECH_CONFIRMATION)
                 .distributedAt(Instant.now())
                 .notes(request.getNotes())
                 .distributedBy(callerEmail)
@@ -206,25 +222,206 @@ public class SttStockService {
         return techStockRepository.findBySttId(sttId);
     }
 
+    public List<UsedEquipmentItem> syncCaseUsageForWorkSubmission(
+            CaseEntity caseEntity,
+            AppUser technician,
+            List<UsedEquipmentRequestItem> requestedItems,
+            String performedBy
+    ) {
+        if (caseEntity == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case is required for stock usage synchronization");
+        }
+        if (technician == null || isBlank(technician.getId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Technician is required for stock usage synchronization");
+        }
+
+        Map<String, UsageItem> requestedUsage = mergeCaseUsageItems(requestedItems);
+        Map<String, UsageItem> previousUsage = mergePersistedUsageItems(
+                caseEntity.getWork() != null ? caseEntity.getWork().getUsedEquipment() : null
+        );
+        String previousAppliedTechId = trimToNull(
+                caseEntity.getWork() != null ? caseEntity.getWork().getStockAppliedTechId() : null
+        );
+
+        Map<String, UsageItem> baselineUsage = Map.of();
+        TechStock currentStock = null;
+        TechStock previousAppliedStock = null;
+        if (previousAppliedTechId != null) {
+            if (previousAppliedTechId.equals(technician.getId())) {
+                baselineUsage = previousUsage;
+            } else if (!previousUsage.isEmpty()) {
+                previousAppliedStock = findTechStockOrThrow(
+                        previousAppliedTechId,
+                        "Cannot restore previously used equipment because technician stock was not found for " + previousAppliedTechId
+                );
+                validateStockRestoration(previousAppliedStock, previousUsage, caseEntity.getId());
+            }
+        }
+
+        boolean needsCurrentStock = !requestedUsage.isEmpty() || !baselineUsage.isEmpty();
+        if (needsCurrentStock) {
+            currentStock = findTechStockOrThrow(
+                    technician.getId(),
+                    "No stock found for technician " + technician.getId()
+            );
+            hydrateUsageLabelsFromStock(currentStock, requestedUsage);
+            validateRequestedUsageAgainstStock(currentStock, requestedUsage, baselineUsage, caseEntity);
+        }
+
+        boolean previousStockChanged = false;
+        if (previousAppliedStock != null) {
+            previousStockChanged = restoreAppliedUsage(
+                    previousAppliedStock,
+                    previousUsage,
+                    caseEntity.getId(),
+                    performedBy,
+                    "case_reassigned_or_resubmitted"
+            );
+        }
+
+        boolean currentStockChanged = false;
+        if (currentStock != null) {
+            currentStockChanged = applyUsageDelta(
+                    currentStock,
+                    requestedUsage,
+                    baselineUsage,
+                    caseEntity,
+                    technician,
+                    performedBy
+            );
+        }
+
+        Instant syncedAt = Instant.now();
+
+        if (previousStockChanged) {
+            // Restore usage for the old tech: decrement each item that was previously applied.
+            for (Map.Entry<String, UsageItem> entry : previousUsage.entrySet()) {
+                Query q = Query.query(
+                        Criteria.where("techId").is(previousAppliedTechId)
+                                .and("items.equipmentId").is(entry.getKey())
+                );
+                mongoTemplate.updateFirst(q,
+                        new Update().inc("items.$.usedQuantity", -entry.getValue().getQuantity())
+                                .set("lastUpdatedAt", syncedAt),
+                        TechStock.class);
+            }
+        }
+
+        if (currentStockChanged) {
+            // Apply the net delta (requested - baseline) for each item via $inc.
+            Set<String> allKeys = new java.util.LinkedHashSet<>();
+            allKeys.addAll(baselineUsage.keySet());
+            allKeys.addAll(requestedUsage.keySet());
+            int zero = 0;
+            for (String equipmentId : allKeys) {
+                int prev = baselineUsage.containsKey(equipmentId)
+                        ? baselineUsage.get(equipmentId).getQuantity() : zero;
+                int req  = requestedUsage.containsKey(equipmentId)
+                        ? requestedUsage.get(equipmentId).getQuantity() : zero;
+                int delta = req - prev;
+                if (delta == 0) continue;
+                Query q = Query.query(
+                        Criteria.where("techId").is(technician.getId())
+                                .and("items.equipmentId").is(equipmentId)
+                );
+                mongoTemplate.updateFirst(q,
+                        new Update().inc("items.$.usedQuantity", delta)
+                                .set("lastUpdatedAt", syncedAt),
+                        TechStock.class);
+            }
+        }
+
+        if (!requestedUsage.isEmpty() && currentStock != null) {
+            List<ConsumedEquipmentItem> consumedItems = new java.util.ArrayList<>();
+            TechStock stockSnapshot = currentStock;
+            for (Map.Entry<String, UsageItem> entry : requestedUsage.entrySet()) {
+                String equipId = entry.getKey();
+                UsageItem requestedItem = entry.getValue();
+                TechStockItem stockItem = stockSnapshot.getItems().stream()
+                        .filter(i -> equipId.equals(i.getEquipmentId()))
+                        .findFirst().orElse(null);
+                if (stockItem == null) continue;
+                int baseline = baselineUsage.containsKey(equipId)
+                        ? baselineUsage.get(equipId).getQuantity() : 0;
+                int stockBefore = stockItem.getRemainingQuantity() + baseline;
+                int stockAfter = stockBefore - requestedItem.getQuantity();
+                String name = requestedItem.getEquipmentName() != null
+                        ? requestedItem.getEquipmentName() : stockItem.getEquipmentName();
+                String unit = requestedItem.getUnit() != null
+                        ? requestedItem.getUnit() : stockItem.getUnit();
+                consumedItems.add(ConsumedEquipmentItem.builder()
+                        .equipmentId(equipId)
+                        .equipmentName(name)
+                        .unit(unit)
+                        .quantityUsed(requestedItem.getQuantity())
+                        .stockBefore(stockBefore)
+                        .stockAfter(stockAfter)
+                        .build());
+            }
+            if (!consumedItems.isEmpty()) {
+                caseStockConsumptionService.createOrUpdate(caseEntity, technician, consumedItems, performedBy);
+            }
+        }
+
+        return toUsedEquipmentItems(requestedUsage);
+    }
+
+    public void releaseCaseUsageReservation(
+            CaseEntity caseEntity,
+            String performedBy,
+            String reason,
+            boolean restoreStock
+    ) {
+        if (caseEntity == null || caseEntity.getWork() == null) {
+            return;
+        }
+
+        String appliedTechId = trimToNull(caseEntity.getWork().getStockAppliedTechId());
+        if (appliedTechId == null) {
+            return;
+        }
+
+        Map<String, UsageItem> appliedUsage = mergePersistedUsageItems(caseEntity.getWork().getUsedEquipment());
+        if (restoreStock && !appliedUsage.isEmpty()) {
+            TechStock stock = findTechStockOrThrow(
+                    appliedTechId,
+                    "Cannot restore technician stock because technician stock was not found for " + appliedTechId
+            );
+            validateStockRestoration(stock, appliedUsage, caseEntity.getId());
+
+            if (restoreAppliedUsage(stock, appliedUsage, caseEntity.getId(), performedBy, reason)) {
+                stock.setLastUpdatedAt(Instant.now());
+                techStockRepository.save(stock);
+            }
+        }
+
+        caseEntity.getWork().setStockAppliedTechId(null);
+        log.info(
+                "case_stock_usage_reservation_released caseId={} techId={} restoreStock={} actor={} reason={}",
+                caseEntity.getId(),
+                appliedTechId,
+                restoreStock,
+                performedBy,
+                reason
+        );
+    }
+
     public DeclareTechUsageResponse declareUsage(AppUser tech, DeclareTechUsageRequest request) {
         CaseEntity caseEntity = caseRepository.findById(request.getCaseId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Case not found"));
 
-        if (!tech.getId().equals(caseEntity.getTechId())) {
+        boolean matchById    = tech.getId() != null && tech.getId().equals(caseEntity.getTechId());
+        boolean matchByEmail = tech.getEmail() != null
+                && tech.getEmail().equalsIgnoreCase(caseEntity.getTechEmail());
+        if (!matchById && !matchByEmail) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This case is not assigned to you");
         }
 
         TechStock techStock = techStockRepository.findByTechId(tech.getId())
-                .orElseGet(() -> TechStock.builder()
-                        .techId(tech.getId())
-                        .sttId(firstNonBlank(tech.getAssignedSttId(), caseEntity.getSttId()))
-                        .items(new ArrayList<>())
-                        .build());
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST, "No stock found for your account"));
 
         ensureTechStockItems(techStock);
-        if (isBlank(techStock.getSttId())) {
-            techStock.setSttId(firstNonBlank(tech.getAssignedSttId(), caseEntity.getSttId()));
-        }
 
         Map<String, TechStockItem> techStockMap = techStock.getItems().stream()
                 .collect(Collectors.toMap(TechStockItem::getEquipmentId, ti -> ti));
@@ -233,7 +430,9 @@ public class SttStockService {
         Instant declaredAt = Instant.now();
         List<UsageItem> usageItems = new ArrayList<>();
 
-        for (UsageItem requestedItem : mergeUsageItems(request.getItems()).values()) {
+        // Validate all items first before applying any updates
+        Map<String, UsageItem> mergedItems = mergeUsageItems(request.getItems());
+        for (UsageItem requestedItem : mergedItems.values()) {
             TechStockItem stockItem = techStockMap.get(requestedItem.getEquipmentId());
             if (stockItem == null) {
                 throw new ResponseStatusException(
@@ -243,10 +442,6 @@ public class SttStockService {
             }
 
             int remainingBefore = stockItem.getRemainingQuantity();
-            stockItem.setEquipmentName(firstNonBlank(stockItem.getEquipmentName(), requestedItem.getEquipmentName()));
-            stockItem.setUnit(firstNonBlank(stockItem.getUnit(), requestedItem.getUnit()));
-            stockItem.setUsedQuantity(stockItem.getUsedQuantity() + requestedItem.getQuantity());
-
             if (remainingBefore < requestedItem.getQuantity()) {
                 int overflowQuantity = requestedItem.getQuantity() - remainingBefore;
                 warnings.add(
@@ -266,8 +461,18 @@ public class SttStockService {
                     .build());
         }
 
-        techStock.setLastUpdatedAt(declaredAt);
-        TechStock savedStock = techStockRepository.save(techStock);
+        // Apply each usage as an atomic $inc on the embedded array element.
+        // This avoids any full-document-replace issue with the Lombok @Builder.Default fields.
+        for (UsageItem requestedItem : mergedItems.values()) {
+            Query query = Query.query(
+                    Criteria.where("techId").is(tech.getId())
+                            .and("items.equipmentId").is(requestedItem.getEquipmentId())
+            );
+            Update update = new Update()
+                    .inc("items.$.usedQuantity", requestedItem.getQuantity())
+                    .set("lastUpdatedAt", declaredAt);
+            mongoTemplate.updateFirst(query, update, TechStock.class);
+        }
 
         TechStockUsage usage = techStockUsageRepository.save(TechStockUsage.builder()
                 .techId(tech.getId())
@@ -278,8 +483,12 @@ public class SttStockService {
                 .notes(trimToNull(request.getNotes()))
                 .build());
 
+        // Re-fetch to return the actual persisted state (not just the in-memory object)
+        TechStock updatedStock = techStockRepository.findByTechId(tech.getId())
+                .orElse(techStock);
+
         return DeclareTechUsageResponse.builder()
-                .stock(savedStock)
+                .stock(updatedStock)
                 .usage(usage)
                 .hasWarnings(!warnings.isEmpty())
                 .warnings(warnings)
@@ -288,6 +497,65 @@ public class SttStockService {
 
     public List<SttDistribution> getDistributionHistoryForStt(String sttId) {
         return distributionRepository.findBySttIdOrderByDistributedAtDesc(sttId);
+    }
+
+    public List<PendingDistributionDto> getPendingConfirmationsForTech(String techId) {
+        return distributionRepository
+                .findByTechIdAndStatusOrderByDistributedAtDesc(techId, DistributionStatus.PENDING_TECH_CONFIRMATION)
+                .stream()
+                .map(this::toDto)
+                .toList();
+    }
+
+    public PendingDistributionDto getPendingConfirmationById(String distributionId, String techId) {
+        SttDistribution dist = distributionRepository.findById(distributionId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Distribution not found"));
+        if (!dist.getTechId().equals(techId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This distribution does not belong to you");
+        }
+        if (dist.getStatus() != DistributionStatus.PENDING_TECH_CONFIRMATION) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Distribution is no longer pending");
+        }
+        return toDto(dist);
+    }
+
+    public void confirmDistributionByTech(String distributionId, String techId, String techEmail) {
+        SttDistribution dist = distributionRepository.findById(distributionId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Distribution not found"));
+        if (!dist.getTechId().equals(techId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This distribution does not belong to you");
+        }
+        if (dist.getStatus() != DistributionStatus.PENDING_TECH_CONFIRMATION) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Distribution already processed");
+        }
+
+        AppUser tech = userRepository.findById(techId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Tech user not found"));
+
+        updateTechStock(tech, dist.getSttId(), dist.getItems());
+
+        dist.setStatus(DistributionStatus.CONFIRMED_BY_TECH);
+        dist.setConfirmedAt(Instant.now());
+        dist.setConfirmedBy(techEmail);
+        distributionRepository.save(dist);
+
+        stockMovementService.recordTechConfirmation(dist, techEmail);
+    }
+
+    private PendingDistributionDto toDto(SttDistribution dist) {
+        return PendingDistributionDto.builder()
+                .id(dist.getId())
+                .sttId(dist.getSttId())
+                .sttName(dist.getSttName())
+                .sttEmail(dist.getSttEmail())
+                .techId(dist.getTechId())
+                .techName(dist.getTechName())
+                .dpmId(dist.getDpmId())
+                .items(dist.getItems())
+                .status(dist.getStatus())
+                .distributedAt(dist.getDistributedAt())
+                .notes(dist.getNotes())
+                .build();
     }
 
     public List<DistributableDpmDto> getDistributableDpms(String sttId) {
@@ -312,6 +580,7 @@ public class SttStockService {
                         return DistributableDpmItemDto.builder()
                                 .equipmentId(i.getEquipmentId())
                                 .equipmentName(i.getEquipmentName())
+                                .unit(i.getUnit())
                                 .confirmedQuantity(confirmed)
                                 .distributedQuantity(distributed)
                                 .remainingQuantity(remaining)
@@ -413,6 +682,276 @@ public class SttStockService {
         if (techStock.getItems() == null) {
             techStock.setItems(new ArrayList<>());
         }
+    }
+
+    private TechStock findTechStockOrThrow(String techId, String errorMessage) {
+        TechStock techStock = techStockRepository.findByTechId(techId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, errorMessage));
+        ensureTechStockItems(techStock);
+        return techStock;
+    }
+
+    private void validateRequestedUsageAgainstStock(
+            TechStock techStock,
+            Map<String, UsageItem> requestedUsage,
+            Map<String, UsageItem> baselineUsage,
+            CaseEntity caseEntity
+    ) {
+        for (UsageItem requestedItem : requestedUsage.values()) {
+            TechStockItem stockItem = getTechStockItemOrThrow(
+                    techStock,
+                    requestedItem.getEquipmentId(),
+                    "Equipment is not part of the technician stock: " + requestedItem.getEquipmentId()
+            );
+
+            int alreadyApplied = baselineUsage.getOrDefault(requestedItem.getEquipmentId(), UsageItem.builder().quantity(0).build())
+                    .getQuantity();
+            int additionalRequired = requestedItem.getQuantity() - alreadyApplied;
+            if (additionalRequired <= 0) {
+                continue;
+            }
+
+            int available = stockItem.getRemainingQuantity();
+            if (available < additionalRequired) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Insufficient technician stock for "
+                                + firstNonBlank(requestedItem.getEquipmentName(), stockItem.getEquipmentName())
+                                + ": available=" + available
+                                + ", additionalRequired=" + additionalRequired
+                                + ", requestedTotal=" + requestedItem.getQuantity()
+                                + ", caseId=" + caseEntity.getId()
+                );
+            }
+        }
+    }
+
+    private void validateStockRestoration(TechStock techStock, Map<String, UsageItem> appliedUsage, String caseId) {
+        for (UsageItem appliedItem : appliedUsage.values()) {
+            TechStockItem stockItem = getTechStockItemOrThrow(
+                    techStock,
+                    appliedItem.getEquipmentId(),
+                    "Cannot restore equipment because it no longer exists in technician stock: " + appliedItem.getEquipmentId()
+            );
+            if (stockItem.getUsedQuantity() < appliedItem.getQuantity()) {
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Cannot restore technician stock for case "
+                                + caseId
+                                + " because used quantity is already below the applied amount for equipment "
+                                + appliedItem.getEquipmentId()
+                );
+            }
+        }
+    }
+
+    private boolean applyUsageDelta(
+            TechStock techStock,
+            Map<String, UsageItem> requestedUsage,
+            Map<String, UsageItem> baselineUsage,
+            CaseEntity caseEntity,
+            AppUser technician,
+            String performedBy
+    ) {
+        boolean changed = false;
+        Map<String, UsageItem> comparisonItems = new LinkedHashMap<>();
+        baselineUsage.forEach(comparisonItems::putIfAbsent);
+        requestedUsage.forEach(comparisonItems::putIfAbsent);
+
+        for (String equipmentId : comparisonItems.keySet()) {
+            int previousQuantity = baselineUsage.getOrDefault(equipmentId, UsageItem.builder().quantity(0).build()).getQuantity();
+            int requestedQuantity = requestedUsage.getOrDefault(equipmentId, UsageItem.builder().quantity(0).build()).getQuantity();
+            int delta = requestedQuantity - previousQuantity;
+            if (delta == 0) {
+                continue;
+            }
+
+            TechStockItem stockItem = getTechStockItemOrThrow(
+                    techStock,
+                    equipmentId,
+                    "Equipment is not part of the technician stock: " + equipmentId
+            );
+
+            int nextUsedQuantity = stockItem.getUsedQuantity() + delta;
+            if (nextUsedQuantity < 0) {
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Technician stock cannot become negative for equipment " + equipmentId
+                );
+            }
+
+            stockItem.setUsedQuantity(nextUsedQuantity);
+            changed = true;
+
+            UsageItem referenceItem = requestedUsage.containsKey(equipmentId)
+                    ? requestedUsage.get(equipmentId)
+                    : baselineUsage.get(equipmentId);
+
+            if (delta > 0) {
+                stockMovementService.recordCaseUsage(caseEntity, technician, referenceItem, delta, performedBy);
+                log.info(
+                        "case_stock_usage_applied caseId={} techId={} equipmentId={} delta={} remaining={} actor={}",
+                        caseEntity.getId(),
+                        technician.getId(),
+                        equipmentId,
+                        delta,
+                        stockItem.getRemainingQuantity(),
+                        performedBy
+                );
+            } else {
+                log.info(
+                        "case_stock_usage_reduced caseId={} techId={} equipmentId={} delta={} remaining={} actor={}",
+                        caseEntity.getId(),
+                        technician.getId(),
+                        equipmentId,
+                        delta,
+                        stockItem.getRemainingQuantity(),
+                        performedBy
+                );
+            }
+        }
+
+        return changed;
+    }
+
+    private boolean restoreAppliedUsage(
+            TechStock techStock,
+            Map<String, UsageItem> appliedUsage,
+            String caseId,
+            String performedBy,
+            String reason
+    ) {
+        boolean changed = false;
+        for (UsageItem appliedItem : appliedUsage.values()) {
+            TechStockItem stockItem = getTechStockItemOrThrow(
+                    techStock,
+                    appliedItem.getEquipmentId(),
+                    "Cannot restore equipment because it no longer exists in technician stock: " + appliedItem.getEquipmentId()
+            );
+
+            int nextUsedQuantity = stockItem.getUsedQuantity() - appliedItem.getQuantity();
+            if (nextUsedQuantity < 0) {
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Technician stock cannot become negative while restoring case usage for equipment "
+                                + appliedItem.getEquipmentId()
+                );
+            }
+
+            stockItem.setUsedQuantity(nextUsedQuantity);
+            changed = true;
+
+            log.info(
+                    "case_stock_usage_restored caseId={} techId={} equipmentId={} quantity={} remaining={} actor={} reason={}",
+                    caseId,
+                    techStock.getTechId(),
+                    appliedItem.getEquipmentId(),
+                    appliedItem.getQuantity(),
+                    stockItem.getRemainingQuantity(),
+                    performedBy,
+                    reason
+            );
+        }
+
+        return changed;
+    }
+
+    private TechStockItem getTechStockItemOrThrow(TechStock techStock, String equipmentId, String errorMessage) {
+        return techStock.getItems().stream()
+                .filter(item -> equipmentId.equals(item.getEquipmentId()))
+                .findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, errorMessage));
+    }
+
+    private void hydrateUsageLabelsFromStock(TechStock techStock, Map<String, UsageItem> usageItems) {
+        for (UsageItem usageItem : usageItems.values()) {
+            TechStockItem stockItem = getTechStockItemOrThrow(
+                    techStock,
+                    usageItem.getEquipmentId(),
+                    "Equipment is not part of the technician stock: " + usageItem.getEquipmentId()
+            );
+            usageItem.setEquipmentName(firstNonBlank(usageItem.getEquipmentName(), stockItem.getEquipmentName()));
+            usageItem.setUnit(firstNonBlank(usageItem.getUnit(), stockItem.getUnit()));
+        }
+    }
+
+    private Map<String, UsageItem> mergeCaseUsageItems(List<UsedEquipmentRequestItem> items) {
+        Map<String, UsageItem> merged = new LinkedHashMap<>();
+        if (items == null) {
+            return merged;
+        }
+
+        for (UsedEquipmentRequestItem item : items) {
+            if (item == null || isBlank(item.equipmentId())) {
+                continue;
+            }
+
+            UsageItem existing = merged.get(item.equipmentId().trim());
+            if (existing == null) {
+                merged.put(item.equipmentId().trim(), UsageItem.builder()
+                        .equipmentId(item.equipmentId().trim())
+                        .equipmentName(trimToNull(item.equipmentName()))
+                        .unit(trimToNull(item.unit()))
+                        .quantity(item.quantity())
+                        .build());
+                continue;
+            }
+
+            existing.setQuantity(existing.getQuantity() + item.quantity());
+            if (isBlank(existing.getEquipmentName())) {
+                existing.setEquipmentName(trimToNull(item.equipmentName()));
+            }
+            if (isBlank(existing.getUnit())) {
+                existing.setUnit(trimToNull(item.unit()));
+            }
+        }
+
+        return merged;
+    }
+
+    private Map<String, UsageItem> mergePersistedUsageItems(List<UsedEquipmentItem> items) {
+        Map<String, UsageItem> merged = new LinkedHashMap<>();
+        if (items == null) {
+            return merged;
+        }
+
+        for (UsedEquipmentItem item : items) {
+            if (item == null || isBlank(item.getEquipmentId())) {
+                continue;
+            }
+
+            UsageItem existing = merged.get(item.getEquipmentId().trim());
+            if (existing == null) {
+                merged.put(item.getEquipmentId().trim(), UsageItem.builder()
+                        .equipmentId(item.getEquipmentId().trim())
+                        .equipmentName(trimToNull(item.getEquipmentName()))
+                        .unit(trimToNull(item.getUnit()))
+                        .quantity(item.getQuantity())
+                        .build());
+                continue;
+            }
+
+            existing.setQuantity(existing.getQuantity() + item.getQuantity());
+            if (isBlank(existing.getEquipmentName())) {
+                existing.setEquipmentName(trimToNull(item.getEquipmentName()));
+            }
+            if (isBlank(existing.getUnit())) {
+                existing.setUnit(trimToNull(item.getUnit()));
+            }
+        }
+
+        return merged;
+    }
+
+    private List<UsedEquipmentItem> toUsedEquipmentItems(Map<String, UsageItem> usageItems) {
+        return usageItems.values().stream()
+                .map(item -> UsedEquipmentItem.builder()
+                        .equipmentId(item.getEquipmentId())
+                        .equipmentName(item.getEquipmentName())
+                        .unit(item.getUnit())
+                        .quantity(item.getQuantity())
+                        .build())
+                .toList();
     }
 
     private Map<String, UsageItem> mergeUsageItems(List<TechUsageItemRequest> items) {

@@ -12,5 +12,6 @@ public enum CaseTimelineEventType {
     CASE_CLOSED,
     SLA_WARNING,
     SLA_BREACHED,
-    SLA_ESCALATED
+    SLA_ESCALATED,
+    STOCK_CONSUMED
 }

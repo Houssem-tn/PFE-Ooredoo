@@ -1,5 +1,6 @@
 package com.pfe.stock_management.entity;
 
+import com.pfe.stock_management.enums.DistributionStatus;
 import com.pfe.stock_management.model.DistributionItem;
 import lombok.*;
 import org.springframework.data.annotation.Id;
@@ -21,6 +22,8 @@ public class SttDistribution {
     private String id;
 
     private String sttId;
+    private String sttName;
+    private String sttEmail;
     private String techId;
     private String techName;
     private String techEmail;
@@ -29,7 +32,12 @@ public class SttDistribution {
     @Builder.Default
     private List<DistributionItem> items = new ArrayList<>();
 
+    @Builder.Default
+    private DistributionStatus status = DistributionStatus.PENDING_TECH_CONFIRMATION;
+
     private Instant distributedAt;
+    private Instant confirmedAt;
+    private String confirmedBy;
     private String notes;
     private String distributedBy;
 }
