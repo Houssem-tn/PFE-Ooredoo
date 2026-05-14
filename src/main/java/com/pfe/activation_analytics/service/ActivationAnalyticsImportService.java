@@ -4,10 +4,11 @@ import com.pfe.activation_analytics.dto.AdminActivationAnalyticsImportResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsInvalidReasonResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsPreviewResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsPreviewRowResponse;
-import com.pfe.activation_analytics.entity.ActivationAnalyticsImportBatchEntity;
 import com.pfe.activation_analytics.entity.ActivationAnalyticsRowEntity;
-import com.pfe.activation_analytics.repository.ActivationAnalyticsImportBatchRepository;
-import com.pfe.activation_analytics.repository.ActivationAnalyticsRowRepository;
+import com.pfe.activation_analytics.model.ActivationImportProcessingMode;
+import com.pfe.activation_analytics.model.ActivationImportSharedResult;
+import com.pfe.activation_analytics.model.ActivationImportSharedRow;
+import com.pfe.case_management.enums.CaseType;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
@@ -22,7 +23,6 @@ import org.jsoup.Jsoup;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.mongodb.core.BulkOperations;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -45,8 +45,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -54,7 +54,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -65,36 +64,38 @@ public class ActivationAnalyticsImportService {
     private static final Logger log = LoggerFactory.getLogger(ActivationAnalyticsImportService.class);
     private static final int VALID_PREVIEW_LIMIT = 80;
     private static final int INVALID_ROW_PAGE_SIZE = 50;
-    private static final int INSERT_CHUNK_SIZE = 5_000;
     private static final List<String> REQUIRED_COLUMNS = List.of("CRM_CASE");
     private static final Map<String, List<String>> COLUMN_ALIASES = buildColumnAliases();
-    private static final String DUPLICATE_IN_FILE_ISSUE = "Duplicate CRM_CASE inside the selected file";
-    private static final String DUPLICATE_IN_DATASET_ISSUE =
-            "Duplicate CRM_CASE already imported in the admin activation analytics dataset";
 
     static {
         ZipSecureFile.setMinInflateRatio(0.0001d);
     }
 
-    private final ActivationAnalyticsRowRepository rowRepository;
-    private final ActivationAnalyticsImportBatchRepository batchRepository;
     private final MongoTemplate mongoTemplate;
+    private final ActivationDistributionEligibilityService eligibilityService;
+    private final ActivationAnalyticsBatchProcessingService batchProcessingService;
+    private final ActivationDistributionProcessingService distributionProcessingService;
 
     public AdminActivationAnalyticsPreviewResponse preview(MultipartFile file, String uploadedBy) {
         long totalStart = System.nanoTime();
-        ParsedImport parsedImport = parseWorkbook(file, uploadedBy);
+        ActivationImportSharedResult sharedResult = parseWorkbook(file, uploadedBy);
 
-        List<ParsedRow> validRows = parsedImport.validRowsToStore();
-        List<ParsedRow> invalidRows = parsedImport.invalidRowsOnly();
+        List<ActivationImportSharedRow> validRows = sharedResult.analyticsRowsToStore();
+        List<ActivationImportSharedRow> invalidRows = sharedResult.invalidRowsOnly();
 
         AdminActivationAnalyticsPreviewResponse response = new AdminActivationAnalyticsPreviewResponse(
-                parsedImport.sourceFileName(),
-                parsedImport.totalRows(),
-                parsedImport.validNewRows(),
-                parsedImport.duplicateRows(),
-                parsedImport.invalidRows(),
-                parsedImport.distinctStts(),
-                parsedImport.distinctGovernorates(),
+                sharedResult.sourceFileName(),
+                sharedResult.totalRows(),
+                sharedResult.processableRows(),
+                sharedResult.validNewRows(),
+                sharedResult.duplicateRows(),
+                sharedResult.invalidRows(),
+                sharedResult.distinctStts(),
+                sharedResult.distinctGovernorates(),
+                sharedResult.enCoursRows(),
+                sharedResult.effectueRows(),
+                sharedResult.termineRows(),
+                sharedResult.actionableRows(),
                 INVALID_ROW_PAGE_SIZE,
                 buildInvalidReasonSummaries(invalidRows),
                 validRows.stream()
@@ -107,85 +108,77 @@ public class ActivationAnalyticsImportService {
         );
 
         log.info(
-                "activation_import_preview file={} uploadedBy={} totalRows={} validNewRows={} duplicateRows={} invalidRows={} totalMs={}",
-                parsedImport.sourceFileName(),
+                "activation_import_preview file={} uploadedBy={} totalRows={} processableRows={} validNewRows={} duplicateRows={} invalidRows={} totalMs={}",
+                sharedResult.sourceFileName(),
                 uploadedBy,
-                parsedImport.totalRows(),
-                parsedImport.validNewRows(),
-                parsedImport.duplicateRows(),
-                parsedImport.invalidRows(),
+                sharedResult.totalRows(),
+                sharedResult.processableRows(),
+                sharedResult.validNewRows(),
+                sharedResult.duplicateRows(),
+                sharedResult.invalidRows(),
                 elapsedMs(totalStart)
         );
         return response;
     }
 
-    public AdminActivationAnalyticsImportResponse importFile(MultipartFile file, String uploadedBy) {
+    public AdminActivationAnalyticsImportResponse importFile(
+            MultipartFile file,
+            String uploadedBy,
+            ActivationImportProcessingMode mode
+    ) {
         long totalStart = System.nanoTime();
-        ParsedImport parsedImport = parseWorkbook(file, uploadedBy);
+        ActivationImportSharedResult sharedResult = parseWorkbook(file, uploadedBy);
 
-        String batchId = UUID.randomUUID().toString();
-        Instant uploadedAt = Instant.now();
-        List<ParsedRow> validRows = parsedImport.validRowsToStore();
-
-        long entityBuildStart = System.nanoTime();
-        List<ActivationAnalyticsRowEntity> entities = new ArrayList<>(validRows.size());
-        for (ParsedRow row : validRows) {
-            entities.add(toEntity(row, parsedImport.sourceFileName(), batchId, uploadedBy, uploadedAt));
+        ActivationAnalyticsBatchProcessingService.StoredAnalyticsBatch storedBatch = null;
+        if (mode.analyticsEnabled()) {
+            storedBatch = batchProcessingService.store(sharedResult, uploadedBy);
         }
-        long entityBuildMs = elapsedMs(entityBuildStart);
 
-        long saveStart = System.nanoTime();
-        insertRowsInBatches(entities);
-        long saveMs = elapsedMs(saveStart);
+        var distributionSummary = mode.distributionEnabled()
+                ? distributionProcessingService.process(sharedResult, uploadedBy)
+                : null;
 
-        long batchSaveStart = System.nanoTime();
-        ActivationAnalyticsImportBatchEntity batch = ActivationAnalyticsImportBatchEntity.builder()
-                .batchId(batchId)
-                .uploadedBy(uploadedBy)
-                .uploadedAt(uploadedAt)
-                .fileName(parsedImport.sourceFileName())
-                .totalRows(parsedImport.totalRows())
-                .insertedRows(entities.size())
-                .validRows(parsedImport.validNewRows())
-                .invalidRows(parsedImport.invalidRows())
-                .duplicateRows(parsedImport.duplicateRows())
-                .distinctStts(parsedImport.distinctStts())
-                .distinctGovernorates(parsedImport.distinctGovernorates())
-                .build();
-        batchRepository.save(batch);
-        long batchSaveMs = elapsedMs(batchSaveStart);
+        Instant uploadedAt = storedBatch != null && storedBatch.uploadedAt() != null
+                ? storedBatch.uploadedAt()
+                : Instant.now();
 
         AdminActivationAnalyticsImportResponse response = new AdminActivationAnalyticsImportResponse(
-                batchId,
-                parsedImport.sourceFileName(),
-                parsedImport.totalRows(),
-                entities.size(),
-                parsedImport.validNewRows(),
-                parsedImport.invalidRows(),
-                parsedImport.duplicateRows(),
-                parsedImport.distinctStts(),
-                parsedImport.distinctGovernorates(),
+                mode,
+                storedBatch != null ? storedBatch.batchId() : null,
+                sharedResult.sourceFileName(),
+                sharedResult.totalRows(),
+                sharedResult.processableRows(),
+                storedBatch != null ? storedBatch.insertedRows() : 0,
+                sharedResult.validNewRows(),
+                sharedResult.invalidRows(),
+                sharedResult.duplicateRows(),
+                sharedResult.distinctStts(),
+                sharedResult.distinctGovernorates(),
+                sharedResult.enCoursRows(),
+                sharedResult.effectueRows(),
+                sharedResult.termineRows(),
+                sharedResult.actionableRows(),
+                distributionSummary,
                 uploadedAt
         );
 
         log.info(
-                "activation_import_commit file={} uploadedBy={} batchId={} insertedRows={} totalRows={} duplicateRows={} invalidRows={} entityBuildMs={} saveMs={} batchSaveMs={} totalMs={}",
-                parsedImport.sourceFileName(),
+                "activation_import_commit file={} uploadedBy={} mode={} batchId={} insertedRows={} processableRows={} actionableRows={} duplicateRows={} invalidRows={} totalMs={}",
+                sharedResult.sourceFileName(),
                 uploadedBy,
-                batchId,
-                entities.size(),
-                parsedImport.totalRows(),
-                parsedImport.duplicateRows(),
-                parsedImport.invalidRows(),
-                entityBuildMs,
-                saveMs,
-                batchSaveMs,
+                mode,
+                storedBatch != null ? storedBatch.batchId() : null,
+                storedBatch != null ? storedBatch.insertedRows() : 0,
+                sharedResult.processableRows(),
+                sharedResult.actionableRows(),
+                sharedResult.duplicateRows(),
+                sharedResult.invalidRows(),
                 elapsedMs(totalStart)
         );
         return response;
     }
 
-    private ParsedImport parseWorkbook(MultipartFile file, String uploadedBy) {
+    private ActivationImportSharedResult parseWorkbook(MultipartFile file, String uploadedBy) {
         validateFile(file);
 
         String sourceFileName = resolveSourceFileName(file);
@@ -258,7 +251,11 @@ public class ActivationAnalyticsImportService {
         }
     }
 
-    private ParsedImport parseStructuredTextWorkbook(MultipartFile file, String sourceFileName, String uploadedBy) throws Exception {
+    private ActivationImportSharedResult parseStructuredTextWorkbook(
+            MultipartFile file,
+            String sourceFileName,
+            String uploadedBy
+    ) throws Exception {
         long parseStart = System.nanoTime();
         byte[] bytes = file.getBytes();
         String content = decodeTextContent(bytes);
@@ -320,7 +317,7 @@ public class ActivationAnalyticsImportService {
                 : "Unsupported import file content. Open the file in Excel and save it as .xlsx or .csv, then upload it again.");
     }
 
-    private ParsedImport buildParsedImport(String sourceFileName, List<SourceRow> sourceRows, String uploadedBy) {
+    private ActivationImportSharedResult buildParsedImport(String sourceFileName, List<SourceRow> sourceRows, String uploadedBy) {
         long duplicateLookupStart = System.nanoTime();
         Set<String> existingCrmCases = findExistingCrmCases(uploadedBy);
         long duplicateLookupMs = elapsedMs(duplicateLookupStart);
@@ -329,90 +326,105 @@ public class ActivationAnalyticsImportService {
         Set<String> seenInFile = new LinkedHashSet<>(Math.max(16, sourceRows.size()));
         Set<String> distinctStts = new LinkedHashSet<>();
         Set<String> distinctGovernorates = new LinkedHashSet<>();
-        List<ParsedRow> rows = new ArrayList<>(sourceRows.size());
-        List<ParsedRow> validRows = new ArrayList<>(sourceRows.size());
-        List<ParsedRow> invalidRowsOnly = new ArrayList<>();
+        List<ActivationImportSharedRow> rows = new ArrayList<>(sourceRows.size());
+        List<ActivationImportSharedRow> analyticsRows = new ArrayList<>(sourceRows.size());
+        List<ActivationImportSharedRow> processableRows = new ArrayList<>(sourceRows.size());
+        List<ActivationImportSharedRow> invalidRowsOnly = new ArrayList<>();
         int duplicateRows = 0;
         int invalidRows = 0;
+        int enCoursRows = 0;
+        int effectueRows = 0;
+        int termineRows = 0;
+        int actionableRows = 0;
 
         for (SourceRow sourceRow : sourceRows) {
-            ParsedRow row = buildParsedRow(sourceRow.rowNumber(), sourceRow.sourceValues(), cache);
-            List<String> existingIssues = row.issues();
-            ArrayList<String> issues = existingIssues.isEmpty()
-                    ? null
-                    : new ArrayList<>(existingIssues);
+            ActivationImportSharedRow row = buildParsedRow(sourceRow.rowNumber(), sourceRow.sourceValues(), cache);
+            boolean duplicateInFile = false;
+            boolean duplicateInDataset = false;
 
             if (ActivationAnalyticsSupport.hasText(row.crmCaseNormalized())) {
-                if (!seenInFile.add(row.crmCaseNormalized())) {
-                    if (issues == null) {
-                        issues = new ArrayList<>(2);
-                    }
-                    issues.add(DUPLICATE_IN_FILE_ISSUE);
-                }
-                if (existingCrmCases.contains(row.crmCaseNormalized())) {
-                    if (issues == null) {
-                        issues = new ArrayList<>(2);
-                    }
-                    issues.add(DUPLICATE_IN_DATASET_ISSUE);
-                }
+                duplicateInFile = !seenInFile.add(row.crmCaseNormalized());
+                duplicateInDataset = existingCrmCases.contains(row.crmCaseNormalized());
             }
 
-            ParsedRow finalRow = issues == null ? row : row.withIssues(issues);
+            ActivationImportSharedRow finalRow = row.withDuplicateFlags(duplicateInFile, duplicateInDataset);
             rows.add(finalRow);
 
-            if (finalRow.validNewRow()) {
-                validRows.add(finalRow);
+            if (finalRow.analyticsInsertableRow()) {
+                analyticsRows.add(finalRow);
+            }
+
+            if (finalRow.distributionCandidateRow()) {
+                processableRows.add(finalRow);
                 if (ActivationAnalyticsSupport.hasText(finalRow.nameStt())) {
                     distinctStts.add(finalRow.nameStt());
                 }
                 if (ActivationAnalyticsSupport.hasText(finalRow.gouvernorat())) {
                     distinctGovernorates.add(finalRow.gouvernorat());
                 }
-                continue;
+                if (eligibilityService.isEnCours(finalRow)) {
+                    enCoursRows += 1;
+                }
+                if (eligibilityService.isEffectue(finalRow)) {
+                    effectueRows += 1;
+                }
+                if (eligibilityService.isSourceTerminated(finalRow)) {
+                    termineRows += 1;
+                }
+                if (eligibilityService.isActionable(finalRow)) {
+                    actionableRows += 1;
+                }
             }
 
             if (finalRow.duplicateOnlyRow()) {
                 duplicateRows += 1;
-                continue;
+            } else if (finalRow.invalidOnlyRow()) {
+                invalidRows += 1;
+                invalidRowsOnly.add(finalRow);
             }
-
-            invalidRows += 1;
-            invalidRowsOnly.add(finalRow);
         }
 
         int distinctSttCount = distinctStts.size();
         int distinctGovernorateCount = distinctGovernorates.size();
 
         log.info(
-                "activation_import_classification file={} uploadedBy={} totalRows={} existingCrmCases={} duplicateLookupMs={} classificationMs={} validNewRows={} duplicateRows={} invalidRows={} distinctStts={} distinctGovernorates={}",
+                "activation_import_classification file={} uploadedBy={} totalRows={} existingCrmCases={} duplicateLookupMs={} classificationMs={} processableRows={} validNewRows={} duplicateRows={} invalidRows={} actionableRows={} distinctStts={} distinctGovernorates={}",
                 sourceFileName,
                 uploadedBy,
                 sourceRows.size(),
                 existingCrmCases.size(),
                 duplicateLookupMs,
                 elapsedMs(classificationStart),
-                validRows.size(),
+                processableRows.size(),
+                analyticsRows.size(),
                 duplicateRows,
                 invalidRows,
+                actionableRows,
                 distinctSttCount,
                 distinctGovernorateCount
         );
 
-        return new ParsedImport(
+        return new ActivationImportSharedResult(
                 sourceFileName,
                 sourceRows.size(),
-                validRows.size(),
+                processableRows.size(),
+                analyticsRows.size(),
                 invalidRows,
                 duplicateRows,
                 distinctSttCount,
                 distinctGovernorateCount,
+                enCoursRows,
+                effectueRows,
+                termineRows,
+                actionableRows,
                 rows,
-                validRows,
+                analyticsRows,
+                processableRows,
                 invalidRowsOnly
         );
     }
 
-    private ParsedRow buildParsedRow(int rowNumber, Map<String, String> sourceValues, ImportValueCache cache) {
+    private ActivationImportSharedRow buildParsedRow(int rowNumber, Map<String, String> sourceValues, ImportValueCache cache) {
         String crmCase = cache.clean(sourceValues.get("CRM_CASE"));
         if (!ActivationAnalyticsSupport.hasText(crmCase)) {
             return buildParsedRow(rowNumber, sourceValues, cache, crmCase, List.of("CRM_CASE is required"));
@@ -421,7 +433,7 @@ public class ActivationAnalyticsImportService {
         return buildParsedRow(rowNumber, sourceValues, cache, crmCase, List.of());
     }
 
-    private ParsedRow buildParsedRow(
+    private ActivationImportSharedRow buildParsedRow(
             int rowNumber,
             Map<String, String> sourceValues,
             ImportValueCache cache,
@@ -451,7 +463,7 @@ public class ActivationAnalyticsImportService {
         String rsrq = cache.clean(sourceValues.get("RSRQ"));
         String sinr = cache.clean(sourceValues.get("SINR"));
 
-        return new ParsedRow(
+        return new ActivationImportSharedRow(
                 rowNumber,
                 crmCase,
                 cache.normalizeLookup(crmCase),
@@ -526,7 +538,9 @@ public class ActivationAnalyticsImportService {
                         openingDateSurTimosDate,
                         dateFinTrvDate
                 ),
-                issues
+                List.copyOf(issues),
+                false,
+                false
         );
     }
 
@@ -535,7 +549,7 @@ public class ActivationAnalyticsImportService {
             return Set.of();
         }
 
-        Query query = Query.query(Criteria.where("uploadedBy").is(uploadedBy));
+        Query query = Query.query(Criteria.where("uploadedBy").is(uploadedBy).and("caseType").is(CaseType.ACTIVATION));
         List<String> existingCrmCases = mongoTemplate.query(ActivationAnalyticsRowEntity.class)
                 .distinct("crmCaseNormalized")
                 .matching(query)
@@ -547,133 +561,7 @@ public class ActivationAnalyticsImportService {
                 .collect(Collectors.toSet());
     }
 
-    private ActivationAnalyticsRowEntity toEntity(
-            ParsedRow row,
-            String sourceFileName,
-            String batchId,
-            String uploadedBy,
-            Instant uploadedAt
-    ) {
-        return ActivationAnalyticsRowEntity.builder()
-                .batchId(batchId)
-                .uploadedBy(uploadedBy)
-                .uploadedAt(uploadedAt)
-                .sourceFileName(sourceFileName)
-                .rowNumber(row.rowNumber())
-                .validRow(row.validNewRow())
-                .validationIssues(row.issues())
-                .crmCase(row.crmCase())
-                .crmCaseNormalized(row.crmCaseNormalized())
-                .dateCreationCrm(row.dateCreationCrm())
-                .dateCreationCrmDate(row.dateCreationCrmDate())
-                .openingDateSurTimos(row.openingDateSurTimos())
-                .openingDateSurTimosDate(row.openingDateSurTimosDate())
-                .statut(row.statut())
-                .client(row.client())
-                .contactClient(row.contactClient())
-                .commentaire(row.commentaire())
-                .msisdn(row.msisdn())
-                .latitudeSite(row.latitudeSite())
-                .latitudeSiteValue(row.latitudeSiteValue())
-                .longitudeSite(row.longitudeSite())
-                .longitudeSiteValue(row.longitudeSiteValue())
-                .localite(row.localite())
-                .delegation(row.delegation())
-                .gouvernorat(row.gouvernorat())
-                .gouvernoratNormalized(row.gouvernoratNormalized())
-                .offre(row.offre())
-                .desPack(row.desPack())
-                .nameStt(row.nameStt())
-                .nameSttNormalized(row.nameSttNormalized())
-                .dateAffectationStt(row.dateAffectationStt())
-                .dateAffectationSttDate(row.dateAffectationSttDate())
-                .repRdv(row.repRdv())
-                .datePriseRdv(row.datePriseRdv())
-                .datePriseRdvDate(row.datePriseRdvDate())
-                .causeInjoignabilite(row.causeInjoignabilite())
-                .causeAbandon(row.causeAbandon())
-                .detail(row.detail())
-                .cmtRdv(row.cmtRdv())
-                .repTravauxStt(row.repTravauxStt())
-                .dateFinTrv(row.dateFinTrv())
-                .dateFinTrvDate(row.dateFinTrvDate())
-                .cmtTrvStt(row.cmtTrvStt())
-                .repZm(row.repZm())
-                .cmtZm(row.cmtZm())
-                .metrageCable(row.metrageCable())
-                .metrageCableValue(row.metrageCableValue())
-                .nombreDePv(row.nombreDePv())
-                .nombreDePvValue(row.nombreDePvValue())
-                .debitDl(row.debitDl())
-                .debitDlValue(row.debitDlValue())
-                .debitUl(row.debitUl())
-                .debitUlValue(row.debitUlValue())
-                .rsrp(row.rsrp())
-                .rsrpValue(row.rsrpValue())
-                .rsrq(row.rsrq())
-                .rsrqValue(row.rsrqValue())
-                .sinr(row.sinr())
-                .sinrValue(row.sinrValue())
-                .siteSecteur(row.siteSecteur())
-                .typeOffreSpeed(row.typeOffreSpeed())
-                .typeClient(row.typeClient())
-                .source(row.source())
-                .description(row.description())
-                .assignmentBusinessDays(row.assignmentBusinessDays())
-                .rdvBusinessDays(row.rdvBusinessDays())
-                .executionBusinessDays(row.executionBusinessDays())
-                .endToEndBusinessDays(row.endToEndBusinessDays())
-                .completed(ActivationAnalyticsSupport.isCompleted(
-                        row.statut(),
-                        row.repTravauxStt(),
-                        row.dateFinTrvDate()
-                ))
-                .rdvSuccess(ActivationAnalyticsSupport.isRdvSuccess(
-                        row.repRdv(),
-                        row.datePriseRdvDate()
-                ))
-                .injoignable(ActivationAnalyticsSupport.isInjoignable(
-                        row.causeInjoignabilite(),
-                        row.repRdv(),
-                        row.statut(),
-                        row.detail()
-                ))
-                .abandon(ActivationAnalyticsSupport.isAbandon(
-                        row.causeAbandon(),
-                        row.repRdv(),
-                        row.statut(),
-                        row.detail()
-                ))
-                .blocked(ActivationAnalyticsSupport.isBlocked(
-                        row.statut(),
-                        row.detail(),
-                        row.commentaire(),
-                        row.cmtZm(),
-                        row.cmtTrvStt()
-                ))
-                .delayed(ActivationAnalyticsSupport.isDelayed(
-                        row.endToEndBusinessDays(),
-                        row.assignmentBusinessDays(),
-                        row.rdvBusinessDays(),
-                        row.executionBusinessDays()
-                ))
-                .build();
-    }
-
-    private void insertRowsInBatches(List<ActivationAnalyticsRowEntity> entities) {
-        if (entities == null || entities.isEmpty()) {
-            return;
-        }
-
-        for (int start = 0; start < entities.size(); start += INSERT_CHUNK_SIZE) {
-            int end = Math.min(start + INSERT_CHUNK_SIZE, entities.size());
-            mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, ActivationAnalyticsRowEntity.class)
-                    .insert(entities.subList(start, end))
-                    .execute();
-        }
-    }
-
-    private AdminActivationAnalyticsPreviewRowResponse toPreviewRow(ParsedRow row) {
+    private AdminActivationAnalyticsPreviewRowResponse toPreviewRow(ActivationImportSharedRow row) {
         return new AdminActivationAnalyticsPreviewRowResponse(
                 row.rowNumber(),
                 row.crmCase(),
@@ -685,16 +573,18 @@ public class ActivationAnalyticsImportService {
                 row.executionBusinessDays(),
                 row.endToEndBusinessDays(),
                 row.issues(),
-                row.validNewRow(),
+                row.analyticsInsertableRow(),
                 row.category()
         );
     }
 
-    private List<AdminActivationAnalyticsInvalidReasonResponse> buildInvalidReasonSummaries(List<ParsedRow> invalidRows) {
+    private List<AdminActivationAnalyticsInvalidReasonResponse> buildInvalidReasonSummaries(
+            List<ActivationImportSharedRow> invalidRows
+    ) {
         Map<String, Long> counts = new LinkedHashMap<>();
 
-        for (ParsedRow row : invalidRows) {
-            List<String> issues = row.issues() == null || row.issues().isEmpty()
+        for (ActivationImportSharedRow row : invalidRows) {
+            List<String> issues = row.issues().isEmpty()
                     ? List.of("Unknown validation issue")
                     : row.issues();
             for (String issue : issues) {
@@ -1188,190 +1078,6 @@ public class ActivationAnalyticsImportService {
             int rowNumber,
             Map<String, String> sourceValues
     ) {
-    }
-
-    private record ParsedImport(
-            String sourceFileName,
-            int totalRows,
-            int validNewRows,
-            int invalidRows,
-            int duplicateRows,
-            int distinctStts,
-            int distinctGovernorates,
-            List<ParsedRow> rows,
-            List<ParsedRow> validRowsList,
-            List<ParsedRow> invalidRowsList
-    ) {
-        List<ParsedRow> validRowsToStore() {
-            return validRowsList;
-        }
-
-        List<ParsedRow> invalidRowsOnly() {
-            return invalidRowsList;
-        }
-    }
-
-    private record ParsedRow(
-            int rowNumber,
-            String crmCase,
-            String crmCaseNormalized,
-            String dateCreationCrm,
-            java.time.LocalDate dateCreationCrmDate,
-            String openingDateSurTimos,
-            java.time.LocalDate openingDateSurTimosDate,
-            String statut,
-            String client,
-            String contactClient,
-            String commentaire,
-            String msisdn,
-            String latitudeSite,
-            Double latitudeSiteValue,
-            String longitudeSite,
-            Double longitudeSiteValue,
-            String localite,
-            String delegation,
-            String gouvernorat,
-            String gouvernoratNormalized,
-            String offre,
-            String desPack,
-            String nameStt,
-            String nameSttNormalized,
-            String dateAffectationStt,
-            java.time.LocalDate dateAffectationSttDate,
-            String repRdv,
-            String datePriseRdv,
-            java.time.LocalDate datePriseRdvDate,
-            String causeInjoignabilite,
-            String causeAbandon,
-            String detail,
-            String cmtRdv,
-            String repTravauxStt,
-            String dateFinTrv,
-            java.time.LocalDate dateFinTrvDate,
-            String cmtTrvStt,
-            String repZm,
-            String cmtZm,
-            String metrageCable,
-            Double metrageCableValue,
-            String nombreDePv,
-            Double nombreDePvValue,
-            String debitDl,
-            Double debitDlValue,
-            String debitUl,
-            Double debitUlValue,
-            String rsrp,
-            Double rsrpValue,
-            String rsrq,
-            Double rsrqValue,
-            String sinr,
-            Double sinrValue,
-            String siteSecteur,
-            String typeOffreSpeed,
-            String typeClient,
-            String source,
-            String description,
-            Integer assignmentBusinessDays,
-            Integer rdvBusinessDays,
-            Integer executionBusinessDays,
-            Integer endToEndBusinessDays,
-            List<String> issues
-    ) {
-        boolean validNewRow() {
-            return issues == null || issues.isEmpty();
-        }
-
-        boolean duplicateOnlyRow() {
-            return !validNewRow() && issues.stream().allMatch(ActivationAnalyticsImportService::isDuplicateIssue);
-        }
-
-        boolean invalidOnlyRow() {
-            return !validNewRow() && !duplicateOnlyRow();
-        }
-
-        String category() {
-            if (validNewRow()) {
-                return "valid_new";
-            }
-            if (duplicateOnlyRow()) {
-                return "duplicate";
-            }
-            return "invalid";
-        }
-
-        ParsedRow withIssues(List<String> newIssues) {
-            return new ParsedRow(
-                    rowNumber,
-                    crmCase,
-                    crmCaseNormalized,
-                    dateCreationCrm,
-                    dateCreationCrmDate,
-                    openingDateSurTimos,
-                    openingDateSurTimosDate,
-                    statut,
-                    client,
-                    contactClient,
-                    commentaire,
-                    msisdn,
-                    latitudeSite,
-                    latitudeSiteValue,
-                    longitudeSite,
-                    longitudeSiteValue,
-                    localite,
-                    delegation,
-                    gouvernorat,
-                    gouvernoratNormalized,
-                    offre,
-                    desPack,
-                    nameStt,
-                    nameSttNormalized,
-                    dateAffectationStt,
-                    dateAffectationSttDate,
-                    repRdv,
-                    datePriseRdv,
-                    datePriseRdvDate,
-                    causeInjoignabilite,
-                    causeAbandon,
-                    detail,
-                    cmtRdv,
-                    repTravauxStt,
-                    dateFinTrv,
-                    dateFinTrvDate,
-                    cmtTrvStt,
-                    repZm,
-                    cmtZm,
-                    metrageCable,
-                    metrageCableValue,
-                    nombreDePv,
-                    nombreDePvValue,
-                    debitDl,
-                    debitDlValue,
-                    debitUl,
-                    debitUlValue,
-                    rsrp,
-                    rsrpValue,
-                    rsrq,
-                    rsrqValue,
-                    sinr,
-                    sinrValue,
-                    siteSecteur,
-                    typeOffreSpeed,
-                    typeClient,
-                    source,
-                    description,
-                    assignmentBusinessDays,
-                    rdvBusinessDays,
-                    executionBusinessDays,
-                    endToEndBusinessDays,
-                    List.copyOf(newIssues)
-            );
-        }
-    }
-
-    private static boolean isDuplicateIssue(String issue) {
-        if (!ActivationAnalyticsSupport.hasText(issue)) {
-            return false;
-        }
-        return issue.toLowerCase(Locale.ROOT).contains("duplicate");
     }
 
     private static final class ImportValueCache {

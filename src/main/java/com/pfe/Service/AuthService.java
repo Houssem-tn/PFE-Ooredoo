@@ -53,9 +53,6 @@ public class AuthService {
 
     public UserDTO register(RegisterRequest req) {
         String email = req.email().trim().toLowerCase();
-        String firstName = req.firstName().trim();
-        String lastName = req.lastName().trim();
-        String fullName = firstName + " " + lastName;
         String phone = (req.phone() != null && !req.phone().isBlank())
                 ? req.phone().trim()
                 : null;
@@ -73,6 +70,8 @@ public class AuthService {
         if (!ALLOWED_PUBLIC_REQUESTED_ROLES.contains(requested)) {
             throw new IllegalArgumentException("Role not allowed for public registration");
         }
+
+        String fullName = resolvePublicRegistrationDisplayName(req, requested);
 
         AppUser user = AppUser.builder()
                 .fullName(fullName)
@@ -239,5 +238,52 @@ public class AuthService {
             e.printStackTrace();
             throw e;
         }
+    }
+
+    private String resolvePublicRegistrationDisplayName(RegisterRequest req, UserRole requested) {
+        if (requested == UserRole.ROLE_STT) {
+            String companyName = normalize(req.fullName());
+
+            if (companyName == null) {
+                companyName = joinNames(req.firstName(), req.lastName());
+            }
+
+            if (companyName == null) {
+                throw new IllegalArgumentException("STT/company name is required");
+            }
+
+            return companyName;
+        }
+
+        String personName = joinNames(req.firstName(), req.lastName());
+
+        if (personName == null) {
+            personName = normalize(req.fullName());
+        }
+
+        if (personName == null) {
+            throw new IllegalArgumentException("First name and last name are required");
+        }
+
+        return personName;
+    }
+
+    private String joinNames(String firstName, String lastName) {
+        String first = normalize(firstName);
+        String last = normalize(lastName);
+
+        if (first == null || last == null) {
+            return null;
+        }
+
+        return first + " " + last;
+    }
+
+    private String normalize(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        return value.trim().replaceAll("\\s+", " ");
     }
 }

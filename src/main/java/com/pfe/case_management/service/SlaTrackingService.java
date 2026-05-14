@@ -2,6 +2,7 @@ package com.pfe.case_management.service;
 
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;
+import com.pfe.case_management.enums.ExecutionMode;
 import com.pfe.case_management.enums.SlaStatus;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,11 +16,6 @@ import java.util.Set;
 
 @Service
 public class SlaTrackingService {
-
-    private static final Set<CaseStatus> ACTIVE_SLA_STATUSES = EnumSet.of(
-            CaseStatus.ASSIGNED_TO_TECH,
-            CaseStatus.NOT_REACHABLE
-    );
 
     private static final Set<SlaStatus> TERMINAL_SLA_STATUSES = EnumSet.of(
             SlaStatus.COMPLETED_ON_TIME,
@@ -152,13 +148,36 @@ public class SlaTrackingService {
             return false;
         }
 
-        if (!ACTIVE_SLA_STATUSES.contains(caseEntity.getStatus())) {
+        if (!isSlaTrackedState(caseEntity)) {
             return false;
         }
 
-        Instant start = caseEntity.getDateAffectationTech() != null ? caseEntity.getDateAffectationTech() : now;
+        Instant start = resolveSlaStart(caseEntity, now);
         startRdvSla(caseEntity, start);
         return true;
+    }
+
+    private boolean isSlaTrackedState(CaseEntity caseEntity) {
+        if (caseEntity == null || caseEntity.getStatus() == null) {
+            return false;
+        }
+
+        if (caseEntity.getStatus() == CaseStatus.ASSIGNED_TO_TECH || caseEntity.getStatus() == CaseStatus.NOT_REACHABLE) {
+            return true;
+        }
+
+        return caseEntity.getStatus() == CaseStatus.ASSIGNED_TO_STT
+                && caseEntity.getExecutionMode() == ExecutionMode.STT_SELF_EXECUTION;
+    }
+
+    private Instant resolveSlaStart(CaseEntity caseEntity, Instant fallback) {
+        if (caseEntity != null && caseEntity.getExecutionMode() == ExecutionMode.STT_SELF_EXECUTION) {
+            return caseEntity.getDateAffectationStt() != null ? caseEntity.getDateAffectationStt() : fallback;
+        }
+
+        return caseEntity != null && caseEntity.getDateAffectationTech() != null
+                ? caseEntity.getDateAffectationTech()
+                : fallback;
     }
 
     private SlaStatus computeCurrentStatus(SlaTrackingInfo info, Instant now) {

@@ -1,5 +1,6 @@
 package com.pfe.activation_analytics.entity;
 
+import com.pfe.case_management.enums.CaseType;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -39,6 +40,7 @@ public class ActivationAnalyticsImportBatchEntity {
     @Indexed
     private Instant uploadedAt;
 
+    private CaseType caseType;
     private String fileName;
     private Integer totalRows;
     private Integer insertedRows;

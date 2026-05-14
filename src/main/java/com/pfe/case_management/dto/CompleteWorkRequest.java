@@ -1,6 +1,9 @@
 package com.pfe.case_management.dto;
 
+import jakarta.validation.Valid;
+
 import java.time.Instant;
+import java.util.List;
 
 public record CompleteWorkRequest(
         String repTravauxStt,
@@ -10,12 +13,13 @@ public record CompleteWorkRequest(
         Integer nombrePv,
         Double debitDl,
         Double debitUl,
-        Integer rsrp,
-        Integer rsrq,
-        Integer sinr,
+        Double rsrp,
+        Double rsrq,
+        Double sinr,
         Double locationLatitude,
         Double locationLongitude,
         Instant locationCapturedAt,
-        Double locationAccuracyMeters
+        Double locationAccuracyMeters,
+        @Valid List<UsedEquipmentRequestItem> usedEquipment
 ) {
 }

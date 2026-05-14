@@ -60,8 +60,20 @@ public class SecurityConfig {
                         "/swagger-ui/**",
                         "/swagger-ui.html",
                         "/v3/api-docs/**",
-                        "/error"
+                        "/error",
+                        "/api/v1/ocr/**"
                 ).permitAll()
+                // Stock management endpoints
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/stock/equipment/**").authenticated()
+                .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/stock/equipment/**").hasRole("ADMIN")
+                .requestMatchers(org.springframework.http.HttpMethod.PUT, "/api/v1/stock/equipment/**").hasRole("ADMIN")
+                .requestMatchers(org.springframework.http.HttpMethod.DELETE, "/api/v1/stock/equipment/**").hasRole("ADMIN")
+                .requestMatchers("/api/v1/stock/admin/**").hasRole("ADMIN")
+                .requestMatchers("/api/v1/stock/zm/**").hasRole("ZM")
+                .requestMatchers("/api/v1/stock/stt/**").hasRole("STT")
+                .requestMatchers("/api/v1/stock/tech/**").hasRole("TECH")
+                .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/stock/dpms").hasRole("ZM")
+                .requestMatchers("/api/v1/stock/dpms/**").authenticated()
                 .anyRequest().authenticated()
         );
 

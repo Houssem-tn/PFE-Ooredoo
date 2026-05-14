@@ -42,8 +42,10 @@ public class ZmPerformanceAnalyticsService {
             String uploadedBy,
             String zoneManager,
             String governorate,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo
     ) {
         return loadStudy(
                 "live",
@@ -52,8 +54,10 @@ public class ZmPerformanceAnalyticsService {
                 null,
                 zoneManager,
                 governorate,
-                uploadedFrom,
-                uploadedTo
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo
         );
     }
 
@@ -62,8 +66,10 @@ public class ZmPerformanceAnalyticsService {
             String savedStudyId,
             String zoneManager,
             String governorate,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo
     ) {
         if (!TodoAnalyticsSupport.hasText(savedStudyId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Saved study id is required");
@@ -77,8 +83,10 @@ public class ZmPerformanceAnalyticsService {
                 savedStudyId.trim(),
                 zoneManager,
                 governorate,
-                uploadedFrom,
-                uploadedTo
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo
         );
     }
 
@@ -89,19 +97,24 @@ public class ZmPerformanceAnalyticsService {
             String savedStudyId,
             String zoneManager,
             String governorate,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo
     ) {
         long totalStart = System.nanoTime();
-        validateUploadedRange(uploadedFrom, uploadedTo);
+        validateDateRange("Open Date", openDateFrom, openDateTo);
+        validateDateRange("Affectation Date", affectationDateFrom, affectationDateTo);
 
         long optionsStart = System.nanoTime();
         List<String> availableZoneManagers = loadDistinctValues(
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 null,
                 "zoneManager"
         );
@@ -126,8 +139,10 @@ public class ZmPerformanceAnalyticsService {
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 normalizedSelectedZoneManager,
                 "gouvernorat"
         );
@@ -142,8 +157,10 @@ public class ZmPerformanceAnalyticsService {
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 normalizedSelectedZoneManager,
                 normalizedSelectedGovernorate
         );
@@ -151,8 +168,10 @@ public class ZmPerformanceAnalyticsService {
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 normalizedSelectedZoneManager,
                 normalizedSelectedGovernorate,
                 summary.totalCases()
@@ -161,8 +180,10 @@ public class ZmPerformanceAnalyticsService {
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 normalizedSelectedZoneManager,
                 normalizedSelectedGovernorate,
                 summary.totalCases()
@@ -234,8 +255,10 @@ public class ZmPerformanceAnalyticsService {
             String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo,
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo,
             String zoneManagerNormalized,
             String governorateNormalized
     ) {
@@ -245,8 +268,10 @@ public class ZmPerformanceAnalyticsService {
                         uploadedBy,
                         sourceType,
                         savedStudyId,
-                        uploadedFrom,
-                        uploadedTo,
+                        openDateFrom,
+                        openDateTo,
+                        affectationDateFrom,
+                        affectationDateTo,
                         zoneManagerNormalized,
                         governorateNormalized
                 )),
@@ -279,8 +304,10 @@ public class ZmPerformanceAnalyticsService {
             String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo,
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo,
             String zoneManagerNormalized,
             String governorateNormalized,
             long totalCases
@@ -291,8 +318,10 @@ public class ZmPerformanceAnalyticsService {
                         uploadedBy,
                         sourceType,
                         savedStudyId,
-                        uploadedFrom,
-                        uploadedTo,
+                        openDateFrom,
+                        openDateTo,
+                        affectationDateFrom,
+                        affectationDateTo,
                         zoneManagerNormalized,
                         governorateNormalized
                 )),
@@ -323,8 +352,10 @@ public class ZmPerformanceAnalyticsService {
             String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo,
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo,
             String zoneManagerNormalized,
             String governorateNormalized,
             long totalCases
@@ -334,8 +365,10 @@ public class ZmPerformanceAnalyticsService {
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 zoneManagerNormalized,
                 governorateNormalized
         );
@@ -486,8 +519,10 @@ public class ZmPerformanceAnalyticsService {
             String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo,
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo,
             String zoneManagerNormalized,
             String fieldName
     ) {
@@ -495,8 +530,10 @@ public class ZmPerformanceAnalyticsService {
                 uploadedBy,
                 sourceType,
                 savedStudyId,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 zoneManagerNormalized,
                 null
         ));
@@ -530,8 +567,10 @@ public class ZmPerformanceAnalyticsService {
             String uploadedBy,
             ImportedTodoSourceType sourceType,
             String savedStudyId,
-            LocalDate uploadedFrom,
-            LocalDate uploadedTo,
+            LocalDate openDateFrom,
+            LocalDate openDateTo,
+            LocalDate affectationDateFrom,
+            LocalDate affectationDateTo,
             String zoneManagerNormalized,
             String governorateNormalized
     ) {
@@ -544,15 +583,26 @@ public class ZmPerformanceAnalyticsService {
             criteria.add(Criteria.where("savedStudyId").is(savedStudyId.trim()));
         }
 
-        if (uploadedFrom != null || uploadedTo != null) {
-            Criteria uploadedAtCriteria = Criteria.where("uploadedAt");
-            if (uploadedFrom != null) {
-                uploadedAtCriteria = uploadedAtCriteria.gte(uploadedFrom.atStartOfDay().toInstant(ZoneOffset.UTC));
+        if (openDateFrom != null || openDateTo != null) {
+            Criteria openDateCriteria = Criteria.where("openDateSurTimosDate");
+            if (openDateFrom != null) {
+                openDateCriteria = openDateCriteria.gte(openDateFrom);
             }
-            if (uploadedTo != null) {
-                uploadedAtCriteria = uploadedAtCriteria.lte(uploadedTo.plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC).minusNanos(1));
+            if (openDateTo != null) {
+                openDateCriteria = openDateCriteria.lte(openDateTo);
             }
-            criteria.add(uploadedAtCriteria);
+            criteria.add(openDateCriteria);
+        }
+
+        if (affectationDateFrom != null || affectationDateTo != null) {
+            Criteria affectationDateCriteria = Criteria.where("dateAffectationSttDate");
+            if (affectationDateFrom != null) {
+                affectationDateCriteria = affectationDateCriteria.gte(affectationDateFrom);
+            }
+            if (affectationDateTo != null) {
+                affectationDateCriteria = affectationDateCriteria.lte(affectationDateTo);
+            }
+            criteria.add(affectationDateCriteria);
         }
 
         if (TodoAnalyticsSupport.hasText(zoneManagerNormalized)) {
@@ -575,9 +625,9 @@ public class ZmPerformanceAnalyticsService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Saved study was not found"));
     }
 
-    private void validateUploadedRange(LocalDate uploadedFrom, LocalDate uploadedTo) {
-        if (uploadedFrom != null && uploadedTo != null && uploadedTo.isBefore(uploadedFrom)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Uploaded To date must be on or after Uploaded From date");
+    private void validateDateRange(String label, LocalDate from, LocalDate to) {
+        if (from != null && to != null && to.isBefore(from)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, label + " To date must be on or after " + label + " From date");
         }
     }
 

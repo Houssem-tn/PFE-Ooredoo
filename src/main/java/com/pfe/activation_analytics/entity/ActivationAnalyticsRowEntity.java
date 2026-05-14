@@ -1,5 +1,6 @@
 package com.pfe.activation_analytics.entity;
 
+import com.pfe.case_management.enums.CaseType;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -62,6 +63,7 @@ public class ActivationAnalyticsRowEntity {
     private Integer rowNumber;
     private Boolean validRow;
     private List<String> validationIssues;
+    private CaseType caseType;
 
     private String crmCase;
 

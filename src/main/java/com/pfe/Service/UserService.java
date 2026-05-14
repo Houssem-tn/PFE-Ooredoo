@@ -8,6 +8,7 @@ import com.pfe.case_management.dto.PerformanceSummaryResponse;
 import com.pfe.case_management.service.CaseAnalyticsService;
 import com.pfe.exception.NotFoundException;
 import com.pfe.mapper.UserMapper;
+import com.pfe.support.TunisiaGovernorateSupport;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -23,34 +24,6 @@ import java.util.Set;
 
 @Service
 public class UserService {
-    private static final List<String> TUNISIA_GOVERNORATES = List.of(
-            "Tunis",
-            "Ariana",
-            "Ben Arous",
-            "Mannouba",
-            "Nabeul",
-            "Zaghouan",
-            "Bizerte",
-            "B\u00E9ja",
-            "Jendouba",
-            "Le Kef",
-            "Siliana",
-            "Sousse",
-            "Monastir",
-            "Mahdia",
-            "Sfax",
-            "Kairouan",
-            "Kasserine",
-            "Sidi Bouzid",
-            "Gab\u00E8s",
-            "M\u00E9denine",
-            "Tataouine",
-            "Gafsa",
-            "Tozeur",
-            "K\u00E9bili"
-    );
-    private static final Set<String> TUNISIA_GOVERNORATE_SET = Set.copyOf(TUNISIA_GOVERNORATES);
-
     private final UserRepository repo;
     private final UserMapper mapper;
     private final PasswordEncoder encoder;
@@ -149,6 +122,7 @@ public class UserService {
 
         if (req.role() != null) u.setRole(req.role());
         if (req.enabled() != null) u.setEnabled(req.enabled());
+        if (req.canCreateDpm() != null) u.setCanCreateDpm(req.canCreateDpm());
 
         if (req.password() != null && !req.password().isBlank()) {
             u.setPassword(encoder.encode(req.password()));
@@ -248,6 +222,17 @@ public class UserService {
 
         return repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(UserRole.ROLE_TECH, sttId)
                 .stream()
+                .map(mapper::toDto)
+                .toList();
+    }
+
+    public List<UserDTO> findMyTechs(String sttEmail) {
+        AppUser stt = repo.findByEmail(sttEmail.toLowerCase())
+                .orElseThrow(() -> new NotFoundException("STT not found: " + sttEmail));
+
+        return repo.findByRoleAndAssignedSttIdOrderByCreatedAtDesc(UserRole.ROLE_TECH, stt.getId())
+                .stream()
+                .filter(u -> u.getStatus() == AccountStatus.APPROVED && u.isEnabled())
                 .map(mapper::toDto)
                 .toList();
     }
@@ -566,8 +551,6 @@ public class UserService {
 
     private boolean hasGovernorateOverlap(List<String> left, List<String> right) {
         Set<String> leftSet = safeGovernorates(left).stream()
-                .map(String::trim)
-                .filter(value -> !value.isBlank())
                 .collect(LinkedHashSet::new, Set::add, Set::addAll);
 
         if (leftSet.isEmpty()) {
@@ -575,13 +558,11 @@ public class UserService {
         }
 
         return safeGovernorates(right).stream()
-                .map(String::trim)
-                .filter(value -> !value.isBlank())
                 .anyMatch(leftSet::contains);
     }
 
     private List<String> safeGovernorates(List<String> governorates) {
-        return governorates == null ? List.of() : governorates;
+        return TunisiaGovernorateSupport.normalizeStoredValues(governorates);
     }
 
     private List<String> normalizeGovernoratesAllowEmpty(List<String> governorates) {
@@ -589,15 +570,7 @@ public class UserService {
             return List.of();
         }
 
-        LinkedHashSet<String> requestedGovernorates = new LinkedHashSet<>();
-        for (String governorate : governorates) {
-            if (!hasText(governorate)) {
-                throw new IllegalArgumentException("Governorate names cannot be blank");
-            }
-            requestedGovernorates.add(governorate.trim());
-        }
-
-        return orderGovernorates(requestedGovernorates);
+        return TunisiaGovernorateSupport.normalizeSelection(governorates);
     }
 
     private List<String> normalizeGovernoratesRequireSelection(List<String> governorates) {
@@ -613,23 +586,7 @@ public class UserService {
             return List.of();
         }
 
-        LinkedHashSet<String> selectedGovernorates = new LinkedHashSet<>();
-        for (String governorate : governorates) {
-            if (!hasText(governorate)) {
-                throw new IllegalArgumentException("Governorate names cannot be blank");
-            }
-
-            String normalizedGovernorate = governorate.trim();
-            if (!TUNISIA_GOVERNORATE_SET.contains(normalizedGovernorate)) {
-                throw new IllegalArgumentException("Unsupported governorate: " + normalizedGovernorate);
-            }
-
-            selectedGovernorates.add(normalizedGovernorate);
-        }
-
-        return TUNISIA_GOVERNORATES.stream()
-                .filter(selectedGovernorates::contains)
-                .toList();
+        return TunisiaGovernorateSupport.normalizeSelection(governorates);
     }
 
     private void ensureGovernoratesHaveOwningZm(Collection<String> governorates) {

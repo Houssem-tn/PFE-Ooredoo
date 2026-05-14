@@ -3,7 +3,10 @@ package com.pfe.Notification;
 import com.pfe.Dto.NotificationMessageDto;
 import com.pfe.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
+import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.model.SlaTrackingInfo;
+import com.pfe.stock_management.entity.DpmRequest;
+import com.pfe.stock_management.entity.SttDistribution;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -40,7 +43,7 @@ public class NotificationPayloadFactory {
         return buildCasePayload(
                 "CASE_ASSIGNED_TO_ZM",
                 "New case assigned by Admin",
-                "Activation case " + safe(caseEntity.getCrmCase()) + " has been assigned to you as ZM",
+                caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as ZM",
                 caseEntity,
                 triggeredBy,
                 "ROLE_ZM"
@@ -51,7 +54,7 @@ public class NotificationPayloadFactory {
         return buildCasePayload(
                 "CASE_ASSIGNED_TO_STT",
                 "New case assigned by ZM",
-                "Activation case " + safe(caseEntity.getCrmCase()) + " has been assigned to you as STT",
+                caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as STT",
                 caseEntity,
                 triggeredBy,
                 "ROLE_STT"
@@ -62,11 +65,39 @@ public class NotificationPayloadFactory {
         return buildCasePayload(
                 "CASE_ASSIGNED_TO_TECH",
                 "New case assigned by STT",
-                "Activation case " + safe(caseEntity.getCrmCase()) + " has been assigned to you as TECH",
+                caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as TECH",
                 caseEntity,
                 triggeredBy,
                 "ROLE_TECH"
         );
+    }
+
+    public NotificationMessageDto buildComplaintImportCompleted(
+            String triggeredBy,
+            int processedRows,
+            int importedRows,
+            int skippedRows
+    ) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("caseType", CaseType.PLAINTE.name());
+        data.put("processedRows", processedRows);
+        data.put("importedRows", importedRows);
+        data.put("skippedRows", skippedRows);
+        data.put("routeHint", "/admin/cases/complaint");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("COMPLAINT_IMPORT_COMPLETED");
+        dto.setTitle("Plainte import completed");
+        dto.setMessage("Plainte import completed: " + processedRows + " rows processed, "
+                + importedRows + " imported, " + skippedRows + " skipped.");
+        dto.setEntityType("CASE_IMPORT");
+        dto.setEntityId(null);
+        dto.setStatus("COMPLETED");
+        dto.setTriggeredBy(triggeredBy);
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+
+        return dto;
     }
 
     public NotificationMessageDto buildSlaWarning(CaseEntity caseEntity) {
@@ -155,7 +186,9 @@ public class NotificationPayloadFactory {
         data.put("caseType", caseEntity.getType() != null ? caseEntity.getType().name() : null);
         data.put("caseStatus", caseEntity.getStatus() != null ? caseEntity.getStatus().name() : null);
         data.put("assigneeRole", assigneeRole);
-        data.put("routeHint", "/cases/activation");
+        data.put("executorRole", caseEntity.getExecutorRole() != null ? caseEntity.getExecutorRole().name() : null);
+        data.put("executionMode", caseEntity.getExecutionMode() != null ? caseEntity.getExecutionMode().name() : null);
+        data.put("routeHint", routeHint(caseEntity));
 
         NotificationMessageDto dto = new NotificationMessageDto();
         dto.setEventType(eventType);
@@ -171,7 +204,112 @@ public class NotificationPayloadFactory {
         return dto;
     }
 
+    public NotificationMessageDto buildDpmCreated(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("zmName", dpm.getZmName());
+        data.put("itemCount", dpm.getItems() != null ? dpm.getItems().size() : 0);
+        data.put("routeHint", "/stt/stock/incoming-dpms");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_CREATED");
+        dto.setTitle("New DPM request received");
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " from ZM " + safe(dpm.getZmName()) + " is awaiting your confirmation");
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus(dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        dto.setTriggeredBy(dpm.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildDpmConfirmed(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("sttName", dpm.getSttName());
+        data.put("status", dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        data.put("routeHint", "/zm/stock/my-tracking");
+
+        String statusLabel = dpm.getStatus() != null && dpm.getStatus().name().contains("PARTIAL")
+                ? "partially confirmed" : "fully confirmed";
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_CONFIRMED");
+        dto.setTitle("DPM " + statusLabel);
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " has been " + statusLabel + " by STT " + safe(dpm.getSttName()));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus(dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        dto.setTriggeredBy(dpm.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildDpmRejected(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("sttName", dpm.getSttName());
+        data.put("routeHint", "/zm/stock/my-tracking");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_REJECTED");
+        dto.setTitle("DPM rejected");
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " has been rejected by STT " + safe(dpm.getSttName()));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus("REJECTED");
+        dto.setTriggeredBy(dpm.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildStockDistributed(SttDistribution distribution) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("distributionId", distribution.getId());
+        data.put("sttId", distribution.getSttId());
+        data.put("itemCount", distribution.getItems() != null ? distribution.getItems().size() : 0);
+        data.put("routeHint", "/tech/stock/my-stock");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("STOCK_DISTRIBUTED");
+        dto.setTitle("Stock received from STT");
+        dto.setMessage("Equipment has been distributed to you by your STT");
+        dto.setEntityType("DISTRIBUTION");
+        dto.setEntityId(distribution.getId());
+        dto.setStatus("DISTRIBUTED");
+        dto.setTriggeredBy(distribution.getDistributedBy());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
     private String safe(String value) {
         return value == null || value.isBlank() ? "-" : value;
+    }
+
+    private String caseLabel(CaseEntity caseEntity) {
+        if (caseEntity != null && caseEntity.getType() == CaseType.PLAINTE) {
+            return "Complaint case";
+        }
+
+        if (caseEntity != null && caseEntity.getType() == CaseType.RESILIATION) {
+            return "Resiliation case";
+        }
+
+        return "Activation case";
+    }
+
+    private String routeHint(CaseEntity caseEntity) {
+        if (caseEntity != null && caseEntity.getType() == CaseType.PLAINTE) {
+            return "/cases/complaint";
+        }
+
+        return "/cases/activation";
     }
 }

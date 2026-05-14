@@ -2,6 +2,7 @@ package com.pfe.case_management.service;
 
 import com.pfe.Entity.AccountStatus;
 import com.pfe.Entity.AppUser;
+import com.pfe.Entity.CaseModuleType;
 import com.pfe.Entity.FileEntityType;
 import com.pfe.Entity.FileMetadata;
 import com.pfe.Entity.FileRole;
@@ -12,33 +13,46 @@ import com.pfe.Service.NotificationEventService;
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
 import com.pfe.case_management.dto.CaseProofFileResponse;
+import com.pfe.case_management.dto.ComplaintDiagnosisRequest;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
+import com.pfe.case_management.dto.ReopenComplaintRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
 import com.pfe.case_management.dto.ValidateZmRequest;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.case_management.enums.ComplaintCategory;
+import com.pfe.case_management.enums.ExecutionMode;
+import com.pfe.case_management.enums.ExecutorRole;
+import com.pfe.case_management.enums.ResolutionValidationStatus;
 import com.pfe.case_management.enums.SlaStatus;
+import com.pfe.case_management.model.ComplaintDiagnosisInfo;
+import com.pfe.case_management.model.ComplaintResolutionInfo;
 import com.pfe.case_management.model.RdvInfo;
+import com.pfe.case_management.model.CaseTimelineEvent;
 import com.pfe.case_management.model.TechnicalMetrics;
+import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.model.ZmValidation;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.stock_management.service.SttStockService;
+import com.pfe.support.TunisiaGovernorateSupport;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -47,63 +61,93 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class CaseService {
-    private static final List<String> TUNISIA_GOVERNORATES = List.of(
-            "Tunis",
-            "Ariana",
-            "Ben Arous",
-            "Mannouba",
-            "Nabeul",
-            "Zaghouan",
-            "Bizerte",
-            "B\u00E9ja",
-            "Jendouba",
-            "Le Kef",
-            "Siliana",
-            "Sousse",
-            "Monastir",
-            "Mahdia",
-            "Sfax",
-            "Kairouan",
-            "Kasserine",
-            "Sidi Bouzid",
-            "Gab\u00E8s",
-            "M\u00E9denine",
-            "Tataouine",
-            "Gafsa",
-            "Tozeur",
-            "K\u00E9bili"
-    );
-    private static final Set<String> TUNISIA_GOVERNORATE_SET = Set.copyOf(TUNISIA_GOVERNORATES);
-
     private static final Set<CaseStatus> ASSIGN_STT_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_ZM,
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.REJECTED_BY_ZM
     );
 
+    private static final Set<CaseStatus> COMPLAINT_ASSIGN_STT_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_ZM,
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.RETURNED_TO_STT,
+        CaseStatus.REOPENED,
+        CaseStatus.ESCALATED
+    );
+
     private static final Set<CaseStatus> ASSIGN_TECH_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
         CaseStatus.NOT_REACHABLE,
         CaseStatus.REJECTED_BY_ZM
     );
 
+    private static final Set<CaseStatus> COMPLAINT_ASSIGN_TECH_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.DIAGNOSIS_STEP,
+        CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RETURNED_TO_STT,
+        CaseStatus.REOPENED
+    );
+
+    private static final Set<CaseStatus> SELF_EXECUTION_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
+        CaseStatus.NOT_REACHABLE,
+        CaseStatus.REJECTED_BY_ZM
+    );
+
+    private static final Set<CaseStatus> COMPLAINT_SELF_EXECUTION_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.DIAGNOSIS_STEP,
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.RETURNED_TO_STT,
+        CaseStatus.REOPENED
+    );
+
     private static final Set<CaseStatus> SET_RDV_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RDV_SET,
         CaseStatus.NOT_REACHABLE
     );
 
+    private static final Set<CaseStatus> COMPLAINT_SET_RDV_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.NOT_REACHABLE,
+        CaseStatus.DIAGNOSIS_STEP
+    );
+
     private static final Set<CaseStatus> COMPLETE_WORK_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RDV_SET
     );
 
+    private static final Set<CaseStatus> COMPLAINT_COMPLETE_WORK_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.DIAGNOSIS_STEP,
+        CaseStatus.RETURNED_TO_STT,
+        CaseStatus.REOPENED
+    );
+
     private static final Set<CaseStatus> WORK_PROOF_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RDV_SET,
         CaseStatus.WORK_DONE,
         CaseStatus.REJECTED_BY_ZM,
+        CaseStatus.VALIDATED_BY_ZM
+    );
+
+    private static final Set<CaseStatus> COMPLAINT_WORK_PROOF_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,
+        CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.DIAGNOSIS_STEP,
+        CaseStatus.RESOLUTION_SUBMITTED,
+        CaseStatus.RETURNED_TO_STT,
         CaseStatus.VALIDATED_BY_ZM
     );
 
@@ -114,6 +158,7 @@ public class CaseService {
     private final CaseTimelineService caseTimelineService;
     private final FileStorageService fileStorageService;
     private final CasePdfExportService casePdfExportService;
+    private final SttStockService sttStockService;
 
     public CaseEntity createCase(CreateCaseRequest request) {
         ensureCurrentUserHasRole("ROLE_ADMIN");
@@ -124,7 +169,7 @@ public class CaseService {
 
         Instant now = Instant.now();
         String governorate = normalizeGovernorate(request.gouvernorat());
-        AppUser ownerZm = resolveOwnerZm(governorate);
+        AppUser ownerZm = resolveOwnerZm(governorate, request.type());
 
         CaseEntity entity = CaseEntity.builder()
                 .type(request.type())
@@ -159,7 +204,7 @@ public class CaseService {
                 entity,
                 CaseTimelineEventType.CASE_CREATED,
                 "Case created",
-                "New activation case captured from CRM",
+                "New " + caseTypeLabel(entity.getType()).toLowerCase() + " captured from CRM",
                 getCurrentUsername(),
                 null,
                 entity.getStatus(),
@@ -197,6 +242,7 @@ public class CaseService {
             scoped = repository.findByType(type);
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -204,6 +250,7 @@ public class CaseService {
             scoped = repository.findByTypeAndZmEmailIgnoreCase(type, getCurrentUsername());
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -211,6 +258,7 @@ public class CaseService {
             scoped = repository.findByTypeAndSttEmailIgnoreCase(type, getCurrentUsername());
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -218,6 +266,7 @@ public class CaseService {
             scoped = repository.findByTypeAndTechEmailIgnoreCase(type, getCurrentUsername());
             enrichSlaReadValues(scoped);
             enrichWorkProofReadValues(scoped);
+            sanitizeCaseListForCurrentViewer(scoped);
             return scoped;
         }
 
@@ -230,7 +279,7 @@ public class CaseService {
         if (currentUserHasRole("ROLE_ADMIN")) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         String current = getCurrentUsername();
@@ -238,19 +287,19 @@ public class CaseService {
         if (currentUserHasRole("ROLE_ZM") && equalsIgnoreCase(c.getZmEmail(), current)) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         if (currentUserHasRole("ROLE_STT") && equalsIgnoreCase(c.getSttEmail(), current)) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         if (currentUserHasRole("ROLE_TECH") && equalsIgnoreCase(c.getTechEmail(), current)) {
             slaTrackingService.refreshLiveState(c, Instant.now());
             enrichWorkProofReadValues(c);
-            return c;
+            return sanitizeCaseForCurrentViewer(c);
         }
 
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to access this case");
@@ -274,7 +323,7 @@ public class CaseService {
         ensureCurrentUserCanActAsAssignedZm(c);
         ensureStatusIn(
             c,
-            ASSIGN_STT_ALLOWED_STATUSES,
+            assignSttAllowedStatuses(c),
             "Case cannot be assigned to STT in current state"
         );
 
@@ -304,7 +353,7 @@ public class CaseService {
         c.setDateAffectationStt(Instant.now());
 
         if (sttChanged) {
-            clearTechAssignment(c);
+            resetExecutionState(c);
         }
 
         c.setStatus(CaseStatus.ASSIGNED_TO_STT);
@@ -328,7 +377,7 @@ public class CaseService {
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
         notificationEventService.onCaseAssignedToStt(saved, triggeredBy);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity assignToTech(String caseId, AssignTechRequest request) {
@@ -339,9 +388,13 @@ public class CaseService {
         ensureCurrentUserCanActAsAssignedStt(c);
         ensureStatusIn(
             c,
-            ASSIGN_TECH_ALLOWED_STATUSES,
+            assignTechAllowedStatuses(c),
             "Case cannot be assigned to TECH in current state"
         );
+
+        if (isComplaint(c)) {
+            ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before TECH assignment");
+        }
 
         if (isBlank(c.getSttId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must be assigned to an STT first");
@@ -363,11 +416,22 @@ public class CaseService {
         c.setTechId(tech.getId());
         c.setTechEmail(tech.getEmail());
         c.setTechName(tech.getFullName());
-        c.setDateAffectationTech(Instant.now());
+        Instant assignmentTime = Instant.now();
+        c.setDateAffectationTech(assignmentTime);
+        c.setExecutorId(tech.getId());
+        c.setExecutorRole(ExecutorRole.TECH);
+        c.setExecutionMode(ExecutionMode.TECH_EXECUTION);
 
-        c.setStatus(CaseStatus.ASSIGNED_TO_TECH);
-        c.setUpdatedAt(Instant.now());
-        slaTrackingService.startRdvSla(c, c.getDateAffectationTech());
+        boolean preserveProgressState = previousStatus == CaseStatus.RDV_SET || previousStatus == CaseStatus.NOT_REACHABLE;
+        boolean startRdvSla = !isComplaintDiagnosisDrivenExecution(c, previousStatus);
+        if (!preserveProgressState) {
+            c.setStatus(CaseStatus.ASSIGNED_TO_TECH);
+            if (startRdvSla) {
+                slaTrackingService.startRdvSla(c, assignmentTime);
+            }
+        }
+
+        c.setUpdatedAt(assignmentTime);
 
         caseTimelineService.append(
             c,
@@ -379,14 +443,74 @@ public class CaseService {
             c.getStatus(),
             timelineData(
                 "assigneeRole", "ROLE_TECH",
-                "assigneeEmail", c.getTechEmail()
+                "assigneeEmail", c.getTechEmail(),
+                "executorRole", ExecutorRole.TECH.name(),
+                "executionMode", ExecutionMode.TECH_EXECUTION.name()
             )
         );
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
         notificationEventService.onCaseAssignedToTech(saved, triggeredBy);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
+    }
+
+    public CaseEntity executeMyself(String caseId) {
+        CaseEntity c = getCaseOrThrow(caseId);
+        String triggeredBy = getCurrentUsername();
+        CaseStatus previousStatus = c.getStatus();
+
+        ensureCurrentUserCanActAsAssignedStt(c);
+        ensureStatusIn(
+                c,
+                selfExecutionAllowedStatuses(c),
+                "Case cannot switch to STT self-execution in current state"
+        );
+
+        if (isComplaint(c)) {
+            ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before STT self-execution");
+        }
+
+        if (isBlank(c.getSttId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must be assigned to an STT first");
+        }
+
+        Instant switchTime = Instant.now();
+        clearTechAssignment(c);
+        c.setExecutorId(c.getSttId());
+        c.setExecutorRole(ExecutorRole.STT);
+        c.setExecutionMode(ExecutionMode.STT_SELF_EXECUTION);
+
+        boolean preserveProgressState = previousStatus == CaseStatus.RDV_SET || previousStatus == CaseStatus.NOT_REACHABLE;
+        boolean startRdvSla = !isComplaintDiagnosisDrivenExecution(c, previousStatus);
+        if (!preserveProgressState) {
+            c.setStatus(CaseStatus.ASSIGNED_TO_STT);
+            if (startRdvSla) {
+                slaTrackingService.startRdvSla(c, switchTime);
+            }
+        }
+
+        c.setUpdatedAt(switchTime);
+
+        caseTimelineService.append(
+                c,
+                CaseTimelineEventType.ASSIGNMENT_UPDATED,
+                "Execution switched to STT",
+                "Assigned STT " + safe(c.getSttName(), c.getSttEmail()) + " will execute this case directly",
+                triggeredBy,
+                previousStatus,
+                c.getStatus(),
+                timelineData(
+                        "assigneeRole", "ROLE_STT",
+                        "assigneeEmail", c.getSttEmail(),
+                        "executorRole", ExecutorRole.STT.name(),
+                        "executionMode", ExecutionMode.STT_SELF_EXECUTION.name()
+                )
+        );
+
+        CaseEntity saved = repository.save(c);
+        enrichWorkProofReadValues(saved);
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity setRdv(String caseId, SetRdvRequest request) {
@@ -394,15 +518,9 @@ public class CaseService {
         String actor = getCurrentUsername();
         CaseStatus previousStatus = c.getStatus();
 
-        if (currentUserHasRole("ROLE_STT")) {
-            ensureCurrentUserCanActAsAssignedStt(c);
-        } else if (currentUserHasRole("ROLE_TECH")) {
-            ensureCurrentUserCanActAsAssignedTech(c);
-        } else if (!currentUserHasRole("ROLE_ADMIN")) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
-        }
+        ensureCurrentUserCanExecuteCase(c);
 
-        ensureStatusIn(c, SET_RDV_ALLOWED_STATUSES, "RDV update is not allowed in current state");
+        ensureStatusIn(c, setRdvAllowedStatuses(c), "RDV update is not allowed in current state");
 
         RdvInfo rdv = new RdvInfo();
         rdv.setJoignable(request.joignable());
@@ -427,7 +545,7 @@ public class CaseService {
                 triggerImmediateBreachNotification = true;
             }
         } else {
-            c.setStatus(CaseStatus.RDV_SET);
+            c.setStatus(isComplaint(c) ? CaseStatus.DIAGNOSIS_STEP : CaseStatus.RDV_SET);
             Instant rdvSetAt = Instant.now();
             slaTrackingService.completeOnRdv(c, rdvSetAt);
 
@@ -475,39 +593,61 @@ public class CaseService {
             notificationEventService.onSlaBreached(saved);
         }
 
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
+    @Transactional
     public CaseEntity completeWork(String caseId, CompleteWorkRequest request) {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
         CaseStatus previousStatus = c.getStatus();
+        Instant now = Instant.now();
 
-        if (currentUserHasRole("ROLE_TECH")) {
-            ensureCurrentUserCanActAsAssignedTech(c);
-        } else if (currentUserHasRole("ROLE_STT")) {
-            ensureCurrentUserCanActAsAssignedStt(c);
-        } else if (!currentUserHasRole("ROLE_ADMIN")) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
+        ensureCurrentUserCanExecuteCase(c);
+
+        ensureStatusIn(c, completeWorkAllowedStatuses(c), "Work completion is not allowed in current state");
+        if (isComplaint(c)) {
+            ensureComplaintRequiresFieldExecution(c, "Complaint work can only be submitted after a diagnosis requiring field intervention");
         }
-
-        ensureStatusIn(c, COMPLETE_WORK_ALLOWED_STATUSES, "Work completion is not allowed in current state");
         validateLocationSnapshot(
                 request.locationLatitude(),
                 request.locationLongitude(),
                 "Work submission location is invalid"
         );
 
-        WorkInfo work = new WorkInfo();
+        if (!isTechExecution(c) && request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Used equipment can only be submitted when the active executor is a technician"
+            );
+        }
+
+        AppUser executingTechnician = null;
+        List<UsedEquipmentItem> usedEquipment = List.of();
+        if (isTechExecution(c)) {
+            executingTechnician = resolveAssignedTechnician(c);
+            usedEquipment = sttStockService.syncCaseUsageForWorkSubmission(
+                    c,
+                    executingTechnician,
+                    request.usedEquipment(),
+                    actor
+            );
+        }
+
+        WorkInfo work = c.getWork() != null ? c.getWork() : new WorkInfo();
         work.setRepTravauxStt(request.repTravauxStt());
         work.setDateFinTrv(request.dateFinTrv());
         work.setCmtTrvStt(request.cmtTrvStt());
-        work.setUpdatedAt(Instant.now());
-        work.setUpdatedBy(getCurrentUsername());
+        work.setUpdatedAt(now);
+        work.setUpdatedBy(actor);
         work.setLocationLatitude(request.locationLatitude());
         work.setLocationLongitude(request.locationLongitude());
         work.setLocationCapturedAt(request.locationCapturedAt());
         work.setLocationAccuracyMeters(request.locationAccuracyMeters());
+        work.setUsedEquipment(usedEquipment);
+        work.setStockAppliedTechId(
+                executingTechnician != null && !usedEquipment.isEmpty() ? executingTechnician.getId() : null
+        );
 
         TechnicalMetrics metrics = new TechnicalMetrics();
         metrics.setMetrageCable(request.metrageCable());
@@ -520,8 +660,17 @@ public class CaseService {
 
         c.setWork(work);
         c.setMetrics(metrics);
-        c.setStatus(CaseStatus.WORK_DONE);
-        c.setUpdatedAt(Instant.now());
+        if (isComplaint(c)) {
+            ComplaintResolutionInfo resolution = ensureComplaintResolution(c);
+            resolution.setResolutionComment(trimToNull(request.cmtTrvStt()));
+            resolution.setSubmittedAt(now);
+            resolution.setSubmittedBy(actor);
+            resolution.setValidationStatus(ResolutionValidationStatus.PENDING);
+            c.setStatus(CaseStatus.RESOLUTION_SUBMITTED);
+        } else {
+            c.setStatus(CaseStatus.WORK_DONE);
+        }
+        c.setUpdatedAt(now);
 
         caseTimelineService.append(
             c,
@@ -539,11 +688,13 @@ public class CaseService {
                 "locationLatitude", request.locationLatitude(),
                 "locationLongitude", request.locationLongitude(),
                 "locationCapturedAt", request.locationCapturedAt(),
-                "locationAccuracyMeters", request.locationAccuracyMeters()
+                "locationAccuracyMeters", request.locationAccuracyMeters(),
+                "usedEquipmentCount", usedEquipment.size(),
+                "usedEquipmentQuantity", usedEquipment.stream().mapToInt(UsedEquipmentItem::getQuantity).sum()
             )
         );
 
-        return repository.save(c);
+        return sanitizeCaseForCurrentViewer(repository.save(c));
     }
 
     public CaseEntity uploadWorkProof(
@@ -558,15 +709,9 @@ public class CaseService {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
 
-        if (currentUserHasRole("ROLE_TECH")) {
-            ensureCurrentUserCanActAsAssignedTech(c);
-        } else if (currentUserHasRole("ROLE_STT")) {
-            ensureCurrentUserCanActAsAssignedStt(c);
-        } else if (!currentUserHasRole("ROLE_ADMIN")) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
-        }
+        ensureCurrentUserCanExecuteCase(c);
 
-        ensureStatusIn(c, WORK_PROOF_ALLOWED_STATUSES, "Work proof upload is not allowed in current state");
+        ensureStatusIn(c, workProofAllowedStatuses(c), "Work proof upload is not allowed in current state");
         validateLocationSnapshot(latitude, longitude, "Work proof location is invalid");
 
         FileMetadata metadata = fileStorageService.upload(
@@ -604,16 +749,26 @@ public class CaseService {
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
+    @Transactional
     public CaseEntity validateByZm(String caseId, ValidateZmRequest request) {
         CaseEntity c = getCaseOrThrow(caseId);
         String actor = getCurrentUsername();
         CaseStatus previousStatus = c.getStatus();
 
         ensureCurrentUserCanActAsAssignedZm(c);
-        ensureStatusIn(c, EnumSet.of(CaseStatus.WORK_DONE), "ZM validation is only allowed after work completion");
+        ensureStatusIn(c, validateByZmAllowedStatuses(c), "ZM validation is only allowed after work completion");
+
+        if (!Boolean.TRUE.equals(request.approved())) {
+            sttStockService.releaseCaseUsageReservation(
+                    c,
+                    actor,
+                    "zm_rejected_before_final_validation",
+                    true
+            );
+        }
 
         ZmValidation validation = new ZmValidation();
         validation.setApproved(Boolean.TRUE.equals(request.approved()));
@@ -626,7 +781,19 @@ public class CaseService {
         if (Boolean.TRUE.equals(request.approved())) {
             c.setStatus(CaseStatus.VALIDATED_BY_ZM);
         } else {
-            c.setStatus(CaseStatus.REJECTED_BY_ZM);
+            c.setStatus(isComplaint(c) ? CaseStatus.RETURNED_TO_STT : CaseStatus.REJECTED_BY_ZM);
+        }
+
+        if (isComplaint(c)) {
+            ComplaintResolutionInfo resolution = ensureComplaintResolution(c);
+            resolution.setValidatedAt(Instant.now());
+            resolution.setValidatedBy(actor);
+            resolution.setValidationStatus(Boolean.TRUE.equals(request.approved())
+                    ? ResolutionValidationStatus.APPROVED
+                    : ResolutionValidationStatus.RETURNED_TO_STT);
+            if (Boolean.TRUE.equals(request.approved())) {
+                resolution.setResolutionComment(firstNonBlank(request.comment(), resolution.getResolutionComment()));
+            }
         }
 
         c.setUpdatedAt(Instant.now());
@@ -644,7 +811,7 @@ public class CaseService {
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     public CaseEntity closeCase(String caseId) {
@@ -677,7 +844,137 @@ public class CaseService {
 
         CaseEntity saved = repository.save(c);
         enrichWorkProofReadValues(saved);
-        return saved;
+        return sanitizeCaseForCurrentViewer(saved);
+    }
+
+    public CaseEntity submitComplaintDiagnosis(String caseId, ComplaintDiagnosisRequest request) {
+        CaseEntity c = getCaseOrThrow(caseId);
+        ensureComplaintCase(c);
+
+        String actor = getCurrentUsername();
+        CaseStatus previousStatus = c.getStatus();
+        Instant now = Instant.now();
+
+        ensureCurrentUserCanActAsAssignedStt(c);
+        ensureStatusIn(
+                c,
+                EnumSet.of(
+                        CaseStatus.ASSIGNED_TO_STT,
+                        CaseStatus.DIAGNOSIS_STEP,
+                        CaseStatus.RETURNED_TO_STT,
+                        CaseStatus.REOPENED
+                ),
+                "Diagnosis is not allowed in the current complaint state"
+        );
+
+        if (!hasCompletedComplaintRdv(c)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Diagnosis is only available after the complaint RDV step");
+        }
+
+        ComplaintDiagnosisInfo diagnosis = ComplaintDiagnosisInfo.builder()
+                .complaintCategory(request.complaintCategory())
+                .rootCause(trimToNull(request.rootCause()))
+                .diagnosisComment(trimToNull(request.diagnosisComment()))
+                .requiresFieldWork(request.requiresFieldWork())
+                .requiresTechIntervention(request.requiresTechIntervention())
+                .requiresEscalation(request.requiresEscalation())
+                .diagnosedAt(now)
+                .diagnosedBy(actor)
+                .build();
+
+        c.setDiagnosis(diagnosis);
+
+        if (request.requiresEscalation()) {
+            clearTechAssignment(c);
+            clearExecutionDecision(c);
+            c.setStatus(CaseStatus.ESCALATED);
+        } else if (!request.requiresFieldWork() && !request.requiresTechIntervention()) {
+            ComplaintResolutionInfo resolution = ensureComplaintResolution(c);
+            resolution.setResolutionComment(trimToNull(request.diagnosisComment()));
+            resolution.setSubmittedAt(now);
+            resolution.setSubmittedBy(actor);
+            resolution.setValidationStatus(ResolutionValidationStatus.PENDING);
+            c.setStatus(CaseStatus.RESOLUTION_SUBMITTED);
+        } else {
+            if (request.requiresTechIntervention()) {
+                clearTechAssignment(c);
+                clearExecutionDecision(c);
+            }
+            c.setStatus(CaseStatus.DIAGNOSIS_STEP);
+        }
+
+        c.setUpdatedAt(now);
+
+        caseTimelineService.append(
+                c,
+                CaseTimelineEventType.DIAGNOSIS_UPDATED,
+                "Complaint diagnosis updated",
+                firstNonBlank(request.diagnosisComment(), "Complaint diagnosis was captured"),
+                actor,
+                previousStatus,
+                c.getStatus(),
+                timelineData(
+                        "complaintCategory", request.complaintCategory() != null ? request.complaintCategory().name() : ComplaintCategory.OTHER.name(),
+                        "requiresFieldWork", request.requiresFieldWork(),
+                        "requiresTechIntervention", request.requiresTechIntervention(),
+                        "requiresEscalation", request.requiresEscalation()
+                )
+        );
+
+        CaseEntity saved = repository.save(c);
+        enrichWorkProofReadValues(saved);
+        return sanitizeCaseForCurrentViewer(saved);
+    }
+
+    @Transactional
+    public CaseEntity reopenComplaintCase(String caseId, ReopenComplaintRequest request) {
+        CaseEntity c = getCaseOrThrow(caseId);
+        ensureComplaintCase(c);
+
+        String actor = getCurrentUsername();
+        CaseStatus previousStatus = c.getStatus();
+        Instant now = Instant.now();
+
+        ensureCurrentUserCanActAsAssignedZm(c);
+        ensureStatusIn(
+                c,
+                EnumSet.of(CaseStatus.CLOSED, CaseStatus.VALIDATED_BY_ZM, CaseStatus.RESOLUTION_SUBMITTED),
+                "Only resolved complaints can be reopened"
+        );
+
+        sttStockService.releaseCaseUsageReservation(
+                c,
+                actor,
+                previousStatus == CaseStatus.RESOLUTION_SUBMITTED
+                        ? "complaint_reopened_before_final_validation"
+                        : "complaint_reopened_after_validation",
+                previousStatus == CaseStatus.RESOLUTION_SUBMITTED
+        );
+
+        c.setStatus(CaseStatus.REOPENED);
+        clearTechAssignment(c);
+        clearExecutionDecision(c);
+        c.setUpdatedAt(now);
+
+        ComplaintResolutionInfo resolution = ensureComplaintResolution(c);
+        resolution.setReopenedAt(now);
+        resolution.setReopenedBy(actor);
+        resolution.setValidationStatus(ResolutionValidationStatus.REOPENED);
+
+        caseTimelineService.append(
+                c,
+                CaseTimelineEventType.CASE_REOPENED,
+                "Complaint reopened",
+                firstNonBlank(request.comment(), "Complaint was reopened for another investigation cycle"),
+                actor,
+                previousStatus,
+                c.getStatus(),
+                Map.of()
+        );
+
+        CaseEntity saved = repository.save(c);
+        enrichWorkProofReadValues(saved);
+        return sanitizeCaseForCurrentViewer(saved);
     }
 
     private void ensureStatusIn(CaseEntity caseEntity, Set<CaseStatus> allowedStatuses, String message) {
@@ -686,6 +983,85 @@ public class CaseService {
         }
 
         throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+    }
+
+    private Set<CaseStatus> assignSttAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity) ? COMPLAINT_ASSIGN_STT_ALLOWED_STATUSES : ASSIGN_STT_ALLOWED_STATUSES;
+    }
+
+    private Set<CaseStatus> assignTechAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity) ? COMPLAINT_ASSIGN_TECH_ALLOWED_STATUSES : ASSIGN_TECH_ALLOWED_STATUSES;
+    }
+
+    private Set<CaseStatus> selfExecutionAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity) ? COMPLAINT_SELF_EXECUTION_ALLOWED_STATUSES : SELF_EXECUTION_ALLOWED_STATUSES;
+    }
+
+    private Set<CaseStatus> setRdvAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity) ? COMPLAINT_SET_RDV_ALLOWED_STATUSES : SET_RDV_ALLOWED_STATUSES;
+    }
+
+    private Set<CaseStatus> completeWorkAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity) ? COMPLAINT_COMPLETE_WORK_ALLOWED_STATUSES : COMPLETE_WORK_ALLOWED_STATUSES;
+    }
+
+    private Set<CaseStatus> workProofAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity) ? COMPLAINT_WORK_PROOF_ALLOWED_STATUSES : WORK_PROOF_ALLOWED_STATUSES;
+    }
+
+    private Set<CaseStatus> validateByZmAllowedStatuses(CaseEntity caseEntity) {
+        return isComplaint(caseEntity)
+                ? EnumSet.of(CaseStatus.RESOLUTION_SUBMITTED)
+                : EnumSet.of(CaseStatus.WORK_DONE);
+    }
+
+    private boolean isComplaint(CaseEntity caseEntity) {
+        return caseEntity != null && caseEntity.getType() == CaseType.PLAINTE;
+    }
+
+    private void ensureComplaintCase(CaseEntity caseEntity) {
+        if (!isComplaint(caseEntity)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "This endpoint is only available for complaints");
+        }
+    }
+
+    private boolean hasCompletedComplaintRdv(CaseEntity caseEntity) {
+        return caseEntity != null
+                && caseEntity.getRdv() != null
+                && Boolean.TRUE.equals(caseEntity.getRdv().getJoignable())
+                && !Boolean.TRUE.equals(caseEntity.getRdv().getAbandon())
+                && caseEntity.getRdv().getDatePriseRdv() != null;
+    }
+
+    private void ensureComplaintRequiresFieldExecution(CaseEntity caseEntity, String message) {
+        if (!hasComplaintDiagnosisRequiringFieldExecution(caseEntity)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+        }
+    }
+
+    private boolean hasComplaintDiagnosisRequiringFieldExecution(CaseEntity caseEntity) {
+        if (!isComplaint(caseEntity) || caseEntity.getDiagnosis() == null) {
+            return false;
+        }
+
+        ComplaintDiagnosisInfo diagnosis = caseEntity.getDiagnosis();
+        return Boolean.TRUE.equals(diagnosis.getRequiresFieldWork())
+                || Boolean.TRUE.equals(diagnosis.getRequiresTechIntervention());
+    }
+
+    private boolean isComplaintDiagnosisDrivenExecution(CaseEntity caseEntity, CaseStatus previousStatus) {
+        return isComplaint(caseEntity)
+                && previousStatus != null
+                && (previousStatus == CaseStatus.DIAGNOSIS_STEP
+                || previousStatus == CaseStatus.RETURNED_TO_STT
+                || previousStatus == CaseStatus.REOPENED);
+    }
+
+    private ComplaintResolutionInfo ensureComplaintResolution(CaseEntity caseEntity) {
+        if (caseEntity.getResolution() == null) {
+            caseEntity.setResolution(ComplaintResolutionInfo.builder().build());
+        }
+        return caseEntity.getResolution();
     }
 
     private String rdvTimelineDetails(SetRdvRequest request) {
@@ -698,6 +1074,32 @@ public class CaseService {
         }
 
         return "RDV was successfully set";
+    }
+
+    private String caseTypeLabel(CaseType type) {
+        if (type == CaseType.PLAINTE) {
+            return "Complaint case";
+        }
+
+        if (type == CaseType.RESILIATION) {
+            return "Resiliation case";
+        }
+
+        return "Activation case";
+    }
+
+    private String firstNonBlank(String primary, String fallback) {
+        String safePrimary = trimToNull(primary);
+        return safePrimary != null ? safePrimary : safe(fallback, null);
+    }
+
+    private String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private String safe(String name, String email) {
@@ -805,6 +1207,69 @@ public class CaseService {
         }
     }
 
+    private void ensureCurrentUserCanExecuteCase(CaseEntity c) {
+        if (currentUserHasRole("ROLE_ADMIN")) {
+            return;
+        }
+
+        if (currentUserHasRole("ROLE_STT")) {
+            ensureCurrentUserCanActAsAssignedStt(c);
+
+            if (!isSttSelfExecution(c)) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "This case is not currently in STT self-execution mode"
+                );
+            }
+            return;
+        }
+
+        if (currentUserHasRole("ROLE_TECH")) {
+            ensureCurrentUserCanActAsAssignedTech(c);
+
+            if (!isTechExecution(c)) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "This case is not assigned to you as the active executor"
+                );
+            }
+            return;
+        }
+
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
+    }
+
+    private boolean isSttSelfExecution(CaseEntity c) {
+        return c != null
+                && c.getExecutionMode() == ExecutionMode.STT_SELF_EXECUTION
+                && c.getExecutorRole() == ExecutorRole.STT
+                && equalsSafe(c.getExecutorId(), c.getSttId());
+    }
+
+    private boolean isTechExecution(CaseEntity c) {
+        if (c == null) {
+            return false;
+        }
+        // Imported cases may only carry techEmail (no techId) — accept either as a tech assignment.
+        boolean hasTechAssignment = !isBlank(c.getTechId()) || !isBlank(c.getTechEmail());
+        if (!hasTechAssignment) {
+            return false;
+        }
+
+        // Simple assignment: no explicit execution-mode fields were stored (e.g. imported cases).
+        if (c.getExecutionMode() == null && c.getExecutorRole() == null && isBlank(c.getExecutorId())) {
+            return true;
+        }
+
+        // Formal TECH_EXECUTION: executor must match the tech assignment.
+        // When techId is absent, any TECH_EXECUTION assignment is accepted (email match was done at assignment time).
+        boolean executorMatchesTech = isBlank(c.getTechId())
+                || equalsSafe(c.getExecutorId(), c.getTechId());
+        return c.getExecutionMode() == ExecutionMode.TECH_EXECUTION
+                && c.getExecutorRole() == ExecutorRole.TECH
+                && executorMatchesTech;
+    }
+
     private boolean currentUserHasRole(String role) {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
@@ -842,6 +1307,22 @@ public class CaseService {
         }
     }
 
+    private AppUser resolveAssignedTechnician(CaseEntity caseEntity) {
+        AppUser technician;
+        if (!isBlank(caseEntity.getTechId())) {
+            technician = userRepository.findById(caseEntity.getTechId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assigned technician not found"));
+        } else if (!isBlank(caseEntity.getTechEmail())) {
+            technician = userRepository.findByEmail(caseEntity.getTechEmail())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assigned technician not found"));
+        } else {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No technician assigned to this case");
+        }
+
+        ensureUserHasRole(technician, UserRole.ROLE_TECH, "Assigned executor is not a technician");
+        return technician;
+    }
+
     private void clearSttAssignment(CaseEntity c) {
         c.setAssignedSttId(null);
         c.setSttId(null);
@@ -857,6 +1338,18 @@ public class CaseService {
         c.setDateAffectationTech(null);
     }
 
+    private void clearExecutionDecision(CaseEntity c) {
+        c.setExecutorId(null);
+        c.setExecutorRole(null);
+        c.setExecutionMode(null);
+    }
+
+    private void resetExecutionState(CaseEntity c) {
+        clearTechAssignment(c);
+        clearExecutionDecision(c);
+        c.setSlaTracking(null);
+    }
+
     private boolean isBlank(String value) {
         return value == null || value.isBlank();
     }
@@ -869,28 +1362,40 @@ public class CaseService {
         return a != null && a.equals(b);
     }
 
-    private AppUser resolveOwnerZm(String governorate) {
-        List<AppUser> matches = userRepository.findByRoleAndAssignedGovernoratesIn(
-                        UserRole.ROLE_ZM,
-                        List.of(governorate)
-                ).stream()
+    public AppUser resolveOwnerZmForGovernorate(String governorate) {
+        return resolveOwnerZm(governorate, CaseType.PLAINTE);
+    }
+
+    public String normalizeGovernorateValue(String governorate) {
+        return normalizeGovernorate(governorate);
+    }
+
+    public boolean sttCoversGovernorateValue(AppUser stt, String governorate) {
+        return sttCoversGovernorate(stt, governorate);
+    }
+
+    private AppUser resolveOwnerZm(String governorate, CaseType caseType) {
+        String normalizedGovernorate = normalizeGovernorate(governorate);
+        String moduleKey = CaseModuleType.fromCaseType(caseType).name();
+
+        List<AppUser> matches = userRepository.findByRoleOrderByFullNameAsc(UserRole.ROLE_ZM).stream()
                 .filter(user -> user.getRole() == UserRole.ROLE_ZM)
                 .filter(user -> user.getStatus() == AccountStatus.APPROVED)
                 .filter(AppUser::isEnabled)
-                .filter(user -> safeGovernorates(user.getAssignedGovernorates()).contains(governorate))
+                .filter(user -> zmCoversGovernorateForModule(user, normalizedGovernorate, moduleKey))
                 .toList();
 
         if (matches.isEmpty()) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
-                    "No ZM covers governorate " + governorate
+                    "No ZM covers governorate " + normalizedGovernorate
             );
         }
 
         if (matches.size() > 1) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
-                    "Governorate " + governorate + " is assigned to multiple ZMs"
+                    "Governorate " + normalizedGovernorate + " is assigned to multiple ZMs"
             );
         }
 
@@ -902,7 +1407,22 @@ public class CaseService {
             return false;
         }
 
-        return safeGovernorates(stt.getCoveredGovernorates()).contains(governorate.trim());
+        return TunisiaGovernorateSupport.containsEquivalent(stt.getCoveredGovernorates(), governorate);
+    }
+
+    private boolean zmCoversGovernorateForModule(AppUser zm, String normalizedGovernorate, String moduleKey) {
+        Map<String, List<String>> coverage = zm.getCoverageByModule();
+        if (coverage != null && coverage.containsKey(moduleKey)) {
+            List<String> moduleGovs = coverage.get(moduleKey);
+            if (moduleGovs != null && !moduleGovs.isEmpty()) {
+                return TunisiaGovernorateSupport.containsEquivalent(moduleGovs, normalizedGovernorate);
+            }
+        }
+        // Backward compat: for ACT, fall back to legacy assignedGovernorates when module coverage is not yet set
+        if ("ACT".equals(moduleKey)) {
+            return TunisiaGovernorateSupport.containsEquivalent(zm.getAssignedGovernorates(), normalizedGovernorate);
+        }
+        return false;
     }
 
     private String normalizeGovernorate(String governorate) {
@@ -910,12 +1430,11 @@ public class CaseService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Governorate is required");
         }
 
-        String normalized = governorate.trim();
-        if (!TUNISIA_GOVERNORATE_SET.contains(normalized)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported governorate: " + normalized);
+        try {
+            return TunisiaGovernorateSupport.requireSupported(governorate);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
         }
-
-        return normalized;
     }
 
     private void validateLocationSnapshot(Double latitude, Double longitude, String message) {
@@ -981,17 +1500,92 @@ public class CaseService {
         );
     }
 
-    private List<String> safeGovernorates(List<String> governorates) {
-        if (governorates == null || governorates.isEmpty()) {
-            return List.of();
+    private void sanitizeCaseListForCurrentViewer(List<CaseEntity> cases) {
+        if (cases == null || cases.isEmpty()) {
+            return;
         }
 
-        return governorates.stream()
-                .map(String::trim)
-                .filter(value -> !value.isBlank())
-                .collect(Collectors.collectingAndThen(
-                        Collectors.toCollection(LinkedHashSet::new),
-                        List::copyOf
+        for (CaseEntity caseEntity : cases) {
+            sanitizeCaseForCurrentViewer(caseEntity);
+        }
+    }
+
+    private CaseEntity sanitizeCaseForCurrentViewer(CaseEntity caseEntity) {
+        if (caseEntity == null || canViewCapturedGps(caseEntity)) {
+            return caseEntity;
+        }
+
+        redactCapturedGps(caseEntity);
+        return caseEntity;
+    }
+
+    private boolean canViewCapturedGps(CaseEntity caseEntity) {
+        if (caseEntity == null) {
+            return false;
+        }
+
+        if (currentUserHasRole("ROLE_ADMIN")) {
+            return true;
+        }
+
+        return currentUserHasRole("ROLE_ZM") && equalsIgnoreCase(caseEntity.getZmEmail(), getCurrentUsername());
+    }
+
+    private void redactCapturedGps(CaseEntity caseEntity) {
+        if (caseEntity == null) {
+            return;
+        }
+
+        if (caseEntity.getWork() != null) {
+            caseEntity.getWork().setLocationLatitude(null);
+            caseEntity.getWork().setLocationLongitude(null);
+            caseEntity.getWork().setLocationCapturedAt(null);
+            caseEntity.getWork().setLocationAccuracyMeters(null);
+        }
+
+        if (caseEntity.getTimeline() != null) {
+            caseEntity.getTimeline().forEach(this::redactTimelineGpsData);
+        }
+
+        if (caseEntity.getWorkProofs() != null && !caseEntity.getWorkProofs().isEmpty()) {
+            List<CaseProofFileResponse> sanitizedProofs = new ArrayList<>();
+
+            for (CaseProofFileResponse proof : caseEntity.getWorkProofs()) {
+                sanitizedProofs.add(new CaseProofFileResponse(
+                        proof.fileId(),
+                        proof.originalFilename(),
+                        proof.contentType(),
+                        proof.size(),
+                        proof.uploadedBy(),
+                        proof.createdAt(),
+                        proof.viewUrl(),
+                        proof.downloadUrl(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        proof.captureSource()
                 ));
+            }
+
+            caseEntity.setWorkProofs(List.copyOf(sanitizedProofs));
+        }
+    }
+
+    private void redactTimelineGpsData(CaseTimelineEvent event) {
+        if (event == null || event.getData() == null || event.getData().isEmpty()) {
+            return;
+        }
+
+        Map<String, Object> sanitized = new LinkedHashMap<>(event.getData());
+        sanitized.remove("locationLatitude");
+        sanitized.remove("locationLongitude");
+        sanitized.remove("locationCapturedAt");
+        sanitized.remove("locationAccuracyMeters");
+        event.setData(sanitized);
+    }
+
+    private List<String> safeGovernorates(List<String> governorates) {
+        return TunisiaGovernorateSupport.normalizeStoredValues(governorates);
     }
 }

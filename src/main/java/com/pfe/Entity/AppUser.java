@@ -9,7 +9,9 @@ import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Document(collection = "users")
 @Getter
@@ -52,6 +54,9 @@ public class AppUser {
     private List<String> requestedGovernorates = new ArrayList<>();
 
     @Builder.Default
+    private Map<String, List<String>> coverageByModule = new HashMap<>();
+
+    @Builder.Default
     private AccountStatus status = AccountStatus.PENDING;
 
     @Builder.Default
@@ -75,6 +80,13 @@ public class AppUser {
     private String profileImageFileId;
     private String profileImageUrl;
     private String profileThumbnailUrl;
+
+    @Builder.Default
+    private boolean canCreateDpm = false;
+
+    @Builder.Default
+    private boolean selfExecutor = false;
+
     @CreatedDate
     private Instant createdAt;
 

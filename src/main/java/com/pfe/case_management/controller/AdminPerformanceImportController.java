@@ -56,16 +56,20 @@ public class AdminPerformanceImportController {
     public ResponseEntity<ZmPerformanceStudyResponse> getAnalytics(
             @RequestParam(required = false) String zoneManager,
             @RequestParam(required = false) String gouvernorat,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate openDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate openDateTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate affectationDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate affectationDateTo,
             Authentication authentication
     ) {
         return ResponseEntity.ok(zmPerformanceAnalyticsService.getStudy(
                 authentication.getName(),
                 zoneManager,
                 gouvernorat,
-                uploadedFrom,
-                uploadedTo
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo
         ));
     }
 
@@ -90,8 +94,10 @@ public class AdminPerformanceImportController {
             @PathVariable String studyId,
             @RequestParam(required = false) String zoneManager,
             @RequestParam(required = false) String gouvernorat,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate openDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate openDateTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate affectationDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate affectationDateTo,
             Authentication authentication
     ) {
         return ResponseEntity.ok(zmPerformanceAnalyticsService.getSavedStudy(
@@ -99,8 +105,10 @@ public class AdminPerformanceImportController {
                 studyId,
                 zoneManager,
                 gouvernorat,
-                uploadedFrom,
-                uploadedTo
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo
         ));
     }
 
@@ -109,8 +117,10 @@ public class AdminPerformanceImportController {
             @PathVariable String studyId,
             @RequestParam(required = false) String zoneManager,
             @RequestParam(required = false) String gouvernorat,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate openDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate openDateTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate affectationDateFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate affectationDateTo,
             @RequestParam(required = false) String invalidReason,
             @RequestParam(required = false) Integer invalidPage,
             @RequestParam(required = false) Integer invalidPageSize,
@@ -121,8 +131,10 @@ public class AdminPerformanceImportController {
                 studyId,
                 zoneManager,
                 gouvernorat,
-                uploadedFrom,
-                uploadedTo,
+                openDateFrom,
+                openDateTo,
+                affectationDateFrom,
+                affectationDateTo,
                 invalidReason,
                 invalidPage,
                 invalidPageSize

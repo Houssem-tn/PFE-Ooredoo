@@ -8,9 +8,13 @@ import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowsPageResponse
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSummaryResponse;
 import com.pfe.activation_analytics.dto.SaveActivationAnalyticsStudyRequest;
 import com.pfe.activation_analytics.dto.SavedActivationAnalyticsStudyResponse;
+import com.pfe.activation_analytics.model.ActivationImportProcessingMode;
 import com.pfe.activation_analytics.service.ActivationAnalyticsDashboardService;
 import com.pfe.activation_analytics.service.ActivationAnalyticsImportService;
 import com.pfe.activation_analytics.service.SavedActivationAnalyticsStudyService;
+import com.pfe.case_management.enums.CaseType;
+import com.pfe.plainte_analytics.service.PlainteAnalyticsDashboardService;
+import com.pfe.plainte_analytics.service.SavedPlainteAnalyticsStudyService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +42,8 @@ public class AdminActivationAnalyticsController {
     private final ActivationAnalyticsImportService importService;
     private final ActivationAnalyticsDashboardService dashboardService;
     private final SavedActivationAnalyticsStudyService savedStudyService;
+    private final PlainteAnalyticsDashboardService plainteDashboardService;
+    private final SavedPlainteAnalyticsStudyService plainteSavedStudyService;
 
     @PostMapping(value = "/preview", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<AdminActivationAnalyticsPreviewResponse> preview(
@@ -50,47 +56,60 @@ public class AdminActivationAnalyticsController {
     @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<AdminActivationAnalyticsImportResponse> importFile(
             @RequestParam("file") MultipartFile file,
+            @RequestParam(name = "mode", defaultValue = "ANALYTICS") ActivationImportProcessingMode mode,
             Authentication authentication
     ) {
-        return timed("import", () -> importService.importFile(file, authentication.getName()));
+        return timed("import", () -> importService.importFile(file, authentication.getName(), mode));
     }
 
     @GetMapping("/summary")
-    public ResponseEntity<AdminActivationAnalyticsSummaryResponse> getSummary(
+    public ResponseEntity<?> getSummary(
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("summary", () -> dashboardService.getSummary(authentication.getName(), stt, gouvernorat));
+        return timed("summary", () -> isComplaint(caseType)
+                ? plainteDashboardService.getSummary(authentication.getName(), stt, gouvernorat)
+                : dashboardService.getSummary(authentication.getName(), stt, gouvernorat));
     }
 
     @GetMapping("/charts")
-    public ResponseEntity<AdminActivationAnalyticsChartsResponse> getCharts(
+    public ResponseEntity<?> getCharts(
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("charts", () -> dashboardService.getCharts(authentication.getName(), stt, gouvernorat));
+        return timed("charts", () -> isComplaint(caseType)
+                ? plainteDashboardService.getCharts(authentication.getName(), stt, gouvernorat)
+                : dashboardService.getCharts(authentication.getName(), stt, gouvernorat));
     }
 
     @GetMapping("/rows")
-    public ResponseEntity<AdminActivationAnalyticsRowsPageResponse> getRows(
+    public ResponseEntity<?> getRows(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size,
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("rows", () -> dashboardService.getRows(authentication.getName(), stt, gouvernorat, page, size));
+        return timed("rows", () -> isComplaint(caseType)
+                ? plainteDashboardService.getRows(authentication.getName(), stt, gouvernorat, page, size)
+                : dashboardService.getRows(authentication.getName(), stt, gouvernorat, page, size));
     }
 
     @GetMapping("/dashboard")
-    public ResponseEntity<AdminActivationAnalyticsDashboardResponse> getDashboard(
+    public ResponseEntity<?> getDashboard(
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("dashboard", () -> dashboardService.getDashboard(authentication.getName(), stt, gouvernorat));
+        return timed("dashboard", () -> isComplaint(caseType)
+                ? plainteDashboardService.getDashboard(authentication.getName(), stt, gouvernorat)
+                : dashboardService.getDashboard(authentication.getName(), stt, gouvernorat));
     }
 
     @PostMapping("/save-study")
@@ -102,72 +121,111 @@ public class AdminActivationAnalyticsController {
     }
 
     @GetMapping("/saved-studies")
-    public ResponseEntity<java.util.List<SavedActivationAnalyticsStudyResponse>> listSavedStudies(Authentication authentication) {
-        return timed("saved-studies", () -> savedStudyService.listSavedStudies(authentication.getName()));
+    public ResponseEntity<?> listSavedStudies(
+            @RequestParam(required = false) CaseType caseType,
+            Authentication authentication
+    ) {
+        return timed("saved-studies", () -> isComplaint(caseType)
+                ? plainteSavedStudyService.listSavedStudies(authentication.getName())
+                : savedStudyService.listSavedStudies(authentication.getName()));
     }
 
     @GetMapping("/saved-studies/{studyId}/summary")
-    public ResponseEntity<AdminActivationAnalyticsSummaryResponse> getSavedStudySummary(
+    public ResponseEntity<?> getSavedStudySummary(
             @org.springframework.web.bind.annotation.PathVariable String studyId,
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("saved-summary", () -> savedStudyService.getSavedStudySummary(
-                authentication.getName(),
-                studyId,
-                stt,
-                gouvernorat
-        ));
+        return timed("saved-summary", () -> isComplaint(caseType)
+                ? plainteSavedStudyService.getSavedStudySummary(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat
+                )
+                : savedStudyService.getSavedStudySummary(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat
+                ));
     }
 
     @GetMapping("/saved-studies/{studyId}/charts")
-    public ResponseEntity<AdminActivationAnalyticsChartsResponse> getSavedStudyCharts(
+    public ResponseEntity<?> getSavedStudyCharts(
             @org.springframework.web.bind.annotation.PathVariable String studyId,
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("saved-charts", () -> savedStudyService.getSavedStudyCharts(
-                authentication.getName(),
-                studyId,
-                stt,
-                gouvernorat
-        ));
+        return timed("saved-charts", () -> isComplaint(caseType)
+                ? plainteSavedStudyService.getSavedStudyCharts(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat
+                )
+                : savedStudyService.getSavedStudyCharts(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat
+                ));
     }
 
     @GetMapping("/saved-studies/{studyId}/rows")
-    public ResponseEntity<AdminActivationAnalyticsRowsPageResponse> getSavedStudyRows(
+    public ResponseEntity<?> getSavedStudyRows(
             @org.springframework.web.bind.annotation.PathVariable String studyId,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size,
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("saved-rows", () -> savedStudyService.getSavedStudyRows(
-                authentication.getName(),
-                studyId,
-                stt,
-                gouvernorat,
-                page,
-                size
-        ));
+        return timed("saved-rows", () -> isComplaint(caseType)
+                ? plainteSavedStudyService.getSavedStudyRows(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat,
+                        page,
+                        size
+                )
+                : savedStudyService.getSavedStudyRows(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat,
+                        page,
+                        size
+                ));
     }
 
     @GetMapping("/saved-studies/{studyId}/dashboard")
-    public ResponseEntity<AdminActivationAnalyticsDashboardResponse> getSavedStudyDashboard(
+    public ResponseEntity<?> getSavedStudyDashboard(
             @org.springframework.web.bind.annotation.PathVariable String studyId,
             @RequestParam(required = false) String stt,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) CaseType caseType,
             Authentication authentication
     ) {
-        return timed("saved-dashboard", () -> savedStudyService.getSavedStudyDashboard(
-                authentication.getName(),
-                studyId,
-                stt,
-                gouvernorat
-        ));
+        return timed("saved-dashboard", () -> isComplaint(caseType)
+                ? plainteSavedStudyService.getSavedStudyDashboard(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat
+                )
+                : savedStudyService.getSavedStudyDashboard(
+                        authentication.getName(),
+                        studyId,
+                        stt,
+                        gouvernorat
+                ));
     }
 
     private <T> ResponseEntity<T> timed(String endpoint, Supplier<T> supplier) {
@@ -181,5 +239,9 @@ public class AdminActivationAnalyticsController {
 
     private long elapsedMs(long startNanos) {
         return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
+    private boolean isComplaint(CaseType caseType) {
+        return caseType == CaseType.PLAINTE;
     }
 }

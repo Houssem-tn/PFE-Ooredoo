@@ -58,25 +58,27 @@ public class CaseAnalyticsService {
     private final CaseRepository caseRepository;
     private final SlaTrackingService slaTrackingService;
 
-    public PerformanceSummaryResponse getMyPerformance() {
+    public PerformanceSummaryResponse getMyPerformance(CaseType type) {
         UserRole role = currentUserRole();
         String email = currentUserEmail();
+        CaseType effectiveType = type != null ? type : CaseType.ACTIVATION;
 
         return summarize(
                 null,
                 role.name(),
                 null,
                 email,
-                loadScope(role, email),
+                loadScope(role, email, effectiveType),
                 role
         );
     }
 
-    public List<PerformanceSummaryResponse> getTechPerformanceForMyScope() {
+    public List<PerformanceSummaryResponse> getTechPerformanceForMyScope(CaseType type) {
         UserRole role = currentUserRole();
         String email = currentUserEmail();
+        CaseType effectiveType = type != null ? type : CaseType.ACTIVATION;
 
-        List<CaseEntity> scope = loadScope(role, email);
+        List<CaseEntity> scope = loadScope(role, email, effectiveType);
 
         Map<String, List<CaseEntity>> grouped = new HashMap<>();
         for (CaseEntity c : scope) {
@@ -137,7 +139,7 @@ public class CaseAnalyticsService {
                 role.name(),
                 userName,
                 userEmail,
-                loadScope(role, userEmail),
+                loadScope(role, userEmail, CaseType.ACTIVATION),
                 role
         );
     }
@@ -205,12 +207,12 @@ public class CaseAnalyticsService {
         );
     }
 
-    private List<CaseEntity> loadScope(UserRole role, String email) {
+    private List<CaseEntity> loadScope(UserRole role, String email, CaseType type) {
         List<CaseEntity> scope = switch (role) {
-            case ROLE_TECH -> caseRepository.findByTypeAndTechEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_STT -> caseRepository.findByTypeAndSttEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_ZM -> caseRepository.findByTypeAndZmEmailIgnoreCase(CaseType.ACTIVATION, email);
-            case ROLE_ADMIN -> caseRepository.findByType(CaseType.ACTIVATION);
+            case ROLE_TECH -> caseRepository.findByTypeAndTechEmailIgnoreCase(type, email);
+            case ROLE_STT -> caseRepository.findByTypeAndSttEmailIgnoreCase(type, email);
+            case ROLE_ZM -> caseRepository.findByTypeAndZmEmailIgnoreCase(type, email);
+            case ROLE_ADMIN -> caseRepository.findByType(type);
             default -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unsupported role for analytics");
         };
 
