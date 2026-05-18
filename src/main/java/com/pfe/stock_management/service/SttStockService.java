@@ -1,10 +1,10 @@
 package com.pfe.stock_management.service;
 
-import com.pfe.Entity.AccountStatus;
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
-import com.pfe.Service.NotificationEventService;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.UsedEquipmentRequestItem;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.model.UsedEquipmentItem;
@@ -72,6 +72,8 @@ public class SttStockService {
     private final TechStockUsageRepository techStockUsageRepository;
     private final MongoTemplate mongoTemplate;
     private final CaseStockConsumptionService caseStockConsumptionService;
+    private final StockAlertEvaluationService stockAlertEvaluationService;
+    private final StockUsagePermissionService stockUsagePermissionService;
 
     public void applyDpmConfirmation(DpmRequest dpm) {
         SttStock stock = sttStockRepository.findBySttId(dpm.getSttId())
@@ -102,6 +104,9 @@ public class SttStockService {
 
         stock.setLastUpdatedAt(Instant.now());
         sttStockRepository.save(stock);
+
+        // Evaluate stock alert thresholds after DPM increases STT stock
+        stockAlertEvaluationService.evaluateSttStock(dpm.getSttId());
     }
 
     public SttDistribution distributeToTech(DistributeToTechRequest request) {
@@ -203,6 +208,11 @@ public class SttStockService {
         stockMovementService.recordDistribution(saved, callerEmail);
         notificationEventService.onStockDistributedToTech(saved);
 
+        // Evaluate STT stock alerts after distribution reduces STT stock
+        stockAlertEvaluationService.evaluateSttStock(stt.getId());
+        // Evaluate TECH stock alerts after TECH receives new items
+        stockAlertEvaluationService.evaluateTechStock(tech.getId());
+
         return saved;
     }
 
@@ -234,6 +244,24 @@ public class SttStockService {
         if (technician == null || isBlank(technician.getId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Technician is required for stock usage synchronization");
         }
+
+        // ── Over-limit enforcement ────────────────────────────────────────────
+        // Backend enforces cable <= 20m and item quantity <= 1 unless STT approved.
+        if (requestedItems != null && !requestedItems.isEmpty()) {
+            double cableMeters = requestedItems.stream()
+                    .filter(i -> "METERS".equalsIgnoreCase(i.unit()))
+                    .mapToInt(UsedEquipmentRequestItem::quantity)
+                    .sum();
+            Map<String, Integer> itemQtys = new HashMap<>();
+            for (UsedEquipmentRequestItem item : requestedItems) {
+                if (!"METERS".equalsIgnoreCase(item.unit())) {
+                    itemQtys.put(item.equipmentId(), item.quantity());
+                }
+            }
+            stockUsagePermissionService.enforceUsageLimits(
+                    caseEntity.getId(), technician.getId(), cableMeters, itemQtys);
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         Map<String, UsageItem> requestedUsage = mergeCaseUsageItems(requestedItems);
         Map<String, UsageItem> previousUsage = mergePersistedUsageItems(
@@ -362,6 +390,9 @@ public class SttStockService {
                 caseStockConsumptionService.createOrUpdate(caseEntity, technician, consumedItems, performedBy);
             }
         }
+
+        // Evaluate TECH stock alerts after consumption
+        stockAlertEvaluationService.evaluateTechStock(technician.getId());
 
         return toUsedEquipmentItems(requestedUsage);
     }
@@ -561,7 +592,8 @@ public class SttStockService {
     public List<DistributableDpmDto> getDistributableDpms(String sttId) {
         List<DpmRequest> dpms = dpmRepository.findBySttIdOrderByCreatedAtDesc(sttId).stream()
                 .filter(d -> d.getStatus() == DpmStatus.FULLY_CONFIRMED
-                          || d.getStatus() == DpmStatus.PARTIALLY_CONFIRMED)
+                          || d.getStatus() == DpmStatus.PARTIALLY_CONFIRMED
+                          || d.getStatus() == DpmStatus.MATERIAL_RECEIVED)
                 .toList();
 
         return dpms.stream().map(dpm -> {

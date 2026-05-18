@@ -36,13 +36,30 @@ public class DpmRequest {
     private String sttEmail;
 
     @Builder.Default
-    private DpmStatus status = DpmStatus.PENDING_STT_CONFIRMATION;
+    private DpmStatus status = DpmStatus.WAITING_TEAM_STOCK_APPROVAL;
 
     @Builder.Default
     private List<DpmItem> items = new ArrayList<>();
 
     private String notes;
     private String deliveryPersonName;
+
+    // ── External Team Stock approval fields ────────────────────────────────────
+    private String externalApprovalReference;
+    private String externalApprovalNote;
+    private Instant externalApprovalMarkedAt;
+    private String externalApprovalMarkedByZmId;
+
+    // ── RDV (Rendez-vous) fields ───────────────────────────────────────────────
+    private String rdvDate;
+    private String rdvLocation;
+    private String rdvNote;
+    private Instant rdvScheduledAt;
+    private String rdvScheduledByZmId;
+
+    // ── Rejection fields ───────────────────────────────────────────────────────
+    private String externalRejectionReason;
+    private Instant externalRejectedAt;
 
     @CreatedDate
     private Instant createdAt;

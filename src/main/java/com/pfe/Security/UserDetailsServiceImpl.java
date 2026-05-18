@@ -1,8 +1,8 @@
 package com.pfe.Security;
 
-import com.pfe.Entity.AccountStatus;
-import com.pfe.Entity.AppUser;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Repository.UserRepository;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.*;
 import org.springframework.stereotype.Service;

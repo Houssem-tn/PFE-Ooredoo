@@ -1,8 +1,8 @@
 package com.pfe.stock_management.service;
 
-import com.pfe.Entity.FileEntityType;
-import com.pfe.Entity.FileRole;
-import com.pfe.Service.FileStorageService;
+import com.pfe.MainPackage.Entity.FileEntityType;
+import com.pfe.MainPackage.Entity.FileRole;
+import com.pfe.MainPackage.Service.FileStorageService;
 import com.pfe.stock_management.dto.CreateEquipmentRequest;
 import com.pfe.stock_management.entity.Equipment;
 import com.pfe.stock_management.repository.EquipmentRepository;

@@ -1,6 +1,7 @@
 package com.pfe.stock_management.service;
 
-import com.pfe.Entity.AppUser;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.UsedEquipmentRequestItem;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.model.UsedEquipmentItem;
@@ -8,7 +9,7 @@ import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.model.TechStockItem;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.SttDistributionRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
@@ -54,7 +55,7 @@ class SttStockServiceCaseUsageTest {
     @Mock
     private StockMovementService stockMovementService;
     @Mock
-    private com.pfe.Service.NotificationEventService notificationEventService;
+    private NotificationEventService notificationEventService;
     @Mock
     private TechStockUsageRepository techStockUsageRepository;
     @Mock

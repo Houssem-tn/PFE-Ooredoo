@@ -1,7 +1,7 @@
 package com.pfe.activation_analytics.service;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Service.NotificationEventService;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsDistributionSummaryResponse;
 import com.pfe.activation_analytics.model.ActivationImportSharedResult;
 import com.pfe.activation_analytics.model.ActivationImportSharedRow;

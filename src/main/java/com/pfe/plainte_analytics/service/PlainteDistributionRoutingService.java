@@ -1,9 +1,9 @@
 package com.pfe.plainte_analytics.service;
 
-import com.pfe.Entity.AccountStatus;
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.repository.CaseRepository;

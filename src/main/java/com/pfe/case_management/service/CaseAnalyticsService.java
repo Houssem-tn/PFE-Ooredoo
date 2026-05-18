@@ -1,6 +1,6 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Entity.UserRole;
+import com.pfe.MainPackage.Entity.UserRole;
 import com.pfe.case_management.dto.PerformanceSummaryResponse;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;

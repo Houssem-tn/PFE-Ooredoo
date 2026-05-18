@@ -1,8 +1,7 @@
 package com.pfe.stock_management.controller;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.dto.DpmTrackingDto;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttStock;

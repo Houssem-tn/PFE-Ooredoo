@@ -1,15 +1,15 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Entity.AccountStatus;
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.CaseModuleType;
-import com.pfe.Entity.FileEntityType;
-import com.pfe.Entity.FileMetadata;
-import com.pfe.Entity.FileRole;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
-import com.pfe.Service.FileStorageService;
-import com.pfe.Service.NotificationEventService;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.CaseModuleType;
+import com.pfe.MainPackage.Entity.FileEntityType;
+import com.pfe.MainPackage.Entity.FileMetadata;
+import com.pfe.MainPackage.Entity.FileRole;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
+import com.pfe.MainPackage.Service.FileStorageService;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
 import com.pfe.case_management.dto.CaseProofFileResponse;

@@ -1,6 +1,6 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Service.NotificationEventService;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.enums.CaseStatus;

@@ -1,10 +1,10 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Entity.AccountStatus;
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
-import com.pfe.Service.NotificationEventService;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.ComplaintDiagnosisRequest;
 import com.pfe.case_management.dto.ComplaintImportResponse;
 import com.pfe.case_management.dto.PlainteDTO;
@@ -44,7 +44,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor

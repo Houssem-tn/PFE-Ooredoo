@@ -1,6 +1,6 @@
 package com.pfe.stock_management.service;
 
-import com.pfe.Entity.AppUser;
+import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.dto.CaseConsumptionDto;
 import com.pfe.stock_management.dto.CaseConsumptionSummaryDto;

@@ -1,7 +1,7 @@
 package com.pfe.stock_management.controller;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.dto.DeclareTechUsageRequest;
 import com.pfe.stock_management.dto.DeclareTechUsageResponse;
 import com.pfe.stock_management.dto.PendingDistributionDto;

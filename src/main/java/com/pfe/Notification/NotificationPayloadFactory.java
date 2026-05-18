@@ -1,7 +1,7 @@
 package com.pfe.Notification;
 
-import com.pfe.Dto.NotificationMessageDto;
-import com.pfe.Entity.AppUser;
+import com.pfe.MainPackage.Dto.NotificationMessageDto;
+import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.model.SlaTrackingInfo;
@@ -264,6 +264,72 @@ public class NotificationPayloadFactory {
         dto.setEntityId(dpm.getId());
         dto.setStatus("REJECTED");
         dto.setTriggeredBy(dpm.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildRdvScheduled(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("zmName", dpm.getZmName());
+        data.put("rdvDate", dpm.getRdvDate());
+        data.put("rdvLocation", dpm.getRdvLocation());
+        data.put("rdvNote", dpm.getRdvNote());
+        data.put("routeHint", "/stt/stock/incoming-dpms");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_RDV_SCHEDULED");
+        dto.setTitle("RDV scheduled for DPM " + safe(dpm.getDpmNumber()));
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " has been approved externally. "
+                + "Pickup RDV: " + safe(dpm.getRdvDate()) + " at " + safe(dpm.getRdvLocation()));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus(dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        dto.setTriggeredBy(dpm.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildRdvConfirmedByStt(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("sttName", dpm.getSttName());
+        data.put("routeHint", "/zm/stock/my-tracking");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_RDV_CONFIRMED_BY_STT");
+        dto.setTitle("STT confirmed the RDV for DPM " + safe(dpm.getDpmNumber()));
+        dto.setMessage("STT " + safe(dpm.getSttName()) + " confirmed attendance for DPM " + safe(dpm.getDpmNumber()));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus(dpm.getStatus() != null ? dpm.getStatus().name() : null);
+        dto.setTriggeredBy(dpm.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        return dto;
+    }
+
+    public NotificationMessageDto buildExternalRejected(DpmRequest dpm) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("dpmId", dpm.getId());
+        data.put("dpmNumber", dpm.getDpmNumber());
+        data.put("zmName", dpm.getZmName());
+        data.put("rejectionReason", dpm.getExternalRejectionReason());
+        data.put("routeHint", "/stt/stock/incoming-dpms");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("DPM_EXTERNAL_REJECTED");
+        dto.setTitle("DPM " + safe(dpm.getDpmNumber()) + " rejected by Team Stock");
+        dto.setMessage("DPM " + safe(dpm.getDpmNumber()) + " was rejected by the external Team Stock."
+                + (dpm.getExternalRejectionReason() != null ? " Reason: " + dpm.getExternalRejectionReason() : ""));
+        dto.setEntityType("DPM");
+        dto.setEntityId(dpm.getId());
+        dto.setStatus("TEAM_STOCK_REJECTED");
+        dto.setTriggeredBy(dpm.getZmEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         return dto;
