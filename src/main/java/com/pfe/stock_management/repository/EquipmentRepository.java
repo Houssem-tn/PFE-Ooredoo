@@ -10,4 +10,5 @@ public interface EquipmentRepository extends MongoRepository<Equipment, String> 
     List<Equipment> findByActiveTrue();
 
     boolean existsByNameIgnoreCase(String name);
+
 }

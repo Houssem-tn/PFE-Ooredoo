@@ -10,12 +10,15 @@ import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.case_management.service.CaseTimelineService;
+import com.pfe.case_management.dto.UsedEquipmentRequestItem;
 import com.pfe.stock_management.dto.CreatePermissionRequest;
 import com.pfe.stock_management.dto.PermissionRequestResponse;
 import com.pfe.stock_management.dto.RejectPermissionRequest;
 import com.pfe.stock_management.dto.ReviewPermissionRequest;
+import com.pfe.stock_management.entity.StockThreshold;
 import com.pfe.stock_management.entity.StockUsagePermissionRequest;
 import com.pfe.stock_management.model.PermissionItem;
+import com.pfe.stock_management.repository.StockThresholdRepository;
 import com.pfe.stock_management.repository.StockUsagePermissionRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -33,23 +36,28 @@ import java.util.stream.Collectors;
 /**
  * Manages the over-limit stock usage permission workflow.
  *
- * Business limits enforced by the backend:
- *   - cable  > 20 m  → permission required
- *   - any item > 1 piece → permission required
- *
+ * Limits are ZM-configured per-item via StockThreshold.caseUsageLimit.
+ * Fallback constants are used only when no ZM config exists (backward compatibility).
  * Only STT can approve/reject. ZM sees read-only tracking.
  */
 @Service
 @RequiredArgsConstructor
 public class StockUsagePermissionService {
 
-    /** Cable threshold in metres. Do NOT change without also updating the frontend constant. */
-    public static final double CABLE_LIMIT_METERS = 20.0;
+    /**
+     * Fallback cable limit when no ZM threshold is configured for the item.
+     * TODO: Remove once all ZMs have configured per-item case usage limits.
+     */
+    private static final double FALLBACK_CABLE_LIMIT_METERS = 20.0;
 
-    /** Per-item quantity threshold. */
-    public static final int ITEM_LIMIT_PIECES = 1;
+    /**
+     * Fallback piece limit when no ZM threshold is configured for the item.
+     * TODO: Remove once all ZMs have configured per-item case usage limits.
+     */
+    private static final int FALLBACK_ITEM_LIMIT_PIECES = 1;
 
     private final StockUsagePermissionRepository permissionRepository;
+    private final StockThresholdRepository stockThresholdRepository;
     private final CaseRepository caseRepository;
     private final UserRepository userRepository;
     private final CaseTimelineService caseTimelineService;
@@ -188,13 +196,25 @@ public class StockUsagePermissionService {
             caseRepository.save(caseEntity);
         }
 
-        // Notify TECH
+        // Notify TECH — include full approval details so the page updates without an extra HTTP call
+        Map<String, Object> techApprovalData = new HashMap<>();
+        techApprovalData.put("permissionStatus", newStatus);
+        techApprovalData.put("approvedCableMeters", approvedCable);
+        if (req.getReviewComment() != null) techApprovalData.put("reviewComment", req.getReviewComment());
+        if (approvedItems != null) {
+            techApprovalData.put("approvedItems", approvedItems.stream()
+                    .map(i -> Map.of(
+                            "itemId", i.getItemId(),
+                            "itemName", i.getItemName(),
+                            "approvedQuantity", i.getApprovedQuantity()))
+                    .collect(Collectors.toList()));
+        }
         notifyPermissionAlert(permission.getTechEmail(), "INFO",
                 "STOCK_USAGE_PERMISSION_APPROVED",
                 "Stock Permission " + newStatus.replace('_', ' '),
                 "STT " + stt.getFullName() + " approved your usage request for case " +
                         permission.getCaseReference() + ".",
-                permission.getId(), permission.getCaseId(), "OPEN_CASE");
+                permission.getId(), permission.getCaseId(), "OPEN_CASE", techApprovalData);
 
         // Notify ZM (info)
         if (permission.getZmId() != null) {
@@ -237,13 +257,16 @@ public class StockUsagePermissionService {
             caseRepository.save(caseEntity);
         }
 
-        // Notify TECH
+        // Notify TECH — include reason so the page updates without an extra HTTP call
+        Map<String, Object> techRejectData = new HashMap<>();
+        techRejectData.put("permissionStatus", "REJECTED");
+        techRejectData.put("reviewComment", req.getReviewComment());
         notifyPermissionAlert(permission.getTechEmail(), "WARNING",
                 "STOCK_USAGE_PERMISSION_REJECTED",
                 "Stock Permission Rejected",
                 "STT " + stt.getFullName() + " rejected your over-limit usage request for case " +
                         permission.getCaseReference() + ". Reason: " + req.getReviewComment(),
-                permission.getId(), permission.getCaseId(), "OPEN_CASE");
+                permission.getId(), permission.getCaseId(), "OPEN_CASE", techRejectData);
 
         return PermissionRequestResponse.from(permission);
     }
@@ -251,51 +274,98 @@ public class StockUsagePermissionService {
     // ── Enforcement API (called by SttStockService) ────────────────────────────
 
     /**
-     * Returns the effective approved cable metres for a given case+TECH.
-     * Throws if the operation exceeds limits and no valid permission exists.
+     * Enforces per-item case usage limits configured by the ZM.
+     * Throws 403 if any item exceeds its ZM-configured limit and no approved STT permission exists.
      *
-     * @param requestedCableMeters total cable the TECH wants to consume
-     * @param itemQuantities map of itemId → requested quantity
+     * @param zmId          ZM responsible for this TECH (null falls back to hardcoded defaults)
+     * @param requestedItems all items the TECH wants to consume
      */
-    public void enforceUsageLimits(String caseId, String techId,
-                                    double requestedCableMeters,
-                                    Map<String, Integer> itemQuantities) {
-        boolean cableExceeds = requestedCableMeters > CABLE_LIMIT_METERS;
-        boolean itemExceeds = itemQuantities.values().stream().anyMatch(q -> q > ITEM_LIMIT_PIECES);
+    public void enforceUsageLimits(String caseId, String techId, String zmId,
+                                    List<UsedEquipmentRequestItem> requestedItems) {
+        if (requestedItems == null || requestedItems.isEmpty()) return;
 
-        if (!cableExceeds && !itemExceeds) {
-            return; // within automatic limits — no permission needed
+        List<String> violationMessages = new ArrayList<>();
+        double totalViolatingCableMeters = 0;
+        Map<String, Integer> itemViolations = new java.util.LinkedHashMap<>();
+        Map<String, String> itemViolationNames = new HashMap<>();
+
+        for (UsedEquipmentRequestItem item : requestedItems) {
+            boolean isCable = "METERS".equalsIgnoreCase(item.unit());
+            double qty = item.quantity();
+            Double limit = resolveItemLimit(zmId, item.equipmentId(), isCable);
+
+            if (limit != null && qty > limit) {
+                String unitLabel = isCable ? "m" : "pcs";
+                String name = (item.equipmentName() != null && !item.equipmentName().isBlank())
+                        ? item.equipmentName() : item.equipmentId();
+                violationMessages.add(name + " requested: " + fmtQty(qty, isCable) +
+                        " " + unitLabel + ", allowed without permission: " + fmtQty(limit, isCable) + " " + unitLabel);
+                if (isCable) {
+                    totalViolatingCableMeters += qty;
+                } else {
+                    itemViolations.put(item.equipmentId(), item.quantity());
+                    itemViolationNames.put(item.equipmentId(), name);
+                }
+            }
         }
 
+        if (violationMessages.isEmpty()) return; // all items within limits
+
+        // At least one item exceeds its limit — require an approved STT permission
         StockUsagePermissionRequest permission = permissionRepository
                 .findByCaseIdAndTechIdAndStatusIn(caseId, techId,
                         List.of("APPROVED", "PARTIALLY_APPROVED"))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN,
-                        "This operation requires STT permission because it exceeds the allowed stock usage limit. " +
-                                "Please submit a permission request first."));
+                        "This case uses more than the allowed limit configured by your ZM. " +
+                        "Please request STT permission before finishing. " +
+                        String.join("; ", violationMessages)));
 
-        // Enforce approved cable amount
-        if (cableExceeds && requestedCableMeters > permission.getApprovedCableMeters()) {
+        // Validate approved cable amount covers violating cable
+        if (totalViolatingCableMeters > 0
+                && totalViolatingCableMeters > permission.getApprovedCableMeters()) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                    "Cable usage " + requestedCableMeters + "m exceeds the approved amount of " +
-                            permission.getApprovedCableMeters() + "m.");
+                    "Cable usage " + fmtQty(totalViolatingCableMeters, true) +
+                    "m exceeds the approved amount of " +
+                    fmtQty(permission.getApprovedCableMeters(), true) + "m.");
         }
 
-        // Enforce approved item quantities
-        if (itemExceeds && permission.getApprovedItems() != null) {
+        // Validate approved item quantities
+        if (!itemViolations.isEmpty() && permission.getApprovedItems() != null) {
             Map<String, Double> approvedMap = permission.getApprovedItems().stream()
                     .collect(Collectors.toMap(PermissionItem::getItemId, PermissionItem::getApprovedQuantity));
-            for (Map.Entry<String, Integer> entry : itemQuantities.entrySet()) {
-                if (entry.getValue() > ITEM_LIMIT_PIECES) {
-                    double approved = approvedMap.getOrDefault(entry.getKey(), 0.0);
-                    if (entry.getValue() > approved) {
-                        throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                                "Item quantity " + entry.getValue() +
-                                        " exceeds the approved amount of " + (int) approved + ".");
-                    }
+            for (Map.Entry<String, Integer> entry : itemViolations.entrySet()) {
+                double approved = approvedMap.getOrDefault(entry.getKey(), 0.0);
+                if (entry.getValue() > approved) {
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                            itemViolationNames.getOrDefault(entry.getKey(), entry.getKey()) +
+                            " quantity " + entry.getValue() +
+                            " exceeds the approved amount of " + (int) approved + " pcs.");
                 }
             }
         }
+    }
+
+    /**
+     * Resolves the case usage limit for a specific item under the given ZM.
+     * Returns null when no limit applies (ZM disabled the limit for this item).
+     */
+    private Double resolveItemLimit(String zmId, String itemId, boolean isCable) {
+        if (zmId != null) {
+            java.util.Optional<StockThreshold> cfg =
+                    stockThresholdRepository.findByZmIdAndItemId(zmId, itemId);
+            if (cfg.isPresent()) {
+                StockThreshold t = cfg.get();
+                // ZM configured this item: respect their setting (null when disabled = no limit)
+                return t.isCaseUsageLimitEnabled() ? t.getCaseUsageLimit() : null;
+            }
+        }
+        // TODO: Fallback exists only for backward compatibility — remove once all ZMs configure limits.
+        return isCable ? FALLBACK_CABLE_LIMIT_METERS : (double) FALLBACK_ITEM_LIMIT_PIECES;
+    }
+
+    private String fmtQty(double qty, boolean isCable) {
+        if (!isCable) return String.valueOf((int) qty);
+        return qty == Math.floor(qty) ? String.valueOf((int) qty) : String.valueOf(qty);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -399,12 +469,20 @@ public class StockUsagePermissionService {
     private void notifyPermissionAlert(String recipientEmail, String level, String eventType,
                                         String title, String message, String permissionId,
                                         String caseId, String actionType) {
+        notifyPermissionAlert(recipientEmail, level, eventType, title, message,
+                permissionId, caseId, actionType, null);
+    }
+
+    private void notifyPermissionAlert(String recipientEmail, String level, String eventType,
+                                        String title, String message, String permissionId,
+                                        String caseId, String actionType, Map<String, Object> extraData) {
         if (recipientEmail == null) return;
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("permissionId", permissionId);
             data.put("caseId", caseId);
             data.put("routeHint", "/stt/stock/usage-approvals");
+            if (extraData != null) data.putAll(extraData);
 
             NotificationMessageDto payload = new NotificationMessageDto();
             payload.setEventType(eventType);

@@ -44,8 +44,11 @@ public class EquipmentService {
     public Equipment create(CreateEquipmentRequest request, MultipartFile image) {
         String caller = currentUser();
 
+        String articleCode = request.getArticleCode() != null ? request.getArticleCode().trim() : null;
+
         Equipment eq = Equipment.builder()
                 .name(request.getName())
+                .articleCode(articleCode)
                 .description(request.getDescription())
                 .unit(request.getUnit())
                 .category(request.getCategory())
@@ -77,7 +80,11 @@ public class EquipmentService {
 
     public Equipment update(String id, CreateEquipmentRequest request, MultipartFile image) {
         Equipment eq = getById(id);
+
+        String articleCode = request.getArticleCode() != null ? request.getArticleCode().trim() : null;
+
         eq.setName(request.getName());
+        eq.setArticleCode(articleCode);
         eq.setDescription(request.getDescription());
         eq.setUnit(request.getUnit());
         eq.setCategory(request.getCategory());

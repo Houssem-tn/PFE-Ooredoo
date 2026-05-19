@@ -16,6 +16,8 @@ public class StockThresholdResponse {
     private double criticalThreshold;
     private String unit;
     private boolean enabled;
+    private Double caseUsageLimit;
+    private boolean caseUsageLimitEnabled;
     private Instant createdAt;
     private Instant updatedAt;
     private String updatedBy;
@@ -32,6 +34,8 @@ public class StockThresholdResponse {
         r.criticalThreshold = t.getCriticalThreshold();
         r.unit = t.getUnit();
         r.enabled = t.isEnabled();
+        r.caseUsageLimit = t.getCaseUsageLimit();
+        r.caseUsageLimitEnabled = t.isCaseUsageLimitEnabled();
         r.createdAt = t.getCreatedAt();
         r.updatedAt = t.getUpdatedAt();
         r.updatedBy = t.getUpdatedBy();
@@ -50,6 +54,8 @@ public class StockThresholdResponse {
     public double getCriticalThreshold() { return criticalThreshold; }
     public String getUnit() { return unit; }
     public boolean isEnabled() { return enabled; }
+    public Double getCaseUsageLimit() { return caseUsageLimit; }
+    public boolean isCaseUsageLimitEnabled() { return caseUsageLimitEnabled; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
     public String getUpdatedBy() { return updatedBy; }

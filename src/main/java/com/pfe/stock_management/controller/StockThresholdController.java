@@ -1,5 +1,6 @@
 package com.pfe.stock_management.controller;
 
+import com.pfe.stock_management.dto.CaseLimitResponse;
 import com.pfe.stock_management.dto.StockThresholdRequest;
 import com.pfe.stock_management.dto.StockThresholdResponse;
 import com.pfe.stock_management.service.StockThresholdService;
@@ -57,5 +58,15 @@ public class StockThresholdController {
     @PreAuthorize("hasRole('ZM')")
     public ResponseEntity<StockThresholdResponse> toggle(@PathVariable String id) {
         return ResponseEntity.ok(thresholdService.toggle(id));
+    }
+
+    /**
+     * TECH/STT: returns per-item case usage limits configured by the ZM responsible for this case.
+     * Used by the frontend to detect over-limit usage proactively before work submission.
+     */
+    @GetMapping("/effective-case-limits/{caseId}")
+    @PreAuthorize("hasAnyRole('TECH','STT')")
+    public ResponseEntity<List<CaseLimitResponse>> getEffectiveCaseLimits(@PathVariable String caseId) {
+        return ResponseEntity.ok(thresholdService.getEffectiveCaseLimits(caseId));
     }
 }

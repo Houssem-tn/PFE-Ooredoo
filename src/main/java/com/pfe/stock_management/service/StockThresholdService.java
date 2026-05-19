@@ -2,6 +2,9 @@ package com.pfe.stock_management.service;
 
 import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
+import com.pfe.case_management.entity.CaseEntity;
+import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.stock_management.dto.CaseLimitResponse;
 import com.pfe.stock_management.dto.StockThresholdRequest;
 import com.pfe.stock_management.dto.StockThresholdResponse;
 import com.pfe.stock_management.entity.StockThreshold;
@@ -22,6 +25,7 @@ public class StockThresholdService {
 
     private final StockThresholdRepository thresholdRepository;
     private final UserRepository userRepository;
+    private final CaseRepository caseRepository;
 
     public List<StockThresholdResponse> getMyThresholds() {
         AppUser zm = currentZm();
@@ -35,6 +39,30 @@ public class StockThresholdService {
         return thresholdRepository.findByZmIdAndEnabledTrue(zmId)
                 .stream()
                 .map(StockThresholdResponse::from)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Returns all configured case usage limits for the ZM responsible for the given case.
+     * Resolves the chain: caseId → techId → STT → ZM.
+     * Called by TECH/STT role to feed proactive frontend limit detection.
+     */
+    public List<CaseLimitResponse> getEffectiveCaseLimits(String caseId) {
+        CaseEntity caseEntity = caseRepository.findById(caseId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Case not found"));
+
+        String techId = caseEntity.getTechId();
+        if (techId == null) return List.of();
+
+        AppUser tech = userRepository.findById(techId).orElse(null);
+        if (tech == null || tech.getAssignedSttId() == null) return List.of();
+
+        AppUser stt = userRepository.findById(tech.getAssignedSttId()).orElse(null);
+        if (stt == null || stt.getAssignedZmId() == null) return List.of();
+
+        return thresholdRepository.findByZmId(stt.getAssignedZmId()).stream()
+                .filter(t -> t.getCaseUsageLimit() != null)
+                .map(CaseLimitResponse::from)
                 .collect(Collectors.toList());
     }
 
@@ -96,6 +124,8 @@ public class StockThresholdService {
         threshold.setCriticalThreshold(request.getCriticalThreshold());
         threshold.setUnit(request.getUnit());
         threshold.setEnabled(request.isEnabled());
+        threshold.setCaseUsageLimitEnabled(request.isCaseUsageLimitEnabled());
+        threshold.setCaseUsageLimit(request.getCaseUsageLimit());
         threshold.setUpdatedAt(Instant.now());
         threshold.setUpdatedBy(zm.getEmail());
     }
@@ -104,6 +134,14 @@ public class StockThresholdService {
         if (req.getWarningThreshold() < req.getCriticalThreshold()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Warning threshold must be >= critical threshold");
+        }
+        if (req.isCaseUsageLimitEnabled() && req.getCaseUsageLimit() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "caseUsageLimit is required when caseUsageLimitEnabled is true");
+        }
+        if (req.getCaseUsageLimit() != null && req.getCaseUsageLimit() < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "caseUsageLimit must be >= 0");
         }
     }
 

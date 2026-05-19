@@ -28,6 +28,12 @@ public class StockThresholdRequest {
 
     private boolean enabled = true;
 
+    /** Maximum quantity/meters a TECH may use in one case without STT permission. */
+    @Min(0)
+    private Double caseUsageLimit;
+
+    private boolean caseUsageLimitEnabled = false;
+
     public String getItemId() { return itemId; }
     public void setItemId(String itemId) { this.itemId = itemId; }
 
@@ -48,4 +54,10 @@ public class StockThresholdRequest {
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
+
+    public Double getCaseUsageLimit() { return caseUsageLimit; }
+    public void setCaseUsageLimit(Double caseUsageLimit) { this.caseUsageLimit = caseUsageLimit; }
+
+    public boolean isCaseUsageLimitEnabled() { return caseUsageLimitEnabled; }
+    public void setCaseUsageLimitEnabled(boolean caseUsageLimitEnabled) { this.caseUsageLimitEnabled = caseUsageLimitEnabled; }
 }

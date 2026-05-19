@@ -246,20 +246,11 @@ public class SttStockService {
         }
 
         // ── Over-limit enforcement ────────────────────────────────────────────
-        // Backend enforces cable <= 20m and item quantity <= 1 unless STT approved.
+        // Limits are ZM-configured per item via StockThreshold.caseUsageLimit.
         if (requestedItems != null && !requestedItems.isEmpty()) {
-            double cableMeters = requestedItems.stream()
-                    .filter(i -> "METERS".equalsIgnoreCase(i.unit()))
-                    .mapToInt(UsedEquipmentRequestItem::quantity)
-                    .sum();
-            Map<String, Integer> itemQtys = new HashMap<>();
-            for (UsedEquipmentRequestItem item : requestedItems) {
-                if (!"METERS".equalsIgnoreCase(item.unit())) {
-                    itemQtys.put(item.equipmentId(), item.quantity());
-                }
-            }
+            String zmId = resolveZmIdForTech(technician);
             stockUsagePermissionService.enforceUsageLimits(
-                    caseEntity.getId(), technician.getId(), cableMeters, itemQtys);
+                    caseEntity.getId(), technician.getId(), zmId, requestedItems);
         }
         // ─────────────────────────────────────────────────────────────────────
 
@@ -703,6 +694,14 @@ public class SttStockService {
 
         techStock.setLastUpdatedAt(Instant.now());
         techStockRepository.save(techStock);
+    }
+
+    /** Resolves the ZM responsible for a TECH via the TECH→STT→ZM chain. Returns null if not resolvable. */
+    private String resolveZmIdForTech(AppUser tech) {
+        if (tech.getAssignedSttId() == null) return null;
+        return userRepository.findById(tech.getAssignedSttId())
+                .map(AppUser::getAssignedZmId)
+                .orElse(null);
     }
 
     private AppUser findByEmail(String email) {

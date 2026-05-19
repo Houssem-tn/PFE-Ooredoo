@@ -14,6 +14,8 @@ public class CreateEquipmentRequest {
     @NotBlank
     private String name;
 
+    private String articleCode;
+
     private String description;
     private StockUnit unit;
     private EquipmentCategory category;

@@ -47,6 +47,19 @@ public class StockThreshold {
     @Builder.Default
     private boolean enabled = true;
 
+    /**
+     * Maximum quantity/meters a TECH may consume in one case without STT approval.
+     * Null means the ZM has not configured a limit for this item.
+     */
+    private Double caseUsageLimit;
+
+    /**
+     * Whether the per-case usage limit is active for this item.
+     * When false the TECH can use any quantity without permission (stock availability still enforced).
+     */
+    @Builder.Default
+    private boolean caseUsageLimitEnabled = false;
+
     private Instant createdAt;
     private Instant updatedAt;
     private String updatedBy;
