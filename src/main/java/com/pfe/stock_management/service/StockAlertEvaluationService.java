@@ -169,7 +169,7 @@ public class StockAlertEvaluationService {
         data.put("routeHint", "/zm/stock/team-stock");
 
         NotificationMessageDto payload = buildPayload(eventType, title, message,
-                entityId, level, "OPEN_STOCK_PAGE", data);
+                entityId, level, "OPEN_STOCK", data);
 
         pushToRecipient(stt.getAssignedZmEmail(), payload);
     }
@@ -191,7 +191,7 @@ public class StockAlertEvaluationService {
                 dataStt.put("routeHint", "/stt/stock/my-stock");
 
                 NotificationMessageDto payloadStt = buildPayload(eventType, title, message,
-                        entityId, level, "OPEN_STOCK_PAGE", dataStt);
+                        entityId, level, "OPEN_STOCK", dataStt);
                 pushToRecipient(stt.getEmail(), payloadStt);
             }
         }
@@ -209,7 +209,7 @@ public class StockAlertEvaluationService {
                 dataZm.put("routeHint", "/zm/stock/team-stock");
 
                 NotificationMessageDto payloadZm = buildPayload(eventType, title, message,
-                        entityId, level, "OPEN_STOCK_PAGE", dataZm);
+                        entityId, level, "OPEN_STOCK", dataZm);
                 pushToRecipient(stt.getAssignedZmEmail(), payloadZm);
             }
         }
@@ -264,6 +264,7 @@ public class StockAlertEvaluationService {
         dto.setTriggeredBy("SYSTEM");
         dto.setCreatedAt(Instant.now());
         dto.setLevel(level);
+        dto.setCategory("STOCK");
         dto.setActionType(actionType);
         dto.setData(data);
         return dto;

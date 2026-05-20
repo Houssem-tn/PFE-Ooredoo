@@ -35,12 +35,14 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(user.getEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
-
+        dto.setLevel("INFO");
+        dto.setCategory("USER");
+        dto.setActionType("OPEN_USER");
         return dto;
     }
 
     public NotificationMessageDto buildCaseAssignedToZm(CaseEntity caseEntity, String triggeredBy) {
-        return buildCasePayload(
+        NotificationMessageDto dto = buildCasePayload(
                 "CASE_ASSIGNED_TO_ZM",
                 "New case assigned by Admin",
                 caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as ZM",
@@ -48,10 +50,14 @@ public class NotificationPayloadFactory {
                 triggeredBy,
                 "ROLE_ZM"
         );
+        dto.setLevel("INFO");
+        dto.setCategory("CASE");
+        dto.setActionType("OPEN_CASE");
+        return dto;
     }
 
     public NotificationMessageDto buildCaseAssignedToStt(CaseEntity caseEntity, String triggeredBy) {
-        return buildCasePayload(
+        NotificationMessageDto dto = buildCasePayload(
                 "CASE_ASSIGNED_TO_STT",
                 "New case assigned by ZM",
                 caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as STT",
@@ -59,10 +65,14 @@ public class NotificationPayloadFactory {
                 triggeredBy,
                 "ROLE_STT"
         );
+        dto.setLevel("INFO");
+        dto.setCategory("CASE");
+        dto.setActionType("OPEN_CASE");
+        return dto;
     }
 
     public NotificationMessageDto buildCaseAssignedToTech(CaseEntity caseEntity, String triggeredBy) {
-        return buildCasePayload(
+        NotificationMessageDto dto = buildCasePayload(
                 "CASE_ASSIGNED_TO_TECH",
                 "New case assigned by STT",
                 caseLabel(caseEntity) + " " + safe(caseEntity.getCrmCase()) + " has been assigned to you as TECH",
@@ -70,6 +80,10 @@ public class NotificationPayloadFactory {
                 triggeredBy,
                 "ROLE_TECH"
         );
+        dto.setLevel("INFO");
+        dto.setCategory("CASE");
+        dto.setActionType("OPEN_CASE");
+        return dto;
     }
 
     public NotificationMessageDto buildComplaintImportCompleted(
@@ -96,7 +110,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(triggeredBy);
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
-
+        dto.setLevel("INFO");
+        dto.setCategory("CASE");
+        dto.setActionType("OPEN_CASE");
         return dto;
     }
 
@@ -111,7 +127,7 @@ public class NotificationPayloadFactory {
         NotificationMessageDto dto = buildCasePayload(
                 "SLA_WARNING",
                 "SLA warning: RDV deadline approaching",
-            warningMessage,
+                warningMessage,
                 caseEntity,
                 "SYSTEM",
                 null
@@ -125,6 +141,9 @@ public class NotificationPayloadFactory {
             dto.getData().put("deadlineAt", sla.getDeadlineAt());
         }
 
+        dto.setLevel("WARNING");
+        dto.setCategory("SLA");
+        dto.setActionType("OPEN_CASE");
         return dto;
     }
 
@@ -146,6 +165,9 @@ public class NotificationPayloadFactory {
             dto.getData().put("progressPercent", sla.getProgressPercent());
         }
 
+        dto.setLevel("CRITICAL");
+        dto.setCategory("SLA");
+        dto.setActionType("OPEN_CASE");
         return dto;
     }
 
@@ -169,6 +191,9 @@ public class NotificationPayloadFactory {
             dto.getData().put("remainingSeconds", sla.getRemainingSeconds());
         }
 
+        dto.setLevel("CRITICAL");
+        dto.setCategory("SLA");
+        dto.setActionType("OPEN_CASE");
         return dto;
     }
 
@@ -222,6 +247,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(dpm.getZmEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("DPM");
+        dto.setActionType("OPEN_DPM");
         return dto;
     }
 
@@ -246,6 +274,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(dpm.getSttEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("DPM");
+        dto.setActionType("OPEN_DPM");
         return dto;
     }
 
@@ -266,6 +297,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(dpm.getSttEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("DPM");
+        dto.setActionType("OPEN_DPM");
         return dto;
     }
 
@@ -290,6 +324,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(dpm.getZmEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("DPM");
+        dto.setActionType("OPEN_DPM");
         return dto;
     }
 
@@ -310,6 +347,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(dpm.getSttEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("DPM");
+        dto.setActionType("OPEN_DPM");
         return dto;
     }
 
@@ -332,6 +372,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(dpm.getZmEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("DPM");
+        dto.setActionType("OPEN_DPM");
         return dto;
     }
 
@@ -352,6 +395,9 @@ public class NotificationPayloadFactory {
         dto.setTriggeredBy(distribution.getDistributedBy());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_STOCK");
         return dto;
     }
 

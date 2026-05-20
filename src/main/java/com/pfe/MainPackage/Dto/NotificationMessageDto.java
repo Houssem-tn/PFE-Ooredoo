@@ -28,7 +28,8 @@ public class NotificationMessageDto {
 
     // ── Alert Center fields ───────────────────────────────────────────────────
     private String level;       // CRITICAL | WARNING | INFO
-    private String actionType;  // OPEN_CASE | OPEN_DPM_REQUEST | ...
+    private String category;    // DPM | STOCK | CASE | PERMISSION | USER | SLA | SYSTEM
+    private String actionType;  // OPEN_CASE | OPEN_DPM | OPEN_STOCK | OPEN_PERMISSION_REQUEST | OPEN_USER | OPEN_THRESHOLDS | NONE
     private String relatedCaseId;
     private String relatedStockRequestId;
     private String relatedPermissionRequestId;
@@ -170,6 +171,9 @@ public class NotificationMessageDto {
 
     public String getLevel() { return level; }
     public void setLevel(String level) { this.level = level; }
+
+    public String getCategory() { return category; }
+    public void setCategory(String category) { this.category = category; }
 
     public String getActionType() { return actionType; }
     public void setActionType(String actionType) { this.actionType = actionType; }

@@ -48,9 +48,16 @@ public class Notification {
     private AlertLevel level;
 
     /**
+     * Business category for the Alert Center navigation.
+     * Values: DPM, STOCK, CASE, PERMISSION, USER, SLA, SYSTEM
+     * Null on legacy records — inferred at read time from eventType/actionType.
+     */
+    private AlertCategory category;
+
+    /**
      * Action hint for the Alert Center action button.
-     * Values: OPEN_CASE, OPEN_DPM_REQUEST, OPEN_STOCK_PERMISSION_REQUEST,
-     *         OPEN_STOCK_THRESHOLDS, OPEN_STOCK_PAGE, NONE
+     * Values: OPEN_CASE, OPEN_DPM, OPEN_STOCK, OPEN_PERMISSION_REQUEST,
+     *         OPEN_USER, OPEN_THRESHOLDS, NONE
      */
     private String actionType;
 

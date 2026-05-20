@@ -1,6 +1,7 @@
 package com.pfe.MainPackage.Service;
 
 import com.pfe.MainPackage.Dto.NotificationMessageDto;
+import com.pfe.MainPackage.Entity.AlertCategory;
 import com.pfe.MainPackage.Entity.AlertLevel;
 import com.pfe.MainPackage.Entity.Notification;
 import com.pfe.MainPackage.Entity.UserRole;
@@ -158,6 +159,7 @@ public class NotificationServiceImpl implements NotificationService {
                 .createdAt(payload.getCreatedAt() != null ? payload.getCreatedAt() : Instant.now())
                 .data(payload.getData())
                 .level(resolveLevel(payload.getLevel()))
+                .category(resolveCategory(payload.getCategory(), payload.getEventType(), payload.getActionType()))
                 .actionType(payload.getActionType())
                 .relatedCaseId(payload.getRelatedCaseId())
                 .relatedStockRequestId(payload.getRelatedStockRequestId())
@@ -180,6 +182,7 @@ public class NotificationServiceImpl implements NotificationService {
                 .createdAt(payload.getCreatedAt() != null ? payload.getCreatedAt() : Instant.now())
                 .data(payload.getData())
                 .level(resolveLevel(payload.getLevel()))
+                .category(resolveCategory(payload.getCategory(), payload.getEventType(), payload.getActionType()))
                 .actionType(payload.getActionType())
                 .relatedCaseId(payload.getRelatedCaseId())
                 .relatedStockRequestId(payload.getRelatedStockRequestId())
@@ -194,5 +197,39 @@ public class NotificationServiceImpl implements NotificationService {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * Resolves the business category, falling back to inference from eventType or actionType
+     * so that legacy notifications stored without a category still render correctly.
+     */
+    private AlertCategory resolveCategory(String categoryStr, String eventType, String actionType) {
+        if (categoryStr != null) {
+            try {
+                return AlertCategory.valueOf(categoryStr.toUpperCase());
+            } catch (IllegalArgumentException ignored) { }
+        }
+        // Infer from eventType
+        if (eventType != null) {
+            if (eventType.startsWith("DPM_") || eventType.startsWith("DPM"))              return AlertCategory.DPM;
+            if (eventType.startsWith("SLA_"))                                              return AlertCategory.SLA;
+            if (eventType.startsWith("CASE_") || eventType.contains("COMPLAINT"))         return AlertCategory.CASE;
+            if (eventType.startsWith("STOCK_USAGE_PERMISSION"))                           return AlertCategory.PERMISSION;
+            if (eventType.startsWith("STOCK_"))                                            return AlertCategory.STOCK;
+            if (eventType.equals("USER_REGISTERED"))                                       return AlertCategory.USER;
+            if (eventType.equals("THRESHOLD_UPDATED"))                                     return AlertCategory.STOCK;
+        }
+        // Infer from actionType (for any remaining legacy records)
+        if (actionType != null) {
+            if (actionType.equals("OPEN_CASE"))                                            return AlertCategory.CASE;
+            if (actionType.equals("OPEN_DPM") || actionType.equals("OPEN_DPM_REQUEST"))   return AlertCategory.DPM;
+            if (actionType.equals("OPEN_STOCK") || actionType.equals("OPEN_STOCK_PAGE"))  return AlertCategory.STOCK;
+            if (actionType.equals("OPEN_PERMISSION_REQUEST")
+                    || actionType.equals("OPEN_STOCK_PERMISSION_REQUEST"))                 return AlertCategory.PERMISSION;
+            if (actionType.equals("OPEN_USER"))                                            return AlertCategory.USER;
+            if (actionType.equals("OPEN_THRESHOLDS")
+                    || actionType.equals("OPEN_STOCK_THRESHOLDS"))                         return AlertCategory.STOCK;
+        }
+        return AlertCategory.SYSTEM;
     }
 }
