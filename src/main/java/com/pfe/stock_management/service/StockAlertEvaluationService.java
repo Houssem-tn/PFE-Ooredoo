@@ -102,11 +102,17 @@ public class StockAlertEvaluationService {
     // ── Private evaluation logic ──────────────────────────────────────────────
 
     private void evaluateSttItem(AppUser stt, SttStockItem item, List<StockThreshold> thresholds) {
-        double qty = item.getAvailableQuantity();
         StockThreshold threshold = findThreshold(thresholds, item.getEquipmentId());
 
-        double warningAt = threshold != null ? threshold.getWarningThreshold() : DEFAULT_WARNING_THRESHOLD;
-        double criticalAt = threshold != null ? threshold.getCriticalThreshold() : 0;
+        // Skip if STT alerts are explicitly disabled for this item
+        if (threshold != null && Boolean.FALSE.equals(threshold.getSttAlertsEnabled())) return;
+
+        double qty = item.getAvailableQuantity();
+        // Use STT-specific thresholds; fall back to legacy if not yet configured
+        double warningAt  = threshold != null && threshold.getSttWarningThreshold()  != null
+                ? threshold.getSttWarningThreshold()  : (threshold != null ? threshold.getWarningThreshold()  : DEFAULT_WARNING_THRESHOLD);
+        double criticalAt = threshold != null && threshold.getSttCriticalThreshold() != null
+                ? threshold.getSttCriticalThreshold() : (threshold != null ? threshold.getCriticalThreshold() : 0);
         String unit = item.getUnit() != null ? item.getUnit() : "PIECES";
 
         if (qty <= criticalAt) {
@@ -125,11 +131,17 @@ public class StockAlertEvaluationService {
     }
 
     private void evaluateTechItem(AppUser tech, AppUser stt, TechStockItem item, List<StockThreshold> thresholds) {
-        double qty = item.getRemainingQuantity();
         StockThreshold threshold = findThreshold(thresholds, item.getEquipmentId());
 
-        double warningAt = threshold != null ? threshold.getWarningThreshold() : DEFAULT_WARNING_THRESHOLD;
-        double criticalAt = threshold != null ? threshold.getCriticalThreshold() : 0;
+        // Skip if TECH alerts are explicitly disabled for this item
+        if (threshold != null && Boolean.FALSE.equals(threshold.getTechAlertsEnabled())) return;
+
+        double qty = item.getRemainingQuantity();
+        // Use TECH-specific thresholds; fall back to legacy if not yet configured
+        double warningAt  = threshold != null && threshold.getTechWarningThreshold()  != null
+                ? threshold.getTechWarningThreshold()  : (threshold != null ? threshold.getWarningThreshold()  : DEFAULT_WARNING_THRESHOLD);
+        double criticalAt = threshold != null && threshold.getTechCriticalThreshold() != null
+                ? threshold.getTechCriticalThreshold() : (threshold != null ? threshold.getCriticalThreshold() : 0);
         String unit = item.getUnit() != null ? item.getUnit() : "PIECES";
 
         if (qty <= criticalAt) {

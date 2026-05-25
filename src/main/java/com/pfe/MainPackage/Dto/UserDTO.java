@@ -19,6 +19,7 @@ public record UserDTO(
         AccountStatus status,
         boolean enabled,
         boolean canCreateDpm,
+        boolean canImportCoverage,
 
         Instant validatedAt,
         String validatedBy,

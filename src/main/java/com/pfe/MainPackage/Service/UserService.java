@@ -343,6 +343,17 @@ public class UserService {
         return mapper.toDto(repo.save(targetUser));
     }
 
+    public UserDTO updateCoverageImportPermission(String userId, boolean canImportCoverage) {
+        AppUser user = getEntity(userId);
+
+        if (user.getRole() != UserRole.ROLE_ZM) {
+            throw new IllegalArgumentException("Coverage import permission can only be granted to users with role ZM");
+        }
+
+        user.setCanImportCoverage(canImportCoverage);
+        return mapper.toDto(repo.save(user));
+    }
+
     public void delete(String id) {
         AppUser u = getEntity(id);
         repo.delete(u);

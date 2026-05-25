@@ -120,10 +120,35 @@ public class StockThresholdService {
     private void applyRequest(StockThreshold threshold, StockThresholdRequest request, AppUser zm) {
         threshold.setItemName(request.getItemName());
         threshold.setItemType(request.getItemType());
-        threshold.setWarningThreshold(request.getWarningThreshold());
-        threshold.setCriticalThreshold(request.getCriticalThreshold());
         threshold.setUnit(request.getUnit());
-        threshold.setEnabled(request.isEnabled());
+
+        // STT-specific thresholds
+        threshold.setSttWarningThreshold(request.getSttWarningThreshold());
+        threshold.setSttCriticalThreshold(request.getSttCriticalThreshold());
+        threshold.setSttAlertsEnabled(request.getSttAlertsEnabled());
+
+        // TECH-specific thresholds
+        threshold.setTechWarningThreshold(request.getTechWarningThreshold());
+        threshold.setTechCriticalThreshold(request.getTechCriticalThreshold());
+        threshold.setTechAlertsEnabled(request.getTechAlertsEnabled());
+
+        // Legacy fields — only overwrite if explicitly sent by client
+        if (request.getWarningThreshold() != null) {
+            threshold.setWarningThreshold(request.getWarningThreshold());
+        }
+        if (request.getCriticalThreshold() != null) {
+            threshold.setCriticalThreshold(request.getCriticalThreshold());
+        }
+
+        // Master enabled = true when either alert channel is active
+        boolean sttOn  = Boolean.TRUE.equals(request.getSttAlertsEnabled());
+        boolean techOn = Boolean.TRUE.equals(request.getTechAlertsEnabled());
+        if (request.getSttAlertsEnabled() == null && request.getTechAlertsEnabled() == null) {
+            threshold.setEnabled(request.isEnabled());
+        } else {
+            threshold.setEnabled(sttOn || techOn);
+        }
+
         threshold.setCaseUsageLimitEnabled(request.isCaseUsageLimitEnabled());
         threshold.setCaseUsageLimit(request.getCaseUsageLimit());
         threshold.setUpdatedAt(Instant.now());
@@ -131,7 +156,21 @@ public class StockThresholdService {
     }
 
     private void validateThresholdValues(StockThresholdRequest req) {
-        if (req.getWarningThreshold() < req.getCriticalThreshold()) {
+        // STT thresholds
+        if (req.getSttWarningThreshold() != null && req.getSttCriticalThreshold() != null
+                && req.getSttWarningThreshold() < req.getSttCriticalThreshold()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "STT warning threshold must be >= STT critical threshold");
+        }
+        // TECH thresholds
+        if (req.getTechWarningThreshold() != null && req.getTechCriticalThreshold() != null
+                && req.getTechWarningThreshold() < req.getTechCriticalThreshold()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "TECH warning threshold must be >= TECH critical threshold");
+        }
+        // Legacy thresholds (old clients)
+        if (req.getWarningThreshold() != null && req.getCriticalThreshold() != null
+                && req.getWarningThreshold() < req.getCriticalThreshold()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Warning threshold must be >= critical threshold");
         }

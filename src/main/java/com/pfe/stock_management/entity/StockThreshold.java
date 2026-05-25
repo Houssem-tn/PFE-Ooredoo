@@ -35,17 +35,33 @@ public class StockThreshold {
     /** EQUIPMENT or CABLE */
     private String itemType;
 
-    /** Quantity at which a WARNING alert is created. */
+    // ── Legacy combined thresholds (kept for backwards compat with old documents) ──
+    /** @deprecated Use sttWarningThreshold / techWarningThreshold instead. */
     private double warningThreshold;
-
-    /** Quantity at which a CRITICAL alert is created (usually 0). */
+    /** @deprecated Use sttCriticalThreshold / techCriticalThreshold instead. */
     private double criticalThreshold;
+    /** Master enable flag — true when either sttAlertsEnabled or techAlertsEnabled is true. */
+    @Builder.Default
+    private boolean enabled = true;
+
+    // ── STT-specific thresholds (null = not yet configured via new UI → falls back to legacy) ──
+    /** WARNING alert fires to ZM when STT quantity ≤ this value. */
+    private Double sttWarningThreshold;
+    /** CRITICAL alert fires to ZM when STT quantity ≤ this value. */
+    private Double sttCriticalThreshold;
+    /** Whether STT stock alerts are active for this item. */
+    private Boolean sttAlertsEnabled;
+
+    // ── TECH-specific thresholds ────────────────────────────────────────────────
+    /** WARNING alert fires to STT when TECH quantity ≤ this value. */
+    private Double techWarningThreshold;
+    /** CRITICAL alert fires to STT + ZM when TECH quantity ≤ this value. */
+    private Double techCriticalThreshold;
+    /** Whether TECH stock alerts are active for this item. */
+    private Boolean techAlertsEnabled;
 
     /** PIECE or METER */
     private String unit;
-
-    @Builder.Default
-    private boolean enabled = true;
 
     /**
      * Maximum quantity/meters a TECH may consume in one case without STT approval.

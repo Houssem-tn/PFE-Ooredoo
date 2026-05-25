@@ -19,6 +19,8 @@ import java.util.List;
 @RequestMapping("/api/v1/users")
 public class UserController {
 
+    public record CoverageImportPermissionRequest(boolean canImportCoverage) {}
+
     public record CoverageRequestUpdateRequest(
             List<@NotBlank(message = "Governorate names cannot be blank") String> requestedGovernorates
     ) {
@@ -121,6 +123,15 @@ public class UserController {
                                     Authentication authentication,
                                     @Valid @RequestBody CoverageValidationRequest req) {
         return service.validateCoverageAreas(authentication.getName(), sttId, req.approvedGovernorates());
+    }
+
+    @PatchMapping("/{userId}/coverage-import-permission")
+    @PreAuthorize("hasAuthority('ROLE_ADMIN')")
+    public UserDTO updateCoverageImportPermission(
+            @PathVariable String userId,
+            @RequestBody CoverageImportPermissionRequest req
+    ) {
+        return service.updateCoverageImportPermission(userId, req.canImportCoverage());
     }
 
     @PostMapping(value = "/{id}/profile-image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)

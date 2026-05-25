@@ -87,6 +87,9 @@ public class AppUser {
     @Builder.Default
     private boolean selfExecutor = false;
 
+    @Builder.Default
+    private boolean canImportCoverage = false;
+
     @CreatedDate
     private Instant createdAt;
 
