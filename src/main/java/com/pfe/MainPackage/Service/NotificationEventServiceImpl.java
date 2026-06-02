@@ -10,6 +10,7 @@ import com.pfe.Notification.WebSocketNotificationSender;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
+import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import org.springframework.stereotype.Service;
 
 import java.util.HashSet;
@@ -184,6 +185,27 @@ public class NotificationEventServiceImpl implements NotificationEventService {
         if (distribution == null || isBlank(distribution.getTechEmail())) return;
         NotificationMessageDto payload = payloadFactory.buildStockDistributed(distribution);
         sendToRecipient(distribution.getTechEmail(), payload);
+    }
+
+    @Override
+    public void onMaterialReturnSubmitted(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getZmEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildMaterialReturnSubmitted(returnRequest);
+        sendToRecipient(returnRequest.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onMaterialReturnApproved(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getSttEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildMaterialReturnApproved(returnRequest);
+        sendToRecipient(returnRequest.getSttEmail(), payload);
+    }
+
+    @Override
+    public void onMaterialReturnRejected(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getSttEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildMaterialReturnRejected(returnRequest);
+        sendToRecipient(returnRequest.getSttEmail(), payload);
     }
 
     private void sendToRecipients(NotificationMessageDto payload, String... emails) {

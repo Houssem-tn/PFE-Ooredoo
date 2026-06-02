@@ -7,6 +7,7 @@ import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
+import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -423,5 +424,89 @@ public class NotificationPayloadFactory {
         }
 
         return "/cases/activation";
+    }
+
+    // ── Material Return payloads ───────────────────────────────────────────────
+
+    public NotificationMessageDto buildMaterialReturnSubmitted(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("sttId", req.getSttId());
+        data.put("sttName", req.getSttName());
+        data.put("reason", req.getReason() != null ? req.getReason().name() : null);
+        data.put("destination", req.getDestination() != null ? req.getDestination().name() : null);
+        data.put("itemCount", req.getItems() != null ? req.getItems().size() : 0);
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_SUBMITTED");
+        dto.setTitle("Material Return Pending Review");
+        dto.setMessage("STT " + safe(req.getSttName()) + " submitted return "
+                + safe(req.getReturnCode()) + " for your validation.");
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("PENDING");
+        dto.setTriggeredBy(req.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    public NotificationMessageDto buildMaterialReturnApproved(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("zmName", req.getReviewedByZmName());
+        data.put("reviewComment", req.getReviewComment());
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_APPROVED");
+        dto.setTitle("Material Return Approved");
+        dto.setMessage("Your return " + safe(req.getReturnCode())
+                + " was approved by ZM " + safe(req.getReviewedByZmName()) + ".");
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("CLOSED");
+        dto.setTriggeredBy(req.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    public NotificationMessageDto buildMaterialReturnRejected(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("zmName", req.getReviewedByZmName());
+        data.put("reviewComment", req.getReviewComment());
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_REJECTED");
+        dto.setTitle("Material Return Rejected");
+        dto.setMessage("Your return " + safe(req.getReturnCode())
+                + " was rejected by ZM " + safe(req.getReviewedByZmName()) + "."
+                + (req.getReviewComment() != null ? " Reason: " + req.getReviewComment() : ""));
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("REJECTED");
+        dto.setTriggeredBy(req.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
     }
 }

@@ -4,6 +4,7 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
+import com.pfe.stock_management.material_return.MaterialReturnRequest;
 
 public interface NotificationEventService {
     void onUserRegistered(AppUser user);
@@ -38,4 +39,10 @@ public interface NotificationEventService {
     void onExternalRejected(DpmRequest dpm);
 
     void onStockDistributedToTech(SttDistribution distribution);
+
+    void onMaterialReturnSubmitted(MaterialReturnRequest returnRequest);
+
+    void onMaterialReturnApproved(MaterialReturnRequest returnRequest);
+
+    void onMaterialReturnRejected(MaterialReturnRequest returnRequest);
 }
