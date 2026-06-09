@@ -11,6 +11,8 @@ import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.HashSet;
@@ -19,6 +21,8 @@ import java.util.Set;
 
 @Service
 public class NotificationEventServiceImpl implements NotificationEventService {
+
+    private static final Logger log = LoggerFactory.getLogger(NotificationEventServiceImpl.class);
 
     private final WebSocketNotificationSender sender;
     private final NotificationPayloadFactory payloadFactory;
@@ -195,16 +199,37 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     }
 
     @Override
-    public void onMaterialReturnApproved(MaterialReturnRequest returnRequest) {
+    public void onMaterialReturnRejected(MaterialReturnRequest returnRequest) {
         if (returnRequest == null || isBlank(returnRequest.getSttEmail())) return;
-        NotificationMessageDto payload = payloadFactory.buildMaterialReturnApproved(returnRequest);
+        NotificationMessageDto payload = payloadFactory.buildMaterialReturnRejected(returnRequest);
         sendToRecipient(returnRequest.getSttEmail(), payload);
     }
 
     @Override
-    public void onMaterialReturnRejected(MaterialReturnRequest returnRequest) {
+    public void onHandoverScheduleProposed(MaterialReturnRequest returnRequest) {
         if (returnRequest == null || isBlank(returnRequest.getSttEmail())) return;
-        NotificationMessageDto payload = payloadFactory.buildMaterialReturnRejected(returnRequest);
+        NotificationMessageDto payload = payloadFactory.buildHandoverScheduleProposed(returnRequest);
+        sendToRecipient(returnRequest.getSttEmail(), payload);
+    }
+
+    @Override
+    public void onScheduleAcceptedByStt(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getZmEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildScheduleAcceptedByStt(returnRequest);
+        sendToRecipient(returnRequest.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onScheduleRejectedByStt(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getZmEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildScheduleRejectedByStt(returnRequest);
+        sendToRecipient(returnRequest.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onMaterialHandedOver(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getSttEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildMaterialHandedOver(returnRequest);
         sendToRecipient(returnRequest.getSttEmail(), payload);
     }
 
@@ -228,9 +253,14 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     }
 
     private void sendToRecipient(String email, NotificationMessageDto payload) {
+        log.info("[Notification] sendToRecipient start email={} eventType={} entityId={}",
+                email, payload != null ? payload.getEventType() : null, payload != null ? payload.getEntityId() : null);
         Notification saved = notificationService.createForRecipient(email, payload);
         if (saved != null) {
             sender.sendToUser(email, saved);
+            log.info("[Notification] sendToRecipient delivered email={} notificationId={}", email, saved.getId());
+        } else {
+            log.warn("[Notification] sendToRecipient skipped email={} because notification was not created", email);
         }
     }
 

@@ -457,32 +457,6 @@ public class NotificationPayloadFactory {
         return dto;
     }
 
-    public NotificationMessageDto buildMaterialReturnApproved(MaterialReturnRequest req) {
-        Map<String, Object> data = new HashMap<>();
-        data.put("returnId", req.getId());
-        data.put("returnCode", req.getReturnCode());
-        data.put("zmName", req.getReviewedByZmName());
-        data.put("reviewComment", req.getReviewComment());
-
-        NotificationMessageDto dto = new NotificationMessageDto();
-        dto.setEventType("MATERIAL_RETURN_APPROVED");
-        dto.setTitle("Material Return Approved");
-        dto.setMessage("Your return " + safe(req.getReturnCode())
-                + " was approved by ZM " + safe(req.getReviewedByZmName()) + ".");
-        dto.setEntityType("MATERIAL_RETURN");
-        dto.setEntityId(req.getId());
-        dto.setStatus("CLOSED");
-        dto.setTriggeredBy(req.getZmEmail());
-        dto.setCreatedAt(Instant.now());
-        dto.setData(data);
-        dto.setLevel("INFO");
-        dto.setCategory("STOCK");
-        dto.setActionType("OPEN_MATERIAL_RETURN");
-        dto.setRelatedStockRequestId(req.getId());
-        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
-        return dto;
-    }
-
     public NotificationMessageDto buildMaterialReturnRejected(MaterialReturnRequest req) {
         Map<String, Object> data = new HashMap<>();
         data.put("returnId", req.getId());
@@ -500,6 +474,120 @@ public class NotificationPayloadFactory {
         dto.setEntityId(req.getId());
         dto.setStatus("REJECTED");
         dto.setTriggeredBy(req.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    public NotificationMessageDto buildHandoverScheduleProposed(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("zmName", req.getZmName());
+        data.put("handoverDate", req.getProposedHandoverDate());
+        data.put("handoverTime", req.getProposedHandoverTime());
+        data.put("handoverNote", req.getProposedHandoverNote());
+        data.put("routeHint", "/stt/stock/returns");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_SCHEDULE_PROPOSED");
+        dto.setTitle("Handover schedule proposed — action required");
+        dto.setMessage("ZM " + safe(req.getZmName()) + " proposed a handover for return "
+                + safe(req.getReturnCode()) + " on " + safe(req.getProposedHandoverDate())
+                + " at " + safe(req.getProposedHandoverTime()) + ". Please confirm or request a new slot.");
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("SCHEDULE_PROPOSED");
+        dto.setTriggeredBy(req.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    public NotificationMessageDto buildScheduleAcceptedByStt(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("sttName", req.getSttName());
+        data.put("handoverDate", req.getProposedHandoverDate());
+        data.put("handoverTime", req.getProposedHandoverTime());
+        data.put("routeHint", "/zm/stock/returns");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_SCHEDULE_CONFIRMED");
+        dto.setTitle("Handover schedule confirmed by STT");
+        dto.setMessage("STT " + safe(req.getSttName()) + " confirmed the handover for return "
+                + safe(req.getReturnCode()) + " on " + safe(req.getProposedHandoverDate())
+                + " at " + safe(req.getProposedHandoverTime()) + ".");
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("SCHEDULE_CONFIRMED");
+        dto.setTriggeredBy(req.getSttEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    public NotificationMessageDto buildMaterialHandedOver(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("zmName", req.getZmName());
+        data.put("routeHint", "/stt/stock/returns");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_HANDED_OVER");
+        dto.setTitle("Material return completed");
+        dto.setMessage("ZM " + safe(req.getZmName()) + " confirmed receipt of return "
+                + safe(req.getReturnCode()) + ". The handover is now complete.");
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("HANDED_OVER");
+        dto.setTriggeredBy(req.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("STOCK");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    public NotificationMessageDto buildScheduleRejectedByStt(MaterialReturnRequest req) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("sttName", req.getSttName());
+        data.put("rescheduleComment", req.getSttScheduleResponseComment());
+        data.put("routeHint", "/zm/stock/returns");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_RESCHEDULE_REQUESTED");
+        dto.setTitle("STT requested a new handover slot");
+        dto.setMessage("STT " + safe(req.getSttName()) + " declined the proposed schedule for return "
+                + safe(req.getReturnCode()) + " and is requesting a new date/time."
+                + (req.getSttScheduleResponseComment() != null
+                        ? " Reason: " + req.getSttScheduleResponseComment() : ""));
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("RESCHEDULE_REQUESTED");
+        dto.setTriggeredBy(req.getSttEmail());
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("WARNING");

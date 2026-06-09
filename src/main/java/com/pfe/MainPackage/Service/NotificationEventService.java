@@ -42,7 +42,18 @@ public interface NotificationEventService {
 
     void onMaterialReturnSubmitted(MaterialReturnRequest returnRequest);
 
-    void onMaterialReturnApproved(MaterialReturnRequest returnRequest);
-
+    /** ZM rejected the return request itself → notify STT */
     void onMaterialReturnRejected(MaterialReturnRequest returnRequest);
+
+    /** ZM proposed a handover schedule → notify STT */
+    void onHandoverScheduleProposed(MaterialReturnRequest returnRequest);
+
+    /** STT accepted the proposed schedule → notify ZM */
+    void onScheduleAcceptedByStt(MaterialReturnRequest returnRequest);
+
+    /** STT rejected the proposed schedule (reschedule requested) → notify ZM */
+    void onScheduleRejectedByStt(MaterialReturnRequest returnRequest);
+
+    /** ZM confirmed physical receipt of returned material → notify STT */
+    void onMaterialHandedOver(MaterialReturnRequest returnRequest);
 }

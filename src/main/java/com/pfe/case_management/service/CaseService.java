@@ -12,10 +12,12 @@ import com.pfe.MainPackage.Service.FileStorageService;
 import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
+import com.pfe.case_management.dto.BulkPltImportResult;
 import com.pfe.case_management.dto.CaseProofFileResponse;
 import com.pfe.case_management.dto.ComplaintDiagnosisRequest;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
+import com.pfe.case_management.dto.PltCaseRow;
 import com.pfe.case_management.dto.ReopenComplaintRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
 import com.pfe.case_management.dto.ValidateZmRequest;
@@ -49,10 +51,17 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -61,6 +70,10 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class CaseService {
+    private static final Logger log = LoggerFactory.getLogger(CaseService.class);
+
+    private static final String PLT_IMPORT_SOURCE = "PLT_TODO_IMPORT";
+
     private static final Set<CaseStatus> ASSIGN_STT_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_ZM,
         CaseStatus.ASSIGNED_TO_STT,
@@ -84,6 +97,7 @@ public class CaseService {
     );
 
     private static final Set<CaseStatus> COMPLAINT_ASSIGN_TECH_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,   // PLT-imported complaints skip diagnosis and assign TECH directly
         CaseStatus.DIAGNOSIS_STEP,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RETURNED_TO_STT,
@@ -273,6 +287,178 @@ public class CaseService {
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
     }
 
+    /**
+     * Creates complaint cases (CaseType.PLAINTE) in bulk from PLT Excel rows.
+     * Called by TodoImportService when businessType=PLT; no ROLE_ADMIN guard —
+     * the caller authenticates as ROLE_ZM and passes the resolved user directly.
+     */
+    public BulkPltImportResult bulkImportPltComplaintCases(
+            List<PltCaseRow> rows,
+            AppUser connectedZm,
+            String batchId,
+            String sourceFileName
+    ) {
+        if (rows == null || rows.isEmpty()) {
+            return new BulkPltImportResult(0, 0, 0);
+        }
+
+        Instant now = Instant.now();
+
+        // Bulk duplicate check against existing PLAINTE cases
+        List<String> candidateCrmCases = rows.stream()
+                .map(PltCaseRow::crmCase)
+                .filter(c -> c != null && !c.isBlank())
+                .distinct()
+                .toList();
+
+        Set<String> existingCrmCases = candidateCrmCases.isEmpty() ? Set.of()
+                : repository.findByTypeAndCrmCaseIn(CaseType.PLAINTE, candidateCrmCases)
+                        .stream()
+                        .map(CaseEntity::getCrmCase)
+                        .filter(c -> c != null && !c.isBlank())
+                        .collect(Collectors.toSet());
+
+        Set<String> seenInBatch = new LinkedHashSet<>();
+        int created = 0;
+        int duplicates = 0;
+        int invalid = 0;
+
+        for (PltCaseRow row : rows) {
+            if (row.crmCase() == null || row.crmCase().isBlank()) {
+                log.warn("PLT import: skipping row {} with missing CRM_CASE", row.rowNumber());
+                invalid++;
+                continue;
+            }
+
+            // A missing gouvernorat means the case can never have an STT assigned
+            // (sttCoversGovernorate checks isBlank(gouvernorat) → false immediately).
+            // Skip rather than creating a permanently stuck case.
+            if (row.gouvernorat() == null || row.gouvernorat().isBlank()) {
+                log.warn("PLT import: skipping row {} crmCase={} — gouvernorat is blank", row.rowNumber(), row.crmCase());
+                invalid++;
+                continue;
+            }
+
+            String trimmedCrm = row.crmCase().trim();
+
+            if (!seenInBatch.add(trimmedCrm)) {
+                duplicates++;
+                continue;
+            }
+
+            if (existingCrmCases.contains(trimmedCrm)) {
+                duplicates++;
+                continue;
+            }
+
+            try {
+                CaseEntity complaint = buildPltComplaintEntity(row, connectedZm, batchId, sourceFileName, now);
+                CaseEntity saved = repository.save(complaint);
+                try {
+                    notificationEventService.onCaseAssignedToZm(saved, connectedZm.getEmail());
+                } catch (Exception notifEx) {
+                    log.warn("PLT import: notification failed for case crmCase={}: {}", trimmedCrm, notifEx.getMessage());
+                }
+                created++;
+            } catch (Exception ex) {
+                log.warn("PLT import: failed to create complaint case crmCase={}: {}", trimmedCrm, ex.getMessage());
+                invalid++;
+            }
+        }
+
+        log.info("plt_bulk_import batchId={} sourceFile={} zmEmail={} rows={} created={} duplicates={} invalid={}",
+                batchId, sourceFileName, connectedZm.getEmail(), rows.size(), created, duplicates, invalid);
+
+        return new BulkPltImportResult(created, duplicates, invalid);
+    }
+
+    private CaseEntity buildPltComplaintEntity(
+            PltCaseRow row,
+            AppUser connectedZm,
+            String batchId,
+            String sourceFileName,
+            Instant now
+    ) {
+        Instant openingDateTimos = row.openDateSurTimosDate() != null
+                ? row.openDateSurTimosDate().atStartOfDay().toInstant(ZoneOffset.UTC)
+                : null;
+
+        // Try to normalize the governorate; fall back to canonical value from analytics
+        String gouvernorat = row.gouvernorat();
+        if (!isBlank(gouvernorat)) {
+            try {
+                gouvernorat = TunisiaGovernorateSupport.requireSupported(gouvernorat);
+            } catch (IllegalArgumentException | ResponseStatusException ignored) {
+                // Keep canonical value already set by TodoAnalyticsSupport
+            }
+        }
+
+        // DMS coordinate conversion using the same utility used in todo import
+        Double decimalLat = TodoAnalyticsSupport.parseCoordinateToDecimal(row.rawLatitude());
+        Double decimalLon = TodoAnalyticsSupport.parseCoordinateToDecimal(row.rawLongitude());
+
+        CaseEntity complaint = CaseEntity.builder()
+                .type(CaseType.PLAINTE)
+                .crmCase(row.crmCase().trim())
+                .openingDateTimos(openingDateTimos)
+                .status(CaseStatus.ASSIGNED_TO_ZM)
+                .clientPhone(row.contact1())
+                .contactCl2(row.contact2())
+                .msisdn(row.msisdn())
+                .gouvernorat(gouvernorat)
+                .latitude(decimalLat != null ? String.valueOf(decimalLat) : row.normalizedLatitude())
+                .longitude(decimalLon != null ? String.valueOf(decimalLon) : row.normalizedLongitude())
+                .complaintDetail(row.description())
+                .complaintDescription(row.description())
+                .ownerZmId(connectedZm.getId())
+                .ownerZmName(connectedZm.getFullName())
+                .zmId(connectedZm.getId())
+                .zmEmail(connectedZm.getEmail())
+                .zmName(connectedZm.getFullName())
+                .dateAffectationZm(now)
+                .sourceAssignedSttName(row.sttFromExcel())
+                .sourceStatut(row.statutFromExcel())
+                .sourceGovernorate(row.gouvernorat())
+                .sourceLastImportedAt(now)
+                .source(PLT_IMPORT_SOURCE)
+                .createdAt(now)
+                .updatedAt(now)
+                .createdBy(connectedZm.getEmail())
+                .build();
+
+        caseTimelineService.append(
+                complaint,
+                CaseTimelineEventType.CASE_CREATED,
+                "Complaint imported from PLT file",
+                "Imported from " + sourceFileName + " (batch " + batchId + ")."
+                        + " STATUT = En cours, ZONE_MNANAGER matched " + safe(connectedZm.getFullName(), connectedZm.getEmail()) + ".",
+                connectedZm.getEmail(),
+                null,
+                CaseStatus.ASSIGNED_TO_ZM,
+                timelineData(
+                        "source", PLT_IMPORT_SOURCE,
+                        "importBatchId", batchId,
+                        "crmCase", row.crmCase().trim()
+                )
+        );
+
+        caseTimelineService.append(
+                complaint,
+                CaseTimelineEventType.ASSIGNMENT_UPDATED,
+                "Assigned to Zone Manager",
+                "Automatically assigned to ZM " + safe(connectedZm.getFullName(), connectedZm.getEmail()) + " from PLT import.",
+                connectedZm.getEmail(),
+                null,
+                CaseStatus.ASSIGNED_TO_ZM,
+                timelineData(
+                        "assigneeRole", "ROLE_ZM",
+                        "assigneeEmail", connectedZm.getEmail()
+                )
+        );
+
+        return complaint;
+    }
+
     public CaseEntity getCaseById(String caseId) {
         CaseEntity c = getCaseOrThrow(caseId);
 
@@ -392,7 +578,8 @@ public class CaseService {
             "Case cannot be assigned to TECH in current state"
         );
 
-        if (isComplaint(c)) {
+        // PLT-imported complaints skip the mandatory diagnosis step and go directly to TECH like ACT cases.
+        if (isComplaint(c) && !isPltImportSource(c)) {
             ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before TECH assignment");
         }
 
@@ -467,7 +654,8 @@ public class CaseService {
                 "Case cannot switch to STT self-execution in current state"
         );
 
-        if (isComplaint(c)) {
+        // PLT-imported complaints skip the mandatory diagnosis step — STT may self-execute directly.
+        if (isComplaint(c) && !isPltImportSource(c)) {
             ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before STT self-execution");
         }
 
@@ -606,7 +794,8 @@ public class CaseService {
         ensureCurrentUserCanExecuteCase(c);
 
         ensureStatusIn(c, completeWorkAllowedStatuses(c), "Work completion is not allowed in current state");
-        if (isComplaint(c)) {
+        // PLT-imported complaints skip the diagnosis prerequisite — work can be completed like ACT.
+        if (isComplaint(c) && !isPltImportSource(c)) {
             ensureComplaintRequiresFieldExecution(c, "Complaint work can only be submitted after a diagnosis requiring field intervention");
         }
         validateLocationSnapshot(
@@ -1017,6 +1206,11 @@ public class CaseService {
 
     private boolean isComplaint(CaseEntity caseEntity) {
         return caseEntity != null && caseEntity.getType() == CaseType.PLAINTE;
+    }
+
+    /** PLT Excel imports skip the mandatory RDV + diagnosis step and follow the ACT-like direct-TECH workflow. */
+    private boolean isPltImportSource(CaseEntity caseEntity) {
+        return caseEntity != null && "PLT_TODO_IMPORT".equals(caseEntity.getSource());
     }
 
     private void ensureComplaintCase(CaseEntity caseEntity) {

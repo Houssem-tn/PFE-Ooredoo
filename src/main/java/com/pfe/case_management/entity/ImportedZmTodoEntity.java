@@ -1,6 +1,9 @@
 package com.pfe.case_management.entity;
 
 import com.pfe.case_management.model.ImportedTodoSourceType;
+import com.pfe.case_management.model.TodoTimelineEvent;
+import com.pfe.case_management.model.ZmTodoBusinessType;
+import com.pfe.case_management.model.ZmTodoWorkflowStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -14,6 +17,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -26,6 +30,10 @@ import java.util.Map;
         @CompoundIndex(
                 name = "imported_zm_todos_owner_uploaded_idx",
                 def = "{'uploadedBy': 1, 'uploadedAt': -1}"
+        ),
+        @CompoundIndex(
+                name = "imported_zm_todos_field_work_dup_idx",
+                def = "{'uploadedBy': 1, 'businessType': 1, 'crmCaseNormalized': 1}"
         )
 })
 @Getter
@@ -91,4 +99,31 @@ public class ImportedZmTodoEntity {
     private String zoneManagerNormalized;
 
     private Map<String, String> sourceValues;
+
+    // --- Field work workflow fields ---
+
+    @Indexed
+    private ZmTodoBusinessType businessType;
+
+    @Indexed
+    private ZmTodoWorkflowStatus workflowStatus;
+
+    private Double decimalLatitude;
+    private Double decimalLongitude;
+
+    private String assignedSttId;
+    private String assignedSttName;
+    private String assignedTechId;
+    private String assignedTechName;
+
+    private String priority;
+    private Integer agingDays;
+
+    private Boolean workCreated;
+    private LocalDateTime workCreatedAt;
+
+    private List<TodoTimelineEvent> timeline;
+
+    private LocalDateTime lastActionAt;
+    private LocalDateTime closedAt;
 }

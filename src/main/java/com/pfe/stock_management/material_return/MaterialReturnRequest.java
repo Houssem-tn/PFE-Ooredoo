@@ -23,28 +23,26 @@ public class MaterialReturnRequest {
     @Indexed(unique = true)
     private String returnCode; // e.g. RET-2026-0001
 
-    // STT identity
+    // ── STT identity ──────────────────────────────────────────────────────────
     private String sttId;
     private String sttName;
     private String sttEmail;
 
-    // Responsible ZM (resolved at creation)
+    // ── Responsible ZM (selected by STT at creation) ─────────────────────────
     private String zmId;
     private String zmName;
     private String zmEmail;
 
-    // Optional case link
+    // ── Optional case link ────────────────────────────────────────────────────
     private String relatedCaseId;
     private String relatedCaseType; // ACT, RES, PLT, DMG
     private String crmCase;
 
-    // Return source — determines whether STT stock is decremented on approval
+    // ── Source DPM (audit trail link) ─────────────────────────────────────────
+    private String sourceDpmId;
+
+    // ── Return classification ─────────────────────────────────────────────────
     private ReturnSource returnSource;
-
-    // Planned handover date (ISO "YYYY-MM-DD") — informational for ZM
-    private String plannedReturnDate;
-
-    // Return classification
     private ReturnReason reason;
     private ReturnCondition condition;
     private ReturnDestination destination;
@@ -57,16 +55,35 @@ public class MaterialReturnRequest {
     @Builder.Default
     private List<String> proofImageUrls = new ArrayList<>();
 
+    // ── Status ────────────────────────────────────────────────────────────────
     private MaterialReturnStatus status;
 
-    // Timestamps
-    private Instant createdAt;
-    private Instant submittedAt;
-    private Instant reviewedAt;
-    private Instant closedAt;
+    // ── ZM: proposed handover schedule ───────────────────────────────────────
+    private String proposedHandoverDate;   // ISO "YYYY-MM-DD"
+    private String proposedHandoverTime;   // "HH:mm"
+    private String proposedHandoverNote;   // optional ZM instructions
+    private Instant scheduleProposedAt;
 
-    // ZM review
+    // ── STT: schedule response ────────────────────────────────────────────────
+    private String sttScheduleResponseComment; // comment when STT rejects schedule
+    private Instant scheduleConfirmedAt;
+    private Instant scheduleRejectedAt;
+
+    // ── ZM: rejection of return itself ───────────────────────────────────────
+    private String reviewComment;          // ZM rejection reason
     private String reviewedByZmId;
     private String reviewedByZmName;
-    private String reviewComment;
+    private Instant reviewedAt;
+
+    // ── Physical handover completion (ZM marks receipt) ───────────────────────
+    private Instant handedOverAt;
+    private String handedOverNote;
+
+    // ── Timestamps ────────────────────────────────────────────────────────────
+    private Instant createdAt;
+    private Instant submittedAt;
+
+    // ── Audit timeline ────────────────────────────────────────────────────────
+    @Builder.Default
+    private List<ReturnTimelineEvent> timeline = new ArrayList<>();
 }

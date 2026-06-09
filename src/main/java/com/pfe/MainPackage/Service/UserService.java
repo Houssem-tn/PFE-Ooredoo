@@ -173,7 +173,10 @@ public class UserService {
             throw new AccessDeniedException("Current user is not a ZM");
         }
 
-        List<String> governorates = safeGovernorates(zm.getAssignedGovernorates());
+        // Build effective ZM territory: legacy activation governorates + all module-specific
+        // governorates (PLT, RES …). This ensures ZMs who only hold PLT/complaint coverage
+        // (no activation assignedGovernorates) still see the STTs relevant to their territory.
+        List<String> governorates = buildEffectiveZmGovernorates(zm);
 
         return repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_STT)
                 .stream()
@@ -182,6 +185,17 @@ public class UserService {
                 .filter(stt -> hasGovernorateOverlap(governorates, stt.getCoveredGovernorates()))
                 .map(mapper::toDto)
                 .toList();
+    }
+
+    private List<String> buildEffectiveZmGovernorates(AppUser zm) {
+        LinkedHashSet<String> combined = new LinkedHashSet<>(safeGovernorates(zm.getAssignedGovernorates()));
+        Map<String, List<String>> coverage = zm.getCoverageByModule();
+        if (coverage != null) {
+            for (List<String> moduleGovs : coverage.values()) {
+                combined.addAll(safeGovernorates(moduleGovs));
+            }
+        }
+        return List.copyOf(combined);
     }
 
     public List<UserDTO> findMySttCoverageRequests(String zmEmail) {

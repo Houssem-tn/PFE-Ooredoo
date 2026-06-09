@@ -18,6 +18,14 @@ public class MaterialReturnController {
 
     // ── STT endpoints ──────────────────────────────────────────────────────────
 
+    /** Returns ZMs with canCreateDpm=true that an STT can target for a return */
+    @GetMapping("/eligible-zms")
+    @PreAuthorize("hasRole('STT')")
+    public ResponseEntity<List<EligibleZmDto>> getEligibleZms() {
+        return ResponseEntity.ok(returnService.getEligibleZms());
+    }
+
+    /** STT submits a new material return request */
     @PostMapping
     @PreAuthorize("hasRole('STT')")
     public ResponseEntity<MaterialReturnResponseDto> createReturn(
@@ -25,40 +33,85 @@ public class MaterialReturnController {
         return ResponseEntity.status(HttpStatus.CREATED).body(returnService.createReturn(request));
     }
 
-    @GetMapping("/my")
+    /** STT lists their own returns */
+    @GetMapping({"/my", "/stt/my-returns"})
     @PreAuthorize("hasRole('STT')")
     public ResponseEntity<List<MaterialReturnResponseDto>> getMyReturns() {
         return ResponseEntity.ok(returnService.getMyReturns());
     }
 
+    /** STT accepts or rejects a ZM-proposed handover schedule (single endpoint) */
+    @PostMapping("/{id}/schedule-response")
+    @PreAuthorize("hasRole('STT')")
+    public ResponseEntity<MaterialReturnResponseDto> scheduleResponse(
+            @PathVariable String id,
+            @RequestBody SttScheduleResponseDto body) {
+        return ResponseEntity.ok(returnService.respondToSchedule(id, body));
+    }
+
+    /** STT explicitly accepts a proposed schedule — convenience alias for schedule-response */
+    @PostMapping("/{id}/schedule/accept")
+    @PreAuthorize("hasRole('STT')")
+    public ResponseEntity<MaterialReturnResponseDto> acceptSchedule(
+            @PathVariable String id,
+            @RequestBody(required = false) SttScheduleResponseDto body) {
+        SttScheduleResponseDto req = new SttScheduleResponseDto();
+        req.setAccepted(true);
+        if (body != null && body.getComment() != null) req.setComment(body.getComment());
+        return ResponseEntity.ok(returnService.respondToSchedule(id, req));
+    }
+
+    /** STT requests a new handover slot — convenience alias for schedule-response */
+    @PostMapping("/{id}/schedule/reject")
+    @PreAuthorize("hasRole('STT')")
+    public ResponseEntity<MaterialReturnResponseDto> rejectSchedule(
+            @PathVariable String id,
+            @RequestBody SttScheduleResponseDto body) {
+        body.setAccepted(false);
+        return ResponseEntity.ok(returnService.respondToSchedule(id, body));
+    }
+
     // ── ZM endpoints ───────────────────────────────────────────────────────────
 
-    @GetMapping("/pending")
+    /** ZM lists returns needing action (PENDING_ZM_REVIEW + RESCHEDULE_REQUESTED) */
+    @GetMapping({"/pending", "/zm/pending"})
     @PreAuthorize("hasRole('ZM')")
     public ResponseEntity<List<MaterialReturnResponseDto>> getPending() {
         return ResponseEntity.ok(returnService.getPendingForZm());
     }
 
-    @GetMapping("/team")
+    /** ZM lists all returns in their scope */
+    @GetMapping({"/team", "/zm/my-returns"})
     @PreAuthorize("hasRole('ZM')")
     public ResponseEntity<List<MaterialReturnResponseDto>> getAllForZm() {
         return ResponseEntity.ok(returnService.getAllForZm());
     }
 
-    @PostMapping("/{id}/approve")
+    /** ZM proposes a handover date/time for a return */
+    @PostMapping("/{id}/propose-handover")
     @PreAuthorize("hasRole('ZM')")
-    public ResponseEntity<MaterialReturnResponseDto> approve(
+    public ResponseEntity<MaterialReturnResponseDto> proposeHandover(
             @PathVariable String id,
-            @RequestBody(required = false) ReviewMaterialReturnDto body) {
-        return ResponseEntity.ok(returnService.approveReturn(id, body));
+            @Valid @RequestBody ProposeHandoverDto body) {
+        return ResponseEntity.ok(returnService.proposeHandover(id, body));
     }
 
+    /** ZM rejects the return request itself */
     @PostMapping("/{id}/reject")
     @PreAuthorize("hasRole('ZM')")
     public ResponseEntity<MaterialReturnResponseDto> reject(
             @PathVariable String id,
             @RequestBody ReviewMaterialReturnDto body) {
         return ResponseEntity.ok(returnService.rejectReturn(id, body));
+    }
+
+    /** ZM confirms physical receipt of returned material */
+    @PostMapping("/{id}/mark-handed-over")
+    @PreAuthorize("hasRole('ZM')")
+    public ResponseEntity<MaterialReturnResponseDto> markHandedOver(
+            @PathVariable String id,
+            @RequestBody(required = false) MarkHandedOverDto body) {
+        return ResponseEntity.ok(returnService.markHandedOver(id, body != null ? body : new MarkHandedOverDto()));
     }
 
     // ── Shared endpoints ───────────────────────────────────────────────────────

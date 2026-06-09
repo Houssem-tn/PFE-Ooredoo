@@ -57,4 +57,11 @@ public interface UserRepository extends MongoRepository<AppUser, String> {
     List<AppUser> findByRoleOrderByFullNameAsc(UserRole role);
 
     List<AppUser> findByRoleAndAssignedGovernoratesIn(UserRole role, Collection<String> assignedGovernorates);
+
+    List<AppUser> findByRoleAndCanCreateDpmAndStatusAndEnabledOrderByFullNameAsc(
+            UserRole role,
+            boolean canCreateDpm,
+            AccountStatus status,
+            boolean enabled
+    );
 }
