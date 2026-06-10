@@ -49,6 +49,12 @@ public class SttStockController {
         return ResponseEntity.ok(sttStockService.getStockForStt(stt.getId()));
     }
 
+    @GetMapping("/my-self-stock")
+    public ResponseEntity<TechStock> getMySelfStock() {
+        AppUser stt = currentStt();
+        return ResponseEntity.ok(sttStockService.getSttStockAsTechView(stt.getId()));
+    }
+
     @PostMapping("/distribute")
     public ResponseEntity<SttDistribution> distributeToTech(@Valid @RequestBody DistributeToTechRequest request) {
         return ResponseEntity.ok(sttStockService.distributeToTech(request));

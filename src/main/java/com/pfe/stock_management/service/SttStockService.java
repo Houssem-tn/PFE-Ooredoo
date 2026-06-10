@@ -1037,6 +1037,123 @@ public class SttStockService {
         return value == null || value.isBlank();
     }
 
+    /**
+     * Projects the STT's warehouse SttStock into a TechStock shape so the field-execution
+     * stock picker (designed for TechStock) can display STT self-execution stock without
+     * requiring a separate TechStock document.
+     * availableQuantity → receivedQuantity, usedQuantity = 0.
+     */
+    public TechStock getSttStockAsTechView(String sttId) {
+        SttStock sttStock = sttStockRepository.findBySttId(sttId)
+                .orElseGet(() -> SttStock.builder().sttId(sttId).items(new ArrayList<>()).build());
+
+        List<TechStockItem> items = sttStock.getItems().stream()
+                .filter(i -> i.getAvailableQuantity() > 0)
+                .map(i -> TechStockItem.builder()
+                        .equipmentId(i.getEquipmentId())
+                        .equipmentName(i.getEquipmentName())
+                        .unit(i.getUnit())
+                        .receivedQuantity(i.getAvailableQuantity())
+                        .usedQuantity(0)
+                        .lastReceivedAt(i.getLastReceivedAt())
+                        .build())
+                .collect(Collectors.toList());
+
+        return TechStock.builder()
+                .techId(sttId)
+                .sttId(sttId)
+                .items(items)
+                .lastUpdatedAt(sttStock.getLastUpdatedAt())
+                .build();
+    }
+
+    /**
+     * Deducts used equipment directly from the STT's warehouse SttStock for self-execution
+     * complaint cases. Handles re-submissions by restoring the previous deduction first.
+     */
+    public List<UsedEquipmentItem> syncSttWarehouseUsageForCase(
+            CaseEntity caseEntity,
+            AppUser stt,
+            List<UsedEquipmentRequestItem> requestedItems,
+            String performedBy
+    ) {
+        SttStock stock = sttStockRepository.findBySttId(stt.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "STT stock not found for self-execution"));
+
+        // Restore previous deduction on re-submission
+        String prevAppliedId = caseEntity.getWork() != null ? caseEntity.getWork().getStockAppliedTechId() : null;
+        if (stt.getId().equals(prevAppliedId) && caseEntity.getWork().getUsedEquipment() != null) {
+            for (UsedEquipmentItem prev : caseEntity.getWork().getUsedEquipment()) {
+                stock.getItems().stream()
+                        .filter(i -> prev.getEquipmentId().equals(i.getEquipmentId()))
+                        .findFirst()
+                        .ifPresent(i -> i.setTotalDistributedToTechs(
+                                Math.max(0, i.getTotalDistributedToTechs() - prev.getQuantity())));
+            }
+        }
+
+        // Merge duplicate equipment IDs
+        Map<String, Integer> requested = new LinkedHashMap<>();
+        if (requestedItems != null) {
+            for (UsedEquipmentRequestItem req : requestedItems) {
+                if (req.equipmentId() != null && req.quantity() > 0) {
+                    requested.merge(req.equipmentId(), req.quantity(), Integer::sum);
+                }
+            }
+        }
+
+        // Validate and apply deduction
+        List<UsedEquipmentItem> result = new ArrayList<>();
+        List<ConsumedEquipmentItem> consumedItems = new ArrayList<>();
+        for (Map.Entry<String, Integer> entry : requested.entrySet()) {
+            SttStockItem item = stock.getItems().stream()
+                    .filter(i -> entry.getKey().equals(i.getEquipmentId()))
+                    .findFirst()
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Equipment not found in STT stock: " + entry.getKey()));
+            int qty = entry.getValue();
+            int stockBefore = item.getAvailableQuantity();
+            if (stockBefore < qty) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Insufficient stock for " + item.getEquipmentName()
+                        + ": requested " + qty + " but only " + stockBefore + " available");
+            }
+            item.setTotalDistributedToTechs(item.getTotalDistributedToTechs() + qty);
+            int stockAfter = item.getAvailableQuantity();
+            result.add(UsedEquipmentItem.builder()
+                    .equipmentId(item.getEquipmentId())
+                    .equipmentName(item.getEquipmentName())
+                    .unit(item.getUnit())
+                    .quantity(qty)
+                    .build());
+            consumedItems.add(ConsumedEquipmentItem.builder()
+                    .equipmentId(item.getEquipmentId())
+                    .equipmentName(item.getEquipmentName())
+                    .unit(item.getUnit())
+                    .quantityUsed(qty)
+                    .stockBefore(stockBefore)
+                    .stockAfter(stockAfter)
+                    .build());
+            stockMovementService.recordCaseUsage(
+                    caseEntity, stt,
+                    UsageItem.builder()
+                            .equipmentId(item.getEquipmentId())
+                            .equipmentName(item.getEquipmentName())
+                            .unit(item.getUnit())
+                            .build(),
+                    qty, performedBy);
+        }
+
+        stock.setLastUpdatedAt(Instant.now());
+        sttStockRepository.save(stock);
+
+        if (!consumedItems.isEmpty()) {
+            caseStockConsumptionService.createOrUpdate(caseEntity, stt, consumedItems, performedBy);
+        }
+        return result;
+    }
+
     private String currentUser() {
         var auth = SecurityContextHolder.getContext().getAuthentication();
         return (auth != null) ? auth.getName() : "system";

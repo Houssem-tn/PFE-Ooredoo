@@ -804,13 +804,6 @@ public class CaseService {
                 "Work submission location is invalid"
         );
 
-        if (!isTechExecution(c) && request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Used equipment can only be submitted when the active executor is a technician"
-            );
-        }
-
         AppUser executingTechnician = null;
         List<UsedEquipmentItem> usedEquipment = List.of();
         if (isTechExecution(c)) {
@@ -820,6 +813,20 @@ public class CaseService {
                     executingTechnician,
                     request.usedEquipment(),
                     actor
+            );
+        } else if (isSttSelfExecution(c) && request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
+            AppUser executingStt = resolveAssignedStt(c);
+            usedEquipment = sttStockService.syncSttWarehouseUsageForCase(
+                    c,
+                    executingStt,
+                    request.usedEquipment(),
+                    actor
+            );
+            executingTechnician = executingStt;
+        } else if (request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Used equipment can only be submitted when the active executor is a technician or STT in self-execution mode"
             );
         }
 
@@ -1088,6 +1095,11 @@ public class CaseService {
             if (request.requiresTechIntervention()) {
                 clearTechAssignment(c);
                 clearExecutionDecision(c);
+            } else {
+                // STT will self-execute — set executor now so work can be submitted immediately after diagnosis.
+                c.setExecutorId(c.getSttId());
+                c.setExecutorRole(ExecutorRole.STT);
+                c.setExecutionMode(ExecutionMode.STT_SELF_EXECUTION);
             }
             c.setStatus(CaseStatus.DIAGNOSIS_STEP);
         }
@@ -1515,6 +1527,14 @@ public class CaseService {
 
         ensureUserHasRole(technician, UserRole.ROLE_TECH, "Assigned executor is not a technician");
         return technician;
+    }
+
+    private AppUser resolveAssignedStt(CaseEntity caseEntity) {
+        if (!isBlank(caseEntity.getSttId())) {
+            return userRepository.findById(caseEntity.getSttId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assigned STT not found"));
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No STT assigned to this case");
     }
 
     private void clearSttAssignment(CaseEntity c) {
