@@ -60,6 +60,8 @@ public class StockMovementService {
                     .equipmentName(item.getEquipmentName())
                     .quantity(item.getConfirmedQuantity())
                     .referenceId(dpm.getId())
+                    .distributorZmId(dpm.getZmId())
+                    .distributorZmName(dpm.getZmName())
                     .createdAt(now)
                     .createdBy(performedBy)
                     .performedAt(now)

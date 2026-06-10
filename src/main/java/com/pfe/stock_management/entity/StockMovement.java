@@ -34,6 +34,10 @@ public class StockMovement {
     private String referenceId;
     private String comment;
 
+    /** ZM who originally created the DPM that sourced this stock movement. */
+    private String distributorZmId;
+    private String distributorZmName;
+
     private Instant createdAt;
     private String createdBy;
     private Instant performedAt;

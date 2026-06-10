@@ -187,6 +187,22 @@ public class UserService {
                 .toList();
     }
 
+    /**
+     * Returns IDs of all approved+enabled STTs whose covered governorates overlap
+     * with the given ZM's effective territory. This is the single source of truth
+     * for "which STTs does this ZM own" — used by both the team view and stock scoping.
+     */
+    public List<String> findResponsibleSttIds(AppUser zm) {
+        List<String> governorates = buildEffectiveZmGovernorates(zm);
+        return repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_STT)
+                .stream()
+                .filter(stt -> stt.getStatus() == AccountStatus.APPROVED)
+                .filter(AppUser::isEnabled)
+                .filter(stt -> hasGovernorateOverlap(governorates, stt.getCoveredGovernorates()))
+                .map(AppUser::getId)
+                .toList();
+    }
+
     private List<String> buildEffectiveZmGovernorates(AppUser zm) {
         LinkedHashSet<String> combined = new LinkedHashSet<>(safeGovernorates(zm.getAssignedGovernorates()));
         Map<String, List<String>> coverage = zm.getCoverageByModule();
@@ -231,7 +247,9 @@ public class UserService {
             throw new IllegalArgumentException("Selected user is not an STT");
         }
 
-        if (!hasGovernorateOverlap(zm.getAssignedGovernorates(), stt.getCoveredGovernorates())) {
+        // Use full effective territory (assignedGovernorates + all coverageByModule entries)
+        // so ZMs whose coverage is stored only in module-specific fields still see their STTs.
+        if (!hasGovernorateOverlap(buildEffectiveZmGovernorates(zm), stt.getCoveredGovernorates())) {
             throw new AccessDeniedException("This STT does not cover the current ZM territory");
         }
 
