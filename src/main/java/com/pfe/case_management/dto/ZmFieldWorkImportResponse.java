@@ -19,6 +19,8 @@ public record ZmFieldWorkImportResponse(
         int ignoredStatusCount,
         int invalidRowsCount,
         String message,
-        String analysisId
+        String analysisId,
+        String dispatchMode,
+        String dispatchModeUserName
 ) {
 }

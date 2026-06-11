@@ -25,5 +25,9 @@ public interface CaseRepository extends MongoRepository<CaseEntity, String> {
     Optional<CaseEntity> findByTypeAndCrmCase(CaseType type, String crmCase);
     List<CaseEntity> findByTypeAndCrmCaseIn(CaseType type, Collection<String> crmCases);
 
+    // Module-scoped duplicate lookup: PLT and RES imports both persist as type=PLAINTE but use
+    // distinct import sources, so the same CRM case may legitimately exist once per module.
+    List<CaseEntity> findByTypeAndSourceAndCrmCaseIn(CaseType type, String source, Collection<String> crmCases);
+
     long countByTypeAndZmIdAndStatusIn(CaseType type, String zmId, List<CaseStatus> statuses);
 }

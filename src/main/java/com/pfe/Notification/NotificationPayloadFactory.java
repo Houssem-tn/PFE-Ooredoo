@@ -2,8 +2,11 @@ package com.pfe.Notification;
 
 import com.pfe.MainPackage.Dto.NotificationMessageDto;
 import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.CaseModuleType;
+import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.case_management.model.BulkCaseOperationType;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
@@ -11,11 +14,18 @@ import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
 public class NotificationPayloadFactory {
+
+    /** Human-friendly operation date used in aggregated bulk summaries, e.g. "11/06/2026". */
+    private static final DateTimeFormatter OPERATION_DATE_FORMAT =
+            DateTimeFormatter.ofPattern("dd/MM/yyyy").withZone(ZoneOffset.UTC);
 
     public NotificationMessageDto buildNewPendingRegistration(AppUser user) {
         Map<String, Object> data = new HashMap<>();
@@ -115,6 +125,68 @@ public class NotificationPayloadFactory {
         dto.setCategory("CASE");
         dto.setActionType("OPEN_CASE");
         return dto;
+    }
+
+    /**
+     * Builds a single aggregated notification for a bulk case-assignment batch.
+     * Replaces the previous one-notification-per-case behaviour: instead of hundreds of alerts,
+     * the ZM receives one concise summary carrying the count, type, responsible actor, timestamp
+     * and a deep link to the detailed case list for the batch.
+     *
+     * <p>Example message: <em>"50 complaint cases injected by ZM Issam Aissa on 11/06/2026 —
+     * ready to work."</em></p>
+     */
+    public NotificationMessageDto buildCasesBulkAssignedToZm(BulkCaseAssignmentSummary summary) {
+        int count = Math.max(0, summary.count());
+        String caseLabel = bulkCaseTypeLabel(summary.caseType(), summary.module());
+        String plural = count == 1 ? "case" : "cases";
+        String operationDate = OPERATION_DATE_FORMAT.format(Instant.now());
+
+        String message;
+        if (summary.operation() == BulkCaseOperationType.INJECTION) {
+            // The ZM injected their own field work — credit them as the responsible actor.
+            message = count + " " + caseLabel + " " + plural + " injected by ZM "
+                    + safe(summary.zmName()) + " on " + operationDate + " — ready to work.";
+        } else {
+            // Admin distributed imported cases that were routed to this ZM.
+            message = count + " " + caseLabel + " " + plural + " assigned to you by Admin on "
+                    + operationDate + " — ready to work.";
+        }
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("count", count);
+        data.put("caseType", summary.caseType() != null ? summary.caseType().name() : null);
+        data.put("module", summary.module() != null ? summary.module().name() : null);
+        data.put("operation", summary.operation() != null ? summary.operation().name() : null);
+        data.put("batchId", summary.batchId());
+        data.put("operationDate", operationDate);
+        data.put("zmName", summary.zmName());
+        data.put("routeHint", summary.routeHint());
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("CASES_BULK_ASSIGNED_TO_ZM");
+        dto.setTitle(count + " " + caseLabel + " " + plural + " ready to work");
+        dto.setMessage(message);
+        dto.setEntityType("CASE_BATCH");
+        dto.setEntityId(summary.batchId());
+        dto.setStatus("ASSIGNED_TO_ZM");
+        dto.setTriggeredBy(summary.triggeredBy());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("CASE");
+        dto.setActionType("OPEN_CASE");
+        return dto;
+    }
+
+    private String bulkCaseTypeLabel(CaseType caseType, CaseModuleType module) {
+        if (caseType == CaseType.ACTIVATION) {
+            return "activation";
+        }
+        if (module == CaseModuleType.RES || caseType == CaseType.RESILIATION) {
+            return "resiliation";
+        }
+        return "complaint";
     }
 
     public NotificationMessageDto buildSlaWarning(CaseEntity caseEntity) {
@@ -450,7 +522,7 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("WARNING");
-        dto.setCategory("STOCK");
+        dto.setCategory("MATERIAL_RETURN");
         dto.setActionType("OPEN_MATERIAL_RETURN");
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
@@ -477,7 +549,7 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("WARNING");
-        dto.setCategory("STOCK");
+        dto.setCategory("MATERIAL_RETURN");
         dto.setActionType("OPEN_MATERIAL_RETURN");
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
@@ -507,7 +579,7 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("WARNING");
-        dto.setCategory("STOCK");
+        dto.setCategory("MATERIAL_RETURN");
         dto.setActionType("OPEN_MATERIAL_RETURN");
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
@@ -536,7 +608,7 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("INFO");
-        dto.setCategory("STOCK");
+        dto.setCategory("MATERIAL_RETURN");
         dto.setActionType("OPEN_MATERIAL_RETURN");
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
@@ -562,7 +634,7 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("INFO");
-        dto.setCategory("STOCK");
+        dto.setCategory("MATERIAL_RETURN");
         dto.setActionType("OPEN_MATERIAL_RETURN");
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
@@ -591,10 +663,55 @@ public class NotificationPayloadFactory {
         dto.setCreatedAt(Instant.now());
         dto.setData(data);
         dto.setLevel("WARNING");
-        dto.setCategory("STOCK");
+        dto.setCategory("MATERIAL_RETURN");
         dto.setActionType("OPEN_MATERIAL_RETURN");
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
         return dto;
+    }
+
+    /** Sent to ZM after they confirm physical handover — closes the return loop for their Alert Center. */
+    public NotificationMessageDto buildReturnClosedForZm(MaterialReturnRequest req) {
+        String itemSummary = buildItemSummary(req.getItems());
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("returnId", req.getId());
+        data.put("returnCode", req.getReturnCode());
+        data.put("sttName", req.getSttName());
+        data.put("sttId", req.getSttId());
+        data.put("itemCount", req.getItems() != null ? req.getItems().size() : 0);
+        data.put("destination", req.getDestination() != null ? req.getDestination().name() : null);
+        data.put("itemSummary", itemSummary);
+        data.put("routeHint", "/zm/stock/returns");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("MATERIAL_RETURN_CLOSED");
+        dto.setTitle("Return closed — STT stock updated");
+        dto.setMessage("Return " + safe(req.getReturnCode()) + " from STT " + safe(req.getSttName())
+                + " is now closed. Returned items: " + itemSummary + ".");
+        dto.setEntityType("MATERIAL_RETURN");
+        dto.setEntityId(req.getId());
+        dto.setStatus("HANDED_OVER");
+        dto.setTriggeredBy(req.getZmEmail());
+        dto.setCreatedAt(Instant.now());
+        dto.setData(data);
+        dto.setLevel("INFO");
+        dto.setCategory("MATERIAL_RETURN");
+        dto.setActionType("OPEN_MATERIAL_RETURN");
+        dto.setRelatedStockRequestId(req.getId());
+        if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
+        return dto;
+    }
+
+    private String buildItemSummary(List<com.pfe.stock_management.material_return.ReturnedItem> items) {
+        if (items == null || items.isEmpty()) return "no items";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) sb.append(", ");
+            var item = items.get(i);
+            sb.append(item.getQuantity()).append("× ").append(safe(item.getEquipmentName()));
+            if (item.getCondition() != null) sb.append(" (").append(item.getCondition().name()).append(")");
+        }
+        return sb.toString();
     }
 }

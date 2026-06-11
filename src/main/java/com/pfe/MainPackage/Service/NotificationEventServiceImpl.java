@@ -7,6 +7,7 @@ import com.pfe.MainPackage.Entity.UserRole;
 import com.pfe.Notification.NotificationDestinationResolver;
 import com.pfe.Notification.NotificationPayloadFactory;
 import com.pfe.Notification.WebSocketNotificationSender;
+import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
@@ -73,6 +74,22 @@ public class NotificationEventServiceImpl implements NotificationEventService {
 
         NotificationMessageDto payload = payloadFactory.buildCaseAssignedToZm(caseEntity, triggeredBy);
         sendToRecipient(caseEntity.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onCasesBulkAssignedToZm(BulkCaseAssignmentSummary summary) {
+        if (summary == null || isBlank(summary.zmEmail()) || summary.count() <= 0) {
+            return;
+        }
+
+        // Audit trail: one log line per aggregated batch so the operation stays traceable even
+        // though only a single notification is now persisted/pushed for the whole batch.
+        log.info("[Notification] bulk_case_assignment_aggregate zmEmail={} operation={} caseType={} module={} count={} batchId={} triggeredBy={}",
+                summary.zmEmail(), summary.operation(), summary.caseType(), summary.module(),
+                summary.count(), summary.batchId(), summary.triggeredBy());
+
+        NotificationMessageDto payload = payloadFactory.buildCasesBulkAssignedToZm(summary);
+        sendToRecipient(summary.zmEmail(), payload);
     }
 
     @Override
@@ -231,6 +248,13 @@ public class NotificationEventServiceImpl implements NotificationEventService {
         if (returnRequest == null || isBlank(returnRequest.getSttEmail())) return;
         NotificationMessageDto payload = payloadFactory.buildMaterialHandedOver(returnRequest);
         sendToRecipient(returnRequest.getSttEmail(), payload);
+    }
+
+    @Override
+    public void onReturnClosedForZm(MaterialReturnRequest returnRequest) {
+        if (returnRequest == null || isBlank(returnRequest.getZmEmail())) return;
+        NotificationMessageDto payload = payloadFactory.buildReturnClosedForZm(returnRequest);
+        sendToRecipient(returnRequest.getZmEmail(), payload);
     }
 
     private void sendToRecipients(NotificationMessageDto payload, String... emails) {

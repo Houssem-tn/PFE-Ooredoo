@@ -5,22 +5,30 @@ import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsDistributionSummaryResponse;
 import com.pfe.activation_analytics.model.ActivationImportSharedResult;
 import com.pfe.activation_analytics.model.ActivationImportSharedRow;
+import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.case_management.model.BulkCaseOperationType;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.case_management.service.CaseTimelineService;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
 public class ActivationDistributionProcessingService {
+
+    private static final Logger log = LoggerFactory.getLogger(ActivationDistributionProcessingService.class);
 
     private final CaseRepository caseRepository;
     private final CaseTimelineService caseTimelineService;
@@ -40,6 +48,11 @@ public class ActivationDistributionProcessingService {
         int sourceTerminatedRows = 0;
         int noGovernorateRows = 0;
 
+        // One distribution run = one batch. We aggregate newly-created cases per target ZM so each
+        // ZM receives a single summary alert instead of one notification per routed case.
+        String batchId = UUID.randomUUID().toString();
+        Map<String, ZmBatchAccumulator> assignmentsByZmEmail = new LinkedHashMap<>();
+
         for (ActivationImportSharedRow row : sharedResult.rowsForDistribution()) {
             if (eligibilityService.isActionable(row)) {
                 DistributionOutcome outcome = upsertActionableCase(row, importedBy);
@@ -56,6 +69,11 @@ public class ActivationDistributionProcessingService {
                 if (outcome.noGovernorate()) {
                     noGovernorateRows += 1;
                 }
+                if (outcome.created() && outcome.assignedToZm() && ActivationAnalyticsSupport.hasText(outcome.zmEmail())) {
+                    assignmentsByZmEmail
+                            .computeIfAbsent(outcome.zmEmail(), email -> new ZmBatchAccumulator(outcome.zmName()))
+                            .increment();
+                }
                 continue;
             }
 
@@ -70,6 +88,8 @@ public class ActivationDistributionProcessingService {
                 syncExistingCaseSourceOnly(row, importedBy, "Source signalled a terminated activation row. Workflow assignment was left unchanged.");
             }
         }
+
+        emitAggregatedAssignmentNotifications(assignmentsByZmEmail, batchId, importedBy);
 
         return new AdminActivationAnalyticsDistributionSummaryResponse(
                 sharedResult.processableRows(),
@@ -101,7 +121,8 @@ public class ActivationDistributionProcessingService {
             );
             caseEntity.setUpdatedAt(Instant.now());
             caseRepository.save(caseEntity);
-            return new DistributionOutcome(false, ActivationAnalyticsSupport.hasText(caseEntity.getZmId()), false);
+            // Existing-case refresh: no new assignment, so no aggregated notification is counted.
+            return new DistributionOutcome(false, ActivationAnalyticsSupport.hasText(caseEntity.getZmId()), false, null, null);
         }
 
         Instant now = Instant.now();
@@ -170,11 +191,49 @@ public class ActivationDistributionProcessingService {
                 new LinkedHashMap<>(sourceSyncTimelineData(row))
         );
 
-        CaseEntity saved = caseRepository.save(caseEntity);
-        if (assignedZm != null) {
-            notificationEventService.onCaseAssignedToZm(saved, importedBy);
+        // The per-case assignment notification is intentionally NOT emitted here. Newly created
+        // cases are accumulated by the caller and surface as ONE aggregated summary per ZM at the
+        // end of the distribution run (see emitAggregatedAssignmentNotifications).
+        caseRepository.save(caseEntity);
+        return new DistributionOutcome(
+                true,
+                assignedZm != null,
+                !ActivationAnalyticsSupport.hasText(row.gouvernorat()),
+                assignedZm != null ? assignedZm.getEmail() : null,
+                assignedZm != null ? assignedZm.getFullName() : null
+        );
+    }
+
+    /**
+     * Sends one aggregated "N activation cases assigned to you by Admin … — ready to work" alert per
+     * target ZM, replacing the previous one-notification-per-case behaviour. Each ZM's notification
+     * is independent, so a failure for one ZM never blocks the others.
+     */
+    private void emitAggregatedAssignmentNotifications(
+            Map<String, ZmBatchAccumulator> assignmentsByZmEmail,
+            String batchId,
+            String importedBy
+    ) {
+        for (Map.Entry<String, ZmBatchAccumulator> entry : assignmentsByZmEmail.entrySet()) {
+            String zmEmail = entry.getKey();
+            ZmBatchAccumulator accumulator = entry.getValue();
+            try {
+                notificationEventService.onCasesBulkAssignedToZm(new BulkCaseAssignmentSummary(
+                        zmEmail,
+                        accumulator.zmName(),
+                        CaseType.ACTIVATION,
+                        null,
+                        BulkCaseOperationType.DISTRIBUTION,
+                        accumulator.count(),
+                        batchId,
+                        importedBy,
+                        "/zm/cases/activation"
+                ));
+            } catch (Exception notifEx) {
+                log.warn("activation_distribution: aggregated notification failed batchId={} zmEmail={}: {}",
+                        batchId, zmEmail, notifEx.getMessage());
+            }
         }
-        return new DistributionOutcome(true, assignedZm != null, !ActivationAnalyticsSupport.hasText(row.gouvernorat()));
     }
 
     private void syncExistingCaseSourceOnly(ActivationImportSharedRow row, String importedBy, String message) {
@@ -262,7 +321,31 @@ public class ActivationDistributionProcessingService {
     private record DistributionOutcome(
             boolean created,
             boolean assignedToZm,
-            boolean noGovernorate
+            boolean noGovernorate,
+            String zmEmail,
+            String zmName
     ) {
+    }
+
+    /** Mutable per-ZM counter used to aggregate a distribution batch into a single notification. */
+    private static final class ZmBatchAccumulator {
+        private final String zmName;
+        private int count;
+
+        private ZmBatchAccumulator(String zmName) {
+            this.zmName = zmName;
+        }
+
+        private void increment() {
+            this.count += 1;
+        }
+
+        private String zmName() {
+            return zmName;
+        }
+
+        private int count() {
+            return count;
+        }
     }
 }

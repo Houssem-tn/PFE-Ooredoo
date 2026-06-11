@@ -87,9 +87,15 @@ public class TodoImportController {
     public ResponseEntity<ZmFieldWorkImportResponse> process(
             @RequestParam("file") MultipartFile file,
             @RequestParam("businessType") String businessType,
+            @RequestParam(value = "dispatchMode", defaultValue = "BY_GOVERNORATE") String dispatchMode,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(todoImportService.processForZm(file, authentication.getName(), businessType));
+        return ResponseEntity.ok(todoImportService.processForZm(
+                file,
+                authentication.getName(),
+                businessType,
+                dispatchMode
+        ));
     }
 
     @GetMapping("/analyses")

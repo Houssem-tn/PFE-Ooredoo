@@ -1,6 +1,7 @@
 package com.pfe.MainPackage.Service;
 
 import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
@@ -10,6 +11,12 @@ public interface NotificationEventService {
     void onUserRegistered(AppUser user);
 
     void onCaseAssignedToZm(CaseEntity caseEntity, String triggeredBy);
+
+    /**
+     * Emits ONE aggregated notification for a whole bulk case-assignment batch (PLT/RES injection
+     * or admin activation distribution) targeting a single ZM, instead of one alert per case.
+     */
+    void onCasesBulkAssignedToZm(BulkCaseAssignmentSummary summary);
 
     void onCaseAssignedToStt(CaseEntity caseEntity, String triggeredBy);
 
@@ -56,4 +63,7 @@ public interface NotificationEventService {
 
     /** ZM confirmed physical receipt of returned material → notify STT */
     void onMaterialHandedOver(MaterialReturnRequest returnRequest);
+
+    /** Return fully closed after ZM handover confirmation → notify ZM (audit closure in Alert Center) */
+    void onReturnClosedForZm(MaterialReturnRequest returnRequest);
 }

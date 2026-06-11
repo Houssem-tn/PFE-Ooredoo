@@ -1,5 +1,6 @@
 package com.pfe.case_management.entity;
 
+import com.pfe.MainPackage.Entity.CaseModuleType;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.enums.ExecutionMode;
@@ -35,6 +36,12 @@ public class CaseEntity {
 
     // Case type
     private CaseType type;
+
+    // Import module discriminator (PLT / RES) for cases created from field-work imports.
+    // PLT and RES both persist as type=PLAINTE in the shared "cases" collection; this marker
+    // keeps their boards separate and enables a later split into a dedicated RES collection.
+    // Legacy PLT cases may have a null caseModule — fall back to the source value in that case.
+    private CaseModuleType caseModule;
 
     // External CRM info
     private String crmCase;

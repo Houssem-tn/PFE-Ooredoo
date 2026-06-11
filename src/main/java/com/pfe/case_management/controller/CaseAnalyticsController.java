@@ -1,5 +1,6 @@
 package com.pfe.case_management.controller;
 
+import com.pfe.MainPackage.Entity.CaseModuleType;
 import com.pfe.case_management.dto.PerformanceSummaryResponse;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.service.CaseAnalyticsService;
@@ -20,12 +21,18 @@ public class CaseAnalyticsController {
     private final CaseAnalyticsService caseAnalyticsService;
 
     @GetMapping("/my-performance")
-    public ResponseEntity<PerformanceSummaryResponse> getMyPerformance(@RequestParam(required = false) CaseType type) {
-        return ResponseEntity.ok(caseAnalyticsService.getMyPerformance(type));
+    public ResponseEntity<PerformanceSummaryResponse> getMyPerformance(
+            @RequestParam(required = false) CaseType type,
+            @RequestParam(required = false) CaseModuleType caseModule
+    ) {
+        return ResponseEntity.ok(caseAnalyticsService.getMyPerformance(type, caseModule));
     }
 
     @GetMapping("/tech-performance")
-    public ResponseEntity<List<PerformanceSummaryResponse>> getTechPerformance(@RequestParam(required = false) CaseType type) {
-        return ResponseEntity.ok(caseAnalyticsService.getTechPerformanceForMyScope(type));
+    public ResponseEntity<List<PerformanceSummaryResponse>> getTechPerformance(
+            @RequestParam(required = false) CaseType type,
+            @RequestParam(required = false) CaseModuleType caseModule
+    ) {
+        return ResponseEntity.ok(caseAnalyticsService.getTechPerformanceForMyScope(type, caseModule));
     }
 }

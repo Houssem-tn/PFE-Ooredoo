@@ -521,6 +521,8 @@ public class MaterialReturnService {
         MaterialReturnRequest saved = returnRepository.save(req);
         runSideEffect("notify STT about handed-over return", () ->
                 notificationEventService.onMaterialHandedOver(saved));
+        runSideEffect("notify ZM about return closure", () ->
+                notificationEventService.onReturnClosedForZm(saved));
         log.info("[MaterialReturn] Handed over: id={} zmId={}", saved.getId(), zm.getId());
         return toDto(saved);
     }
