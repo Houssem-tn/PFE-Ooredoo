@@ -4,7 +4,9 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.dto.CaseConsumptionDto;
 import com.pfe.stock_management.dto.CaseConsumptionSummaryDto;
+import com.pfe.stock_management.dto.StockAuditEntryDto;
 import com.pfe.stock_management.service.CaseStockConsumptionService;
+import com.pfe.stock_management.service.StockAuditFeedService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -25,6 +27,7 @@ import java.util.List;
 public class StockAuditController {
 
     private final CaseStockConsumptionService consumptionService;
+    private final StockAuditFeedService auditFeedService;
     private final UserRepository userRepository;
 
     @GetMapping("/case-consumptions")
@@ -87,6 +90,21 @@ public class StockAuditController {
     @PreAuthorize("hasAnyRole('ADMIN','ZM')")
     public ResponseEntity<CaseConsumptionSummaryDto> getSummary() {
         return ResponseEntity.ok(consumptionService.getSummary());
+    }
+
+    /**
+     * Unified Admin Stock Audit feed — DPM distribution requests and material
+     * return requests in one newest-first list.
+     *
+     * @param type optional filter: {@code DPM}, {@code RETURN_MATERIAL}/{@code RETURN}
+     *             or {@code ALL} (default) for both.
+     */
+    @GetMapping("/entries")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<List<StockAuditEntryDto>> getAuditEntries(
+            @RequestParam(required = false, defaultValue = "ALL") String type
+    ) {
+        return ResponseEntity.ok(auditFeedService.getEntries(type));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

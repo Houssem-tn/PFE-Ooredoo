@@ -31,6 +31,8 @@ public interface MaterialReturnRepository extends MongoRepository<MaterialReturn
 
     List<MaterialReturnRequest> findByRelatedCaseIdOrderByCreatedAtDesc(String relatedCaseId);
 
+    List<MaterialReturnRequest> findByRelatedCaseIdIn(Collection<String> relatedCaseIds);
+
     List<MaterialReturnRequest> findByStatusOrderByCreatedAtDesc(MaterialReturnStatus status);
 
     Optional<MaterialReturnRequest> findByReturnCode(String returnCode);

@@ -415,18 +415,23 @@ public class CaseService {
             String gouvernorat,
             String delegation
     ) {
-        Query query = new Query();
-        query.addCriteria(Criteria.where("type").is(type));
+        // Collect every condition into a single list, then combine under one top-level
+        // $and. Spring Data's Query keys criteria by field name and allows only ONE
+        // null-keyed criteria, so adding two operator-based criteria (e.g. the RES module
+        // $nor plus the search $or) directly to the Query throws
+        // InvalidMongoDbApiUsageException. Wrapping them in andOperator avoids that.
+        List<Criteria> conditions = new ArrayList<>();
+        conditions.add(Criteria.where("type").is(type));
 
         // Role scope — mirrors fetchCasesScopedToCurrentUser.
         if (currentUserHasRole("ROLE_ADMIN")) {
             // no additional scoping
         } else if (currentUserHasRole("ROLE_ZM")) {
-            query.addCriteria(caseInsensitiveExact("zmEmail", getCurrentUsername()));
+            conditions.add(caseInsensitiveExact("zmEmail", getCurrentUsername()));
         } else if (currentUserHasRole("ROLE_STT")) {
-            query.addCriteria(caseInsensitiveExact("sttEmail", getCurrentUsername()));
+            conditions.add(caseInsensitiveExact("sttEmail", getCurrentUsername()));
         } else if (currentUserHasRole("ROLE_TECH")) {
-            query.addCriteria(caseInsensitiveExact("techEmail", getCurrentUsername()));
+            conditions.add(caseInsensitiveExact("techEmail", getCurrentUsername()));
         } else {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
         }
@@ -436,12 +441,12 @@ public class CaseService {
             Criteria resMatch = new Criteria().orOperator(
                     Criteria.where("caseModule").is(CaseModuleType.RES),
                     Criteria.where("source").is(RES_IMPORT_SOURCE));
-            query.addCriteria(caseModule == CaseModuleType.RES ? resMatch : new Criteria().norOperator(resMatch));
+            conditions.add(caseModule == CaseModuleType.RES ? resMatch : new Criteria().norOperator(resMatch));
         }
 
         if (!isBlank(search)) {
             String pattern = ".*" + Pattern.quote(search.trim()) + ".*";
-            query.addCriteria(new Criteria().orOperator(
+            conditions.add(new Criteria().orOperator(
                     Criteria.where("crmCase").regex(pattern, "i"),
                     Criteria.where("clientName").regex(pattern, "i"),
                     Criteria.where("clientPhone").regex(pattern, "i"),
@@ -457,20 +462,22 @@ public class CaseService {
 
         if (!isBlank(status)) {
             try {
-                query.addCriteria(Criteria.where("status").is(CaseStatus.valueOf(status.trim().toUpperCase(Locale.ROOT))));
+                conditions.add(Criteria.where("status").is(CaseStatus.valueOf(status.trim().toUpperCase(Locale.ROOT))));
             } catch (IllegalArgumentException ignored) {
-                query.addCriteria(Criteria.where("status").is("__INVALID_STATUS__"));
+                conditions.add(Criteria.where("status").is("__INVALID_STATUS__"));
             }
         }
 
         if (!isBlank(gouvernorat)) {
-            query.addCriteria(Criteria.where("gouvernorat").is(gouvernorat.trim()));
+            conditions.add(Criteria.where("gouvernorat").is(gouvernorat.trim()));
         }
 
         if (!isBlank(delegation)) {
-            query.addCriteria(Criteria.where("delegation").is(delegation.trim()));
+            conditions.add(Criteria.where("delegation").is(delegation.trim()));
         }
 
+        Query query = new Query();
+        query.addCriteria(new Criteria().andOperator(conditions.toArray(new Criteria[0])));
         return query;
     }
 

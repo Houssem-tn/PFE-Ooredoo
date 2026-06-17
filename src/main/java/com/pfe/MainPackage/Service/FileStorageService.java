@@ -15,10 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.web.context.request.RequestContextHolder;
-import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
@@ -37,14 +34,17 @@ public class FileStorageService {
     private static final Logger log = LoggerFactory.getLogger(FileStorageService.class);
     private static final String LOCAL_BUCKET = "LOCAL_FS";
 
+    // File preview/download URLs are returned as origin-relative paths so the
+    // browser resolves them against whatever origin served the page (localhost,
+    // LAN, ngrok, ...). This avoids absolute URLs that leak a wrong port (e.g.
+    // ":80" on https) and prevents CORS / mixed-content issues.
+    private static final String FILES_BASE_PATH = "/api/v1/files";
+
     private final MinioClient minioClient;
     private final FileMetadataRepository fileMetadataRepository;
 
     @Value("${minio.bucket}")
     private String bucket;
-
-    @Value("${minio.public-base-url}")
-    private String publicBaseUrl;
 
     @Value("${app.storage.local-dir:${java.io.tmpdir}/pfe-files}")
     private String localStorageDir;
@@ -216,11 +216,11 @@ public class FileStorageService {
     }
 
     public String buildViewUrl(String fileId) {
-        return resolvePublicBaseUrl() + "/" + fileId + "/view";
+        return FILES_BASE_PATH + "/" + fileId + "/view";
     }
 
     public String buildDownloadUrl(String fileId) {
-        return resolvePublicBaseUrl() + "/" + fileId + "/download";
+        return FILES_BASE_PATH + "/" + fileId + "/download";
     }
 
     public List<FileMetadata> listByEntityAndRole(
@@ -375,23 +375,6 @@ public class FileStorageService {
         }
 
         return normalized;
-    }
-
-    private String resolvePublicBaseUrl() {
-        try {
-            ServletRequestAttributes attributes =
-                    (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
-
-            if (attributes != null) {
-                return ServletUriComponentsBuilder.fromCurrentContextPath()
-                        .path("/api/v1/files")
-                        .toUriString();
-            }
-        } catch (IllegalStateException ignored) {
-            // Fall back to the configured base URL when there is no active HTTP request.
-        }
-
-        return publicBaseUrl;
     }
 
     public record StoredFile(FileMetadata metadata, InputStream inputStream) {}
