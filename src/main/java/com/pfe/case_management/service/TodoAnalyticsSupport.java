@@ -12,6 +12,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 final class TodoAnalyticsSupport {
 
@@ -35,6 +37,10 @@ final class TodoAnalyticsSupport {
     );
 
     private static final Map<String, String> TUNISIA_GOVERNORATE_ALIASES = buildTunisiaGovernorateAliases();
+
+    // Matches DMS format: 37°15 36.38 N  or  9°52 51.90 E
+    private static final Pattern DMS_COORDINATE_PATTERN = Pattern.compile(
+            "(\\d{1,3})[°\\s]+(\\d{1,2})[\\s']+(\\d{1,2}\\.?\\d*)\\s*([NSEWnsew])?");
     private static final List<Map.Entry<String, String>> SORTED_TUNISIA_GOVERNORATE_ALIASES =
             TUNISIA_GOVERNORATE_ALIASES.entrySet().stream()
                     .sorted((left, right) -> Integer.compare(right.getKey().length(), left.getKey().length()))
@@ -225,6 +231,60 @@ final class TodoAnalyticsSupport {
 
     static double round2(double value) {
         return Math.round(value * 100d) / 100d;
+    }
+
+    /**
+     * Converts a raw coordinate string (DMS or decimal) to a decimal Double.
+     * Returns null if the string is blank or cannot be parsed. Never throws.
+     * Handles formats like "37°15 36.38 N", "9°52 51.90 E", "37.2601", "-9.881".
+     */
+    static Double parseCoordinateToDecimal(String rawValue) {
+        if (!hasText(rawValue)) {
+            return null;
+        }
+
+        String cleaned = rawValue.trim();
+
+        // Try DMS pattern first (degrees° minutes seconds hemisphere)
+        Matcher dmsMatcher = DMS_COORDINATE_PATTERN.matcher(cleaned);
+        if (dmsMatcher.find()) {
+            try {
+                double degrees = Double.parseDouble(dmsMatcher.group(1));
+                double minutes = Double.parseDouble(dmsMatcher.group(2));
+                double seconds = Double.parseDouble(dmsMatcher.group(3));
+                double decimal = degrees + minutes / 60.0 + seconds / 3600.0;
+                String hemisphere = dmsMatcher.group(4);
+                if (hemisphere != null) {
+                    char h = hemisphere.trim().toUpperCase(Locale.ROOT).charAt(0);
+                    if (h == 'S' || h == 'W') {
+                        decimal = -decimal;
+                    }
+                }
+                return Math.round(decimal * 1_000_000d) / 1_000_000d;
+            } catch (NumberFormatException ignored) {
+                // Fall through to plain decimal parsing
+            }
+        }
+
+        // Try plain decimal (possibly with N/S/E/W suffix and comma decimal separator)
+        String normalized = cleaned.replace(',', '.');
+        double sign = 1.0;
+        if (!normalized.isEmpty()) {
+            char last = Character.toUpperCase(normalized.charAt(normalized.length() - 1));
+            if (last == 'N' || last == 'E') {
+                normalized = normalized.substring(0, normalized.length() - 1).trim();
+            } else if (last == 'S' || last == 'W') {
+                normalized = normalized.substring(0, normalized.length() - 1).trim();
+                sign = -1.0;
+            }
+        }
+
+        normalized = normalized.replaceAll("\\s+", "");
+        try {
+            return Double.parseDouble(normalized) * sign;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private static boolean isWorkingDay(LocalDate date) {

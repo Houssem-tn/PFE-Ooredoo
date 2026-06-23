@@ -1,7 +1,7 @@
 package com.pfe.Notification;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.UserRole;
 import org.springframework.stereotype.Component;
 
 import java.util.List;

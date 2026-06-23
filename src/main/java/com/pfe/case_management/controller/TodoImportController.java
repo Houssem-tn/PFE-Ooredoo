@@ -3,20 +3,20 @@ package com.pfe.case_management.controller;
 import com.pfe.case_management.dto.ImportedTodoPageResponse;
 import com.pfe.case_management.dto.TodoImportInjectResponse;
 import com.pfe.case_management.dto.TodoImportPreviewResponse;
+import com.pfe.case_management.dto.ZmFieldWorkImportResponse;
 import com.pfe.case_management.dto.ZmTodoAnalysisDetailResponse;
 import com.pfe.case_management.dto.ZmTodoAnalysisListItemResponse;
-import com.pfe.case_management.dto.ZmTodoImportProcessResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsResponse;
 import com.pfe.case_management.service.TodoImportService;
 import com.pfe.case_management.service.ZmTodoAnalysisService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
-import org.springframework.format.annotation.DateTimeFormat;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -42,20 +42,18 @@ public class TodoImportController {
             @RequestParam(required = false) String statut,
             @RequestParam(required = false) String rowQuality,
             @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) String businessType,
+            @RequestParam(required = false) String workflowStatus,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedFrom,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate uploadedTo,
             Authentication authentication
     ) {
         return ResponseEntity.ok(todoImportService.listImportedTodos(
                 authentication.getName(),
-                page,
-                size,
-                search,
-                statut,
-                rowQuality,
-                gouvernorat,
-                uploadedFrom,
-                uploadedTo
+                page, size,
+                search, statut, rowQuality, gouvernorat,
+                businessType, workflowStatus,
+                uploadedFrom, uploadedTo
         ));
     }
 
@@ -86,11 +84,18 @@ public class TodoImportController {
     }
 
     @PostMapping(value = "/process", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<ZmTodoImportProcessResponse> process(
+    public ResponseEntity<ZmFieldWorkImportResponse> process(
             @RequestParam("file") MultipartFile file,
+            @RequestParam("businessType") String businessType,
+            @RequestParam(value = "dispatchMode", defaultValue = "BY_GOVERNORATE") String dispatchMode,
             Authentication authentication
     ) {
-        return ResponseEntity.ok(todoImportService.processForZm(file, authentication.getName()));
+        return ResponseEntity.ok(todoImportService.processForZm(
+                file,
+                authentication.getName(),
+                businessType,
+                dispatchMode
+        ));
     }
 
     @GetMapping("/analyses")

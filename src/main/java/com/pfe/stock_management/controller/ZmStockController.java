@@ -1,16 +1,19 @@
 package com.pfe.stock_management.controller;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Repository.UserRepository;
+import com.pfe.MainPackage.Service.UserService;
 import com.pfe.stock_management.dto.DpmTrackingDto;
+import com.pfe.stock_management.dto.TeamDistributionDto;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.service.DpmService;
 import com.pfe.stock_management.service.SttStockService;
+import com.pfe.stock_management.service.TeamDistributionService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -18,6 +21,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Instant;
 import java.util.List;
 
 @RestController
@@ -29,6 +33,8 @@ public class ZmStockController {
     private final DpmService dpmService;
     private final SttStockService sttStockService;
     private final UserRepository userRepository;
+    private final UserService userService;
+    private final TeamDistributionService teamDistributionService;
 
     @GetMapping("/my-dpms")
     public ResponseEntity<List<DpmRequest>> getMyDpms() {
@@ -59,11 +65,7 @@ public class ZmStockController {
     @GetMapping("/my-stts-stocks")
     public ResponseEntity<List<SttStock>> getMySttStocks() {
         AppUser zm = currentZm();
-        List<String> sttIds = dpmService.getDpmsForZm(zm.getId()).stream()
-                .map(DpmRequest::getSttId)
-                .distinct()
-                .toList();
-        List<SttStock> stocks = sttIds.stream()
+        List<SttStock> stocks = getResponsibleSttIds(zm).stream()
                 .map(sttStockService::getStockForStt)
                 .toList();
         return ResponseEntity.ok(stocks);
@@ -72,11 +74,7 @@ public class ZmStockController {
     @GetMapping("/my-techs-stocks")
     public ResponseEntity<List<TechStock>> getMyTechsStocks() {
         AppUser zm = currentZm();
-        List<String> sttIds = dpmService.getDpmsForZm(zm.getId()).stream()
-                .map(DpmRequest::getSttId)
-                .distinct()
-                .toList();
-        List<TechStock> stocks = sttIds.stream()
+        List<TechStock> stocks = getResponsibleSttIds(zm).stream()
                 .flatMap(sttId -> sttStockService.getTechStocksForStt(sttId).stream())
                 .toList();
         return ResponseEntity.ok(stocks);
@@ -85,11 +83,47 @@ public class ZmStockController {
     @GetMapping("/my-techs-usages")
     public ResponseEntity<List<TechStockUsage>> getMyTechsUsages() {
         AppUser zm = currentZm();
-        List<String> sttIds = dpmService.getDpmsForZm(zm.getId()).stream()
-                .map(DpmRequest::getSttId)
-                .distinct()
+        return ResponseEntity.ok(sttStockService.getTechUsagesForStts(getResponsibleSttIds(zm)));
+    }
+
+    /** All DPMs received by any STT in this ZM's territory (any creator ZM). */
+    @GetMapping("/my-stts-dpms")
+    public ResponseEntity<List<DpmRequest>> getMySttsDpms() {
+        AppUser zm = currentZm();
+        List<DpmRequest> dpms = getResponsibleSttIds(zm).stream()
+                .flatMap(sttId -> dpmService.getAllDpmsForStt(sttId).stream())
                 .toList();
-        return ResponseEntity.ok(sttStockService.getTechUsagesForStts(sttIds));
+        return ResponseEntity.ok(dpms);
+    }
+
+    /**
+     * Team-level distribution tracking scoped to this ZM's STTs. DPM-source-independent:
+     * includes new pooled distributions whose legacy {@code dpmId} is null. Optional
+     * filters: sttId, techId, equipmentId, from/to (on distribution date), status.
+     */
+    @GetMapping("/team-distributions")
+    public ResponseEntity<List<TeamDistributionDto>> getTeamDistributions(
+            @RequestParam(required = false) String sttId,
+            @RequestParam(required = false) String techId,
+            @RequestParam(required = false) String equipmentId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(required = false) String status
+    ) {
+        AppUser zm = currentZm();
+        List<String> scope = getResponsibleSttIds(zm);
+        return ResponseEntity.ok(teamDistributionService.getTeamDistributions(
+                scope,
+                new TeamDistributionService.TeamDistributionFilter(
+                        null, sttId, techId, equipmentId, from, to, status)));
+    }
+
+    /**
+     * Returns IDs of STTs whose covered governorates overlap with this ZM's territory.
+     * Uses the same logic as UserService.findMyStts — the single source of truth.
+     */
+    private List<String> getResponsibleSttIds(AppUser zm) {
+        return userService.findResponsibleSttIds(zm);
     }
 
     private AppUser currentZm() {

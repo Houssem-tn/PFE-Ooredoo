@@ -1,6 +1,6 @@
 package com.pfe.Security;
 
-import com.pfe.Entity.UserRole;
+import com.pfe.MainPackage.Entity.UserRole;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;

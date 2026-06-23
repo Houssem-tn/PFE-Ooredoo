@@ -1,21 +1,26 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Entity.AccountStatus;
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.CaseModuleType;
-import com.pfe.Entity.FileEntityType;
-import com.pfe.Entity.FileMetadata;
-import com.pfe.Entity.FileRole;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
-import com.pfe.Service.FileStorageService;
-import com.pfe.Service.NotificationEventService;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.CaseModuleType;
+import com.pfe.MainPackage.Entity.FileEntityType;
+import com.pfe.MainPackage.Entity.FileMetadata;
+import com.pfe.MainPackage.Entity.FileRole;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
+import com.pfe.MainPackage.Service.FileStorageService;
+import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
+import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
+import com.pfe.case_management.dto.BulkPltImportResult;
+import com.pfe.case_management.dto.CaseBoardSummaryResponse;
+import com.pfe.case_management.dto.CasePageResponse;
 import com.pfe.case_management.dto.CaseProofFileResponse;
 import com.pfe.case_management.dto.ComplaintDiagnosisRequest;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
+import com.pfe.case_management.dto.PltCaseRow;
 import com.pfe.case_management.dto.ReopenComplaintRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
 import com.pfe.case_management.dto.ValidateZmRequest;
@@ -28,6 +33,7 @@ import com.pfe.case_management.enums.ExecutionMode;
 import com.pfe.case_management.enums.ExecutorRole;
 import com.pfe.case_management.enums.ResolutionValidationStatus;
 import com.pfe.case_management.enums.SlaStatus;
+import com.pfe.case_management.model.BulkCaseOperationType;
 import com.pfe.case_management.model.ComplaintDiagnosisInfo;
 import com.pfe.case_management.model.ComplaintResolutionInfo;
 import com.pfe.case_management.model.RdvInfo;
@@ -40,6 +46,10 @@ import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.stock_management.service.SttStockService;
 import com.pfe.support.TunisiaGovernorateSupport;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -49,18 +59,33 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class CaseService {
+    private static final Logger log = LoggerFactory.getLogger(CaseService.class);
+
+    private static final String PLT_IMPORT_SOURCE = "PLT_TODO_IMPORT";
+    private static final String RES_IMPORT_SOURCE = "RES_TODO_IMPORT";
+
     private static final Set<CaseStatus> ASSIGN_STT_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_ZM,
         CaseStatus.ASSIGNED_TO_STT,
@@ -84,6 +109,7 @@ public class CaseService {
     );
 
     private static final Set<CaseStatus> COMPLAINT_ASSIGN_TECH_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.ASSIGNED_TO_STT,   // PLT-imported complaints skip diagnosis and assign TECH directly
         CaseStatus.DIAGNOSIS_STEP,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RETURNED_TO_STT,
@@ -152,6 +178,7 @@ public class CaseService {
     );
 
     private final CaseRepository repository;
+    private final MongoTemplate mongoTemplate;
     private final UserRepository userRepository;
     private final SlaTrackingService slaTrackingService;
     private final NotificationEventService notificationEventService;
@@ -236,41 +263,433 @@ public class CaseService {
     }
 
     public List<CaseEntity> getAllCasesByType(CaseType type) {
-        List<CaseEntity> scoped;
+        return getAllCasesByType(type, null);
+    }
 
+    /**
+     * Lists cases of {@code type} scoped to the current user's role, optionally filtered by import
+     * module so the resiliation board and complaint board stay separate while sharing the
+     * {@code cases} collection (both persist as type=PLAINTE):
+     * <ul>
+     *   <li>{@code caseModule == RES} → only RES-module cases (resiliation board).</li>
+     *   <li>{@code caseModule != null} and not RES (i.e. PLT) → exclude RES (complaint board).</li>
+     *   <li>{@code caseModule == null} → no module filter (operational/field views, legacy callers).</li>
+     * </ul>
+     */
+    public List<CaseEntity> getAllCasesByType(CaseType type, CaseModuleType caseModule) {
+        List<CaseEntity> scoped = applyModuleScope(type, caseModule, fetchCasesScopedToCurrentUser(type));
+        enrichSlaReadValues(scoped);
+        enrichWorkProofReadValues(scoped);
+        sanitizeCaseListForCurrentViewer(scoped);
+        return scoped;
+    }
+
+    private List<CaseEntity> fetchCasesScopedToCurrentUser(CaseType type) {
         if (currentUserHasRole("ROLE_ADMIN")) {
-            scoped = repository.findByType(type);
-            enrichSlaReadValues(scoped);
-            enrichWorkProofReadValues(scoped);
-            sanitizeCaseListForCurrentViewer(scoped);
-            return scoped;
+            return repository.findByType(type);
         }
 
         if (currentUserHasRole("ROLE_ZM")) {
-            scoped = repository.findByTypeAndZmEmailIgnoreCase(type, getCurrentUsername());
-            enrichSlaReadValues(scoped);
-            enrichWorkProofReadValues(scoped);
-            sanitizeCaseListForCurrentViewer(scoped);
-            return scoped;
+            return repository.findByTypeAndZmEmailIgnoreCase(type, getCurrentUsername());
         }
 
         if (currentUserHasRole("ROLE_STT")) {
-            scoped = repository.findByTypeAndSttEmailIgnoreCase(type, getCurrentUsername());
-            enrichSlaReadValues(scoped);
-            enrichWorkProofReadValues(scoped);
-            sanitizeCaseListForCurrentViewer(scoped);
-            return scoped;
+            return repository.findByTypeAndSttEmailIgnoreCase(type, getCurrentUsername());
         }
 
         if (currentUserHasRole("ROLE_TECH")) {
-            scoped = repository.findByTypeAndTechEmailIgnoreCase(type, getCurrentUsername());
-            enrichSlaReadValues(scoped);
-            enrichWorkProofReadValues(scoped);
-            sanitizeCaseListForCurrentViewer(scoped);
-            return scoped;
+            return repository.findByTypeAndTechEmailIgnoreCase(type, getCurrentUsername());
         }
 
         throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
+    }
+
+    private List<CaseEntity> applyModuleScope(CaseType type, CaseModuleType caseModule, List<CaseEntity> cases) {
+        if (type != CaseType.PLAINTE || caseModule == null) {
+            return cases;
+        }
+
+        if (caseModule == CaseModuleType.RES) {
+            return cases.stream().filter(this::isResModuleCase).collect(Collectors.toList());
+        }
+
+        // Any non-RES module request (PLT) is the complaint board: hide RES-module cases.
+        return cases.stream().filter(c -> !isResModuleCase(c)).collect(Collectors.toList());
+    }
+
+    /** True for cases created by the RES import (tagged via caseModule and/or the RES import source). */
+    private boolean isResModuleCase(CaseEntity caseEntity) {
+        return caseEntity != null
+                && (caseEntity.getCaseModule() == CaseModuleType.RES
+                || RES_IMPORT_SOURCE.equals(caseEntity.getSource()));
+    }
+
+    /**
+     * Server-side paginated + filtered board query. Returns one lean page (the heavy
+     * {@code timeline}/{@code workProofs} arrays are excluded — they are only needed in the detail
+     * modal). Scoped to the current user's role and, for PLAINTE, the requested module (RES/PLT).
+     */
+    public CasePageResponse getCasesPage(
+            CaseType type,
+            CaseModuleType caseModule,
+            int page,
+            int size,
+            String search,
+            String status,
+            String gouvernorat,
+            String delegation
+    ) {
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(size, 1), 200);
+
+        Query query = buildBoardQuery(type, caseModule, search, status, gouvernorat, delegation);
+        long total = mongoTemplate.count(query, CaseEntity.class);
+
+        query.fields().exclude("timeline").exclude("workProofs");
+        query.with(Sort.by(Sort.Direction.DESC, "createdAt"));
+        query.skip((long) safePage * safeSize).limit(safeSize);
+
+        List<CaseEntity> items = mongoTemplate.find(query, CaseEntity.class);
+        enrichSlaReadValues(items);
+        sanitizeCaseListForCurrentViewer(items);
+
+        int totalPages = total == 0 ? 0 : (int) Math.ceil((double) total / safeSize);
+        return new CasePageResponse(items, total, totalPages, safePage, safeSize);
+    }
+
+    /**
+     * Aggregate stat-card counts over the WHOLE filtered set (not just one page), plus the distinct
+     * governorate/delegation values for the filter dropdowns. Loads a minimal projection only.
+     */
+    public CaseBoardSummaryResponse getBoardSummary(
+            CaseType type,
+            CaseModuleType caseModule,
+            String search,
+            String status,
+            String gouvernorat,
+            String delegation
+    ) {
+        Query query = buildBoardQuery(type, caseModule, search, status, gouvernorat, delegation);
+        query.fields()
+                .include("status").include("slaTracking")
+                .include("sttId").include("techId").include("ownerZmId").include("zmId")
+                .include("gouvernorat").include("delegation");
+
+        List<CaseEntity> rows = mongoTemplate.find(query, CaseEntity.class);
+        Instant now = Instant.now();
+
+        long ownedByZm = 0, assignedStt = 0, assignedTech = 0;
+        long slaWarning = 0, slaBreached = 0, workDone = 0, closed = 0;
+        Set<String> governorates = new TreeSet<>();
+        Set<String> delegations = new TreeSet<>();
+
+        for (CaseEntity c : rows) {
+            slaTrackingService.refreshLiveState(c, now);
+
+            if (!isBlank(c.getOwnerZmId()) || !isBlank(c.getZmId())) ownedByZm++;
+            if (!isBlank(c.getSttId())) assignedStt++;
+            if (!isBlank(c.getTechId())) assignedTech++;
+
+            SlaStatus slaStatus = c.getSlaTracking() != null ? c.getSlaTracking().getStatus() : null;
+            if (slaStatus == SlaStatus.WARNING) slaWarning++;
+            if (slaStatus == SlaStatus.BREACHED || slaStatus == SlaStatus.COMPLETED_LATE) slaBreached++;
+
+            if (isWorkCompletedStatus(c.getStatus())) workDone++;
+            if (c.getStatus() == CaseStatus.CLOSED) closed++;
+
+            if (!isBlank(c.getGouvernorat())) governorates.add(c.getGouvernorat());
+            if (!isBlank(c.getDelegation())) delegations.add(c.getDelegation());
+        }
+
+        return new CaseBoardSummaryResponse(
+                rows.size(), ownedByZm, assignedStt, assignedTech,
+                slaWarning, slaBreached, workDone, closed,
+                new ArrayList<>(governorates), new ArrayList<>(delegations));
+    }
+
+    private Query buildBoardQuery(
+            CaseType type,
+            CaseModuleType caseModule,
+            String search,
+            String status,
+            String gouvernorat,
+            String delegation
+    ) {
+        // Collect every condition into a single list, then combine under one top-level
+        // $and. Spring Data's Query keys criteria by field name and allows only ONE
+        // null-keyed criteria, so adding two operator-based criteria (e.g. the RES module
+        // $nor plus the search $or) directly to the Query throws
+        // InvalidMongoDbApiUsageException. Wrapping them in andOperator avoids that.
+        List<Criteria> conditions = new ArrayList<>();
+        conditions.add(Criteria.where("type").is(type));
+
+        // Role scope — mirrors fetchCasesScopedToCurrentUser.
+        if (currentUserHasRole("ROLE_ADMIN")) {
+            // no additional scoping
+        } else if (currentUserHasRole("ROLE_ZM")) {
+            conditions.add(caseInsensitiveExact("zmEmail", getCurrentUsername()));
+        } else if (currentUserHasRole("ROLE_STT")) {
+            conditions.add(caseInsensitiveExact("sttEmail", getCurrentUsername()));
+        } else if (currentUserHasRole("ROLE_TECH")) {
+            conditions.add(caseInsensitiveExact("techEmail", getCurrentUsername()));
+        } else {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Access denied");
+        }
+
+        // Module scope (PLAINTE only) — mirrors applyModuleScope/isResModuleCase.
+        if (type == CaseType.PLAINTE && caseModule != null) {
+            Criteria resMatch = new Criteria().orOperator(
+                    Criteria.where("caseModule").is(CaseModuleType.RES),
+                    Criteria.where("source").is(RES_IMPORT_SOURCE));
+            conditions.add(caseModule == CaseModuleType.RES ? resMatch : new Criteria().norOperator(resMatch));
+        }
+
+        if (!isBlank(search)) {
+            String pattern = ".*" + Pattern.quote(search.trim()) + ".*";
+            conditions.add(new Criteria().orOperator(
+                    Criteria.where("crmCase").regex(pattern, "i"),
+                    Criteria.where("clientName").regex(pattern, "i"),
+                    Criteria.where("clientPhone").regex(pattern, "i"),
+                    Criteria.where("msisdn").regex(pattern, "i"),
+                    Criteria.where("sttName").regex(pattern, "i"),
+                    Criteria.where("techName").regex(pattern, "i"),
+                    Criteria.where("ownerZmName").regex(pattern, "i"),
+                    Criteria.where("gouvernorat").regex(pattern, "i"),
+                    Criteria.where("delegation").regex(pattern, "i"),
+                    Criteria.where("offre").regex(pattern, "i")
+            ));
+        }
+
+        if (!isBlank(status)) {
+            try {
+                conditions.add(Criteria.where("status").is(CaseStatus.valueOf(status.trim().toUpperCase(Locale.ROOT))));
+            } catch (IllegalArgumentException ignored) {
+                conditions.add(Criteria.where("status").is("__INVALID_STATUS__"));
+            }
+        }
+
+        if (!isBlank(gouvernorat)) {
+            conditions.add(Criteria.where("gouvernorat").is(gouvernorat.trim()));
+        }
+
+        if (!isBlank(delegation)) {
+            conditions.add(Criteria.where("delegation").is(delegation.trim()));
+        }
+
+        Query query = new Query();
+        query.addCriteria(new Criteria().andOperator(conditions.toArray(new Criteria[0])));
+        return query;
+    }
+
+    private Criteria caseInsensitiveExact(String field, String value) {
+        return Criteria.where(field).regex("^" + Pattern.quote(value) + "$", "i");
+    }
+
+    private boolean isWorkCompletedStatus(CaseStatus status) {
+        return status == CaseStatus.WORK_DONE
+                || status == CaseStatus.RESOLUTION_SUBMITTED
+                || status == CaseStatus.VALIDATED_BY_ZM
+                || status == CaseStatus.CLOSED;
+    }
+
+    /**
+     * Creates field-import complaint cases (CaseType.PLAINTE) in bulk from PLT or RES Excel rows.
+     * Both modules share the exact same lifecycle; {@code module} only drives the import source
+     * marker, the {@code caseModule} discriminator, and log/timeline labels. Called by
+     * TodoImportService; no ROLE_ADMIN guard — the caller authenticates as ROLE_ZM and passes
+     * the resolved user directly.
+     */
+    public BulkPltImportResult bulkImportFieldImportComplaintCases(
+            List<PltCaseRow> rows,
+            AppUser connectedZm,
+            String batchId,
+            String sourceFileName,
+            CaseModuleType module
+    ) {
+        if (rows == null || rows.isEmpty()) {
+            return new BulkPltImportResult(0, 0, 0);
+        }
+
+        Instant now = Instant.now();
+        String importSource = module == CaseModuleType.RES ? RES_IMPORT_SOURCE : PLT_IMPORT_SOURCE;
+
+        // Bulk duplicate check against existing cases of the SAME module (PLT and RES dedupe
+        // independently — the same CRM case may legitimately exist once per module).
+        List<String> candidateCrmCases = rows.stream()
+                .map(PltCaseRow::crmCase)
+                .filter(c -> c != null && !c.isBlank())
+                .distinct()
+                .toList();
+
+        Set<String> existingCrmCases = candidateCrmCases.isEmpty() ? Set.of()
+                : repository.findByTypeAndSourceAndCrmCaseIn(CaseType.PLAINTE, importSource, candidateCrmCases)
+                        .stream()
+                        .map(CaseEntity::getCrmCase)
+                        .filter(c -> c != null && !c.isBlank())
+                        .collect(Collectors.toSet());
+
+        Set<String> seenInBatch = new LinkedHashSet<>();
+        int created = 0;
+        int duplicates = 0;
+        int invalid = 0;
+
+        for (PltCaseRow row : rows) {
+            if (row.crmCase() == null || row.crmCase().isBlank()) {
+                log.warn("PLT import: skipping row {} with missing CRM_CASE", row.rowNumber());
+                invalid++;
+                continue;
+            }
+
+            // A missing gouvernorat means the case can never have an STT assigned
+            // (sttCoversGovernorate checks isBlank(gouvernorat) → false immediately).
+            // Skip rather than creating a permanently stuck case.
+            if (row.gouvernorat() == null || row.gouvernorat().isBlank()) {
+                log.warn("PLT import: skipping row {} crmCase={} — gouvernorat is blank", row.rowNumber(), row.crmCase());
+                invalid++;
+                continue;
+            }
+
+            String trimmedCrm = row.crmCase().trim();
+
+            if (!seenInBatch.add(trimmedCrm)) {
+                duplicates++;
+                continue;
+            }
+
+            if (existingCrmCases.contains(trimmedCrm)) {
+                duplicates++;
+                continue;
+            }
+
+            try {
+                CaseEntity complaint = buildFieldImportComplaintEntity(row, connectedZm, batchId, sourceFileName, now, module);
+                repository.save(complaint);
+                created++;
+            } catch (Exception ex) {
+                log.warn("{} import: failed to create complaint case crmCase={}: {}", module, trimmedCrm, ex.getMessage());
+                invalid++;
+            }
+        }
+
+        log.info("field_import_bulk module={} batchId={} sourceFile={} zmEmail={} rows={} created={} duplicates={} invalid={}",
+                module, batchId, sourceFileName, connectedZm.getEmail(), rows.size(), created, duplicates, invalid);
+
+        // Emit ONE aggregated notification for the whole injected batch instead of one per case.
+        // All field-imported PLT/RES cases are owned by the connected ZM, so a single summary alert
+        // ("N complaint/resiliation cases injected … — ready to work") replaces hundreds of alerts.
+        if (created > 0) {
+            try {
+                String routeHint = module == CaseModuleType.RES ? "/zm/cases/resiliation" : "/zm/cases/complaint";
+                notificationEventService.onCasesBulkAssignedToZm(new BulkCaseAssignmentSummary(
+                        connectedZm.getEmail(),
+                        connectedZm.getFullName(),
+                        CaseType.PLAINTE,
+                        module,
+                        BulkCaseOperationType.INJECTION,
+                        created,
+                        batchId,
+                        connectedZm.getEmail(),
+                        routeHint
+                ));
+            } catch (Exception notifEx) {
+                log.warn("{} import: aggregated notification failed batchId={} zmEmail={}: {}",
+                        module, batchId, connectedZm.getEmail(), notifEx.getMessage());
+            }
+        }
+
+        return new BulkPltImportResult(created, duplicates, invalid);
+    }
+
+    private CaseEntity buildFieldImportComplaintEntity(
+            PltCaseRow row,
+            AppUser connectedZm,
+            String batchId,
+            String sourceFileName,
+            Instant now,
+            CaseModuleType module
+    ) {
+        Instant openingDateTimos = row.openDateSurTimosDate() != null
+                ? row.openDateSurTimosDate().atStartOfDay().toInstant(ZoneOffset.UTC)
+                : null;
+
+        // Try to normalize the governorate; fall back to canonical value from analytics
+        String gouvernorat = row.gouvernorat();
+        if (!isBlank(gouvernorat)) {
+            try {
+                gouvernorat = TunisiaGovernorateSupport.requireSupported(gouvernorat);
+            } catch (IllegalArgumentException | ResponseStatusException ignored) {
+                // Keep canonical value already set by TodoAnalyticsSupport
+            }
+        }
+
+        // DMS coordinate conversion using the same utility used in todo import
+        Double decimalLat = TodoAnalyticsSupport.parseCoordinateToDecimal(row.rawLatitude());
+        Double decimalLon = TodoAnalyticsSupport.parseCoordinateToDecimal(row.rawLongitude());
+
+        String importSource = module == CaseModuleType.RES ? RES_IMPORT_SOURCE : PLT_IMPORT_SOURCE;
+
+        CaseEntity complaint = CaseEntity.builder()
+                .type(CaseType.PLAINTE)
+                .caseModule(module)
+                .crmCase(row.crmCase().trim())
+                .openingDateTimos(openingDateTimos)
+                .status(CaseStatus.ASSIGNED_TO_ZM)
+                .clientPhone(row.contact1())
+                .contactCl2(row.contact2())
+                .msisdn(row.msisdn())
+                .gouvernorat(gouvernorat)
+                .latitude(decimalLat != null ? String.valueOf(decimalLat) : row.normalizedLatitude())
+                .longitude(decimalLon != null ? String.valueOf(decimalLon) : row.normalizedLongitude())
+                .complaintDetail(row.description())
+                .complaintDescription(row.description())
+                .ownerZmId(connectedZm.getId())
+                .ownerZmName(connectedZm.getFullName())
+                .zmId(connectedZm.getId())
+                .zmEmail(connectedZm.getEmail())
+                .zmName(connectedZm.getFullName())
+                .dateAffectationZm(now)
+                .sourceAssignedSttName(row.sttFromExcel())
+                .sourceStatut(row.statutFromExcel())
+                .sourceGovernorate(row.gouvernorat())
+                .sourceLastImportedAt(now)
+                .source(importSource)
+                .createdAt(now)
+                .updatedAt(now)
+                .createdBy(connectedZm.getEmail())
+                .build();
+
+        caseTimelineService.append(
+                complaint,
+                CaseTimelineEventType.CASE_CREATED,
+                "Complaint imported from " + module + " file",
+                "Imported from " + sourceFileName + " (batch " + batchId + ")."
+                        + " STATUT = En cours, ZONE_MNANAGER matched " + safe(connectedZm.getFullName(), connectedZm.getEmail()) + ".",
+                connectedZm.getEmail(),
+                null,
+                CaseStatus.ASSIGNED_TO_ZM,
+                timelineData(
+                        "source", importSource,
+                        "caseModule", module.name(),
+                        "importBatchId", batchId,
+                        "crmCase", row.crmCase().trim()
+                )
+        );
+
+        caseTimelineService.append(
+                complaint,
+                CaseTimelineEventType.ASSIGNMENT_UPDATED,
+                "Assigned to Zone Manager",
+                "Automatically assigned to ZM " + safe(connectedZm.getFullName(), connectedZm.getEmail()) + " from " + module + " import.",
+                connectedZm.getEmail(),
+                null,
+                CaseStatus.ASSIGNED_TO_ZM,
+                timelineData(
+                        "assigneeRole", "ROLE_ZM",
+                        "assigneeEmail", connectedZm.getEmail()
+                )
+        );
+
+        return complaint;
     }
 
     public CaseEntity getCaseById(String caseId) {
@@ -392,7 +811,8 @@ public class CaseService {
             "Case cannot be assigned to TECH in current state"
         );
 
-        if (isComplaint(c)) {
+        // PLT/RES-imported complaints skip the mandatory diagnosis step and go directly to TECH like ACT cases.
+        if (isComplaint(c) && !isFieldTodoImportSource(c)) {
             ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before TECH assignment");
         }
 
@@ -467,7 +887,8 @@ public class CaseService {
                 "Case cannot switch to STT self-execution in current state"
         );
 
-        if (isComplaint(c)) {
+        // PLT/RES-imported complaints skip the mandatory diagnosis step — STT may self-execute directly.
+        if (isComplaint(c) && !isFieldTodoImportSource(c)) {
             ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before STT self-execution");
         }
 
@@ -606,7 +1027,8 @@ public class CaseService {
         ensureCurrentUserCanExecuteCase(c);
 
         ensureStatusIn(c, completeWorkAllowedStatuses(c), "Work completion is not allowed in current state");
-        if (isComplaint(c)) {
+        // PLT/RES-imported complaints skip the diagnosis prerequisite — work can be completed like ACT.
+        if (isComplaint(c) && !isFieldTodoImportSource(c)) {
             ensureComplaintRequiresFieldExecution(c, "Complaint work can only be submitted after a diagnosis requiring field intervention");
         }
         validateLocationSnapshot(
@@ -614,13 +1036,6 @@ public class CaseService {
                 request.locationLongitude(),
                 "Work submission location is invalid"
         );
-
-        if (!isTechExecution(c) && request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Used equipment can only be submitted when the active executor is a technician"
-            );
-        }
 
         AppUser executingTechnician = null;
         List<UsedEquipmentItem> usedEquipment = List.of();
@@ -631,6 +1046,20 @@ public class CaseService {
                     executingTechnician,
                     request.usedEquipment(),
                     actor
+            );
+        } else if (isSttSelfExecution(c) && request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
+            AppUser executingStt = resolveAssignedStt(c);
+            usedEquipment = sttStockService.syncSttWarehouseUsageForCase(
+                    c,
+                    executingStt,
+                    request.usedEquipment(),
+                    actor
+            );
+            executingTechnician = executingStt;
+        } else if (request.usedEquipment() != null && !request.usedEquipment().isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Used equipment can only be submitted when the active executor is a technician or STT in self-execution mode"
             );
         }
 
@@ -899,6 +1328,11 @@ public class CaseService {
             if (request.requiresTechIntervention()) {
                 clearTechAssignment(c);
                 clearExecutionDecision(c);
+            } else {
+                // STT will self-execute — set executor now so work can be submitted immediately after diagnosis.
+                c.setExecutorId(c.getSttId());
+                c.setExecutorRole(ExecutorRole.STT);
+                c.setExecutionMode(ExecutionMode.STT_SELF_EXECUTION);
             }
             c.setStatus(CaseStatus.DIAGNOSIS_STEP);
         }
@@ -1017,6 +1451,12 @@ public class CaseService {
 
     private boolean isComplaint(CaseEntity caseEntity) {
         return caseEntity != null && caseEntity.getType() == CaseType.PLAINTE;
+    }
+
+    /** PLT and RES Excel imports skip the mandatory RDV + diagnosis step and follow the ACT-like direct-TECH workflow. */
+    private boolean isFieldTodoImportSource(CaseEntity caseEntity) {
+        return caseEntity != null
+                && (PLT_IMPORT_SOURCE.equals(caseEntity.getSource()) || RES_IMPORT_SOURCE.equals(caseEntity.getSource()));
     }
 
     private void ensureComplaintCase(CaseEntity caseEntity) {
@@ -1321,6 +1761,14 @@ public class CaseService {
 
         ensureUserHasRole(technician, UserRole.ROLE_TECH, "Assigned executor is not a technician");
         return technician;
+    }
+
+    private AppUser resolveAssignedStt(CaseEntity caseEntity) {
+        if (!isBlank(caseEntity.getSttId())) {
+            return userRepository.findById(caseEntity.getSttId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assigned STT not found"));
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No STT assigned to this case");
     }
 
     private void clearSttAssignment(CaseEntity c) {

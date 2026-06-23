@@ -6,6 +6,9 @@ import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
 import com.pfe.case_management.dto.ValidateZmRequest;
+import com.pfe.MainPackage.Entity.CaseModuleType;
+import com.pfe.case_management.dto.CaseBoardSummaryResponse;
+import com.pfe.case_management.dto.CasePageResponse;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.service.CaseService;
@@ -33,8 +36,39 @@ public class CaseController {
     }
 
     @GetMapping
-    public ResponseEntity<List<CaseEntity>> getCasesByType(@RequestParam CaseType type) {
-        return ResponseEntity.ok(caseService.getAllCasesByType(type));
+    public ResponseEntity<List<CaseEntity>> getCasesByType(
+            @RequestParam CaseType type,
+            @RequestParam(required = false) CaseModuleType caseModule
+    ) {
+        return ResponseEntity.ok(caseService.getAllCasesByType(type, caseModule));
+    }
+
+    @GetMapping("/page")
+    public ResponseEntity<CasePageResponse> getCasesPage(
+            @RequestParam CaseType type,
+            @RequestParam(required = false) CaseModuleType caseModule,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) String delegation
+    ) {
+        return ResponseEntity.ok(
+                caseService.getCasesPage(type, caseModule, page, size, search, status, gouvernorat, delegation));
+    }
+
+    @GetMapping("/summary")
+    public ResponseEntity<CaseBoardSummaryResponse> getBoardSummary(
+            @RequestParam CaseType type,
+            @RequestParam(required = false) CaseModuleType caseModule,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String gouvernorat,
+            @RequestParam(required = false) String delegation
+    ) {
+        return ResponseEntity.ok(
+                caseService.getBoardSummary(type, caseModule, search, status, gouvernorat, delegation));
     }
 
     @GetMapping("/{id}")

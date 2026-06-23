@@ -1,7 +1,10 @@
 package com.pfe.config;
 
-import com.pfe.Entity.*;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.*;
+import com.pfe.MainPackage.Entity.AccountStatus;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;

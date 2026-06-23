@@ -1,6 +1,7 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Entity.UserRole;
+import com.pfe.MainPackage.Entity.CaseModuleType;
+import com.pfe.MainPackage.Entity.UserRole;
 import com.pfe.case_management.dto.PerformanceSummaryResponse;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseStatus;
@@ -55,10 +56,16 @@ public class CaseAnalyticsService {
             CaseStatus.REJECTED_BY_ZM
     );
 
+    private static final String RES_IMPORT_SOURCE = "RES_TODO_IMPORT";
+
     private final CaseRepository caseRepository;
     private final SlaTrackingService slaTrackingService;
 
     public PerformanceSummaryResponse getMyPerformance(CaseType type) {
+        return getMyPerformance(type, null);
+    }
+
+    public PerformanceSummaryResponse getMyPerformance(CaseType type, CaseModuleType caseModule) {
         UserRole role = currentUserRole();
         String email = currentUserEmail();
         CaseType effectiveType = type != null ? type : CaseType.ACTIVATION;
@@ -68,17 +75,21 @@ public class CaseAnalyticsService {
                 role.name(),
                 null,
                 email,
-                loadScope(role, email, effectiveType),
+                loadScope(role, email, effectiveType, caseModule),
                 role
         );
     }
 
     public List<PerformanceSummaryResponse> getTechPerformanceForMyScope(CaseType type) {
+        return getTechPerformanceForMyScope(type, null);
+    }
+
+    public List<PerformanceSummaryResponse> getTechPerformanceForMyScope(CaseType type, CaseModuleType caseModule) {
         UserRole role = currentUserRole();
         String email = currentUserEmail();
         CaseType effectiveType = type != null ? type : CaseType.ACTIVATION;
 
-        List<CaseEntity> scope = loadScope(role, email, effectiveType);
+        List<CaseEntity> scope = loadScope(role, email, effectiveType, caseModule);
 
         Map<String, List<CaseEntity>> grouped = new HashMap<>();
         for (CaseEntity c : scope) {
@@ -139,7 +150,7 @@ public class CaseAnalyticsService {
                 role.name(),
                 userName,
                 userEmail,
-                loadScope(role, userEmail, CaseType.ACTIVATION),
+                loadScope(role, userEmail, CaseType.ACTIVATION, null),
                 role
         );
     }
@@ -207,7 +218,7 @@ public class CaseAnalyticsService {
         );
     }
 
-    private List<CaseEntity> loadScope(UserRole role, String email, CaseType type) {
+    private List<CaseEntity> loadScope(UserRole role, String email, CaseType type, CaseModuleType caseModule) {
         List<CaseEntity> scope = switch (role) {
             case ROLE_TECH -> caseRepository.findByTypeAndTechEmailIgnoreCase(type, email);
             case ROLE_STT -> caseRepository.findByTypeAndSttEmailIgnoreCase(type, email);
@@ -216,8 +227,35 @@ public class CaseAnalyticsService {
             default -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Unsupported role for analytics");
         };
 
+        scope = applyModuleScope(type, caseModule, scope);
         refreshSlaForRead(scope);
         return scope;
+    }
+
+    /**
+     * Mirrors CaseService board scoping so RES performance is RES-only and complaint performance
+     * excludes RES. {@code caseModule == RES} → only RES; non-RES module (PLT) → exclude RES;
+     * null → no filter (combined / non-complaint scopes).
+     */
+    private List<CaseEntity> applyModuleScope(CaseType type, CaseModuleType caseModule, List<CaseEntity> cases) {
+        if (type != CaseType.PLAINTE || caseModule == null) {
+            return cases;
+        }
+
+        List<CaseEntity> filtered = new ArrayList<>(cases.size());
+        for (CaseEntity c : cases) {
+            boolean isRes = isResModuleCase(c);
+            if (caseModule == CaseModuleType.RES ? isRes : !isRes) {
+                filtered.add(c);
+            }
+        }
+        return filtered;
+    }
+
+    private boolean isResModuleCase(CaseEntity caseEntity) {
+        return caseEntity != null
+                && (caseEntity.getCaseModule() == CaseModuleType.RES
+                || RES_IMPORT_SOURCE.equals(caseEntity.getSource()));
     }
 
     private boolean supportsPerformance(UserRole role) {

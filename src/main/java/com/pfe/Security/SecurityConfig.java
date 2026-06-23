@@ -74,6 +74,9 @@ public class SecurityConfig {
                 .requestMatchers("/api/v1/stock/tech/**").hasRole("TECH")
                 .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/stock/dpms").hasRole("ZM")
                 .requestMatchers("/api/v1/stock/dpms/**").authenticated()
+                // Coverage intelligence endpoints — fine-grained checks happen inside services
+                .requestMatchers("/api/v1/coverage-layers/**").hasAnyRole("ADMIN", "ZM")
+                .requestMatchers("/api/v1/coverage-analysis/**").hasAnyRole("ADMIN", "ZM")
                 .anyRequest().authenticated()
         );
 

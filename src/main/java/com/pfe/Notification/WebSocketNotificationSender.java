@@ -1,7 +1,7 @@
 package com.pfe.Notification;
 
-import com.pfe.Entity.Notification;
-import com.pfe.Entity.UserRole;
+import com.pfe.MainPackage.Entity.Notification;
+import com.pfe.MainPackage.Entity.UserRole;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 

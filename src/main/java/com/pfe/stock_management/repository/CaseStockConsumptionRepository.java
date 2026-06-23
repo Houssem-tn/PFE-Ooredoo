@@ -4,12 +4,15 @@ import com.pfe.stock_management.entity.CaseStockConsumption;
 import org.springframework.data.mongodb.repository.MongoRepository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
 public interface CaseStockConsumptionRepository extends MongoRepository<CaseStockConsumption, String> {
 
     Optional<CaseStockConsumption> findByCaseId(String caseId);
+
+    List<CaseStockConsumption> findByCaseIdIn(Collection<String> caseIds);
 
     List<CaseStockConsumption> findByTechnicianIdOrderByConsumedAtDesc(String technicianId);
 

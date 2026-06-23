@@ -1,7 +1,7 @@
 package com.pfe.stock_management.controller;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.dto.DistributableDpmDto;
 import com.pfe.stock_management.dto.DistributeToTechRequest;
 import com.pfe.stock_management.entity.DpmRequest;
@@ -47,6 +47,12 @@ public class SttStockController {
     public ResponseEntity<SttStock> getMyStock() {
         AppUser stt = currentStt();
         return ResponseEntity.ok(sttStockService.getStockForStt(stt.getId()));
+    }
+
+    @GetMapping("/my-self-stock")
+    public ResponseEntity<TechStock> getMySelfStock() {
+        AppUser stt = currentStt();
+        return ResponseEntity.ok(sttStockService.getSttStockAsTechView(stt.getId()));
     }
 
     @PostMapping("/distribute")

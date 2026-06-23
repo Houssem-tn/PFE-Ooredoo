@@ -1,11 +1,14 @@
 package com.pfe.stock_management.service;
 
-import com.pfe.Entity.AppUser;
+import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.entity.StockMovement;
 import com.pfe.stock_management.enums.StockMovementType;
+import com.pfe.stock_management.material_return.MaterialReturnRequest;
+import com.pfe.stock_management.material_return.ReturnDestination;
+import com.pfe.stock_management.material_return.ReturnedItem;
 import com.pfe.stock_management.model.DpmItem;
 import com.pfe.stock_management.model.DistributionItem;
 import com.pfe.stock_management.model.UsageItem;
@@ -57,6 +60,8 @@ public class StockMovementService {
                     .equipmentName(item.getEquipmentName())
                     .quantity(item.getConfirmedQuantity())
                     .referenceId(dpm.getId())
+                    .distributorZmId(dpm.getZmId())
+                    .distributorZmName(dpm.getZmName())
                     .createdAt(now)
                     .createdBy(performedBy)
                     .performedAt(now)
@@ -131,6 +136,106 @@ public class StockMovementService {
                 .performedAt(now)
                 .performedBy(performedBy)
                 .build());
+    }
+
+    public void recordMaterialReturn(MaterialReturnRequest req, String performedBy) {
+        Instant now = Instant.now();
+        for (ReturnedItem item : req.getItems()) {
+            movementRepository.save(StockMovement.builder()
+                    .movementType(StockMovementType.MATERIAL_RETURN_SUBMITTED)
+                    .fromActorId(req.getSttId())
+                    .fromActorRole("ROLE_STT")
+                    .toActorId(req.getZmId())
+                    .toActorRole("ROLE_ZM")
+                    .equipmentId(item.getEquipmentId())
+                    .equipmentName(item.getEquipmentName())
+                    .quantity(item.getQuantity())
+                    .referenceId(req.getId())
+                    .caseId(req.getRelatedCaseId())
+                    .comment("Material return submitted: " + req.getReturnCode())
+                    .createdAt(now)
+                    .createdBy(performedBy)
+                    .performedAt(now)
+                    .performedBy(performedBy)
+                    .build());
+        }
+    }
+
+    public void recordMaterialReturnApproved(MaterialReturnRequest req, String performedBy) {
+        Instant now = Instant.now();
+        StockMovementType destinationType = resolveDestinationMovementType(req.getDestination());
+        for (ReturnedItem item : req.getItems()) {
+            movementRepository.save(StockMovement.builder()
+                    .movementType(StockMovementType.MATERIAL_RETURN_APPROVED)
+                    .fromActorId(req.getSttId())
+                    .fromActorRole("ROLE_STT")
+                    .toActorId(req.getZmId())
+                    .toActorRole("ROLE_ZM")
+                    .equipmentId(item.getEquipmentId())
+                    .equipmentName(item.getEquipmentName())
+                    .quantity(item.getQuantity())
+                    .referenceId(req.getId())
+                    .caseId(req.getRelatedCaseId())
+                    .comment("Material return approved: " + req.getReturnCode())
+                    .createdAt(now)
+                    .createdBy(performedBy)
+                    .performedAt(now)
+                    .performedBy(performedBy)
+                    .build());
+            movementRepository.save(StockMovement.builder()
+                    .movementType(destinationType)
+                    .fromActorId(req.getSttId())
+                    .fromActorRole("ROLE_STT")
+                    .toActorId(req.getDestination() != null ? req.getDestination().name() : "UNKNOWN")
+                    .toActorRole("DESTINATION")
+                    .equipmentId(item.getEquipmentId())
+                    .equipmentName(item.getEquipmentName())
+                    .quantity(item.getQuantity())
+                    .referenceId(req.getId())
+                    .caseId(req.getRelatedCaseId())
+                    .comment("Returned to " + req.getDestination())
+                    .createdAt(now)
+                    .createdBy(performedBy)
+                    .performedAt(now)
+                    .performedBy(performedBy)
+                    .build());
+        }
+    }
+
+    public void recordMaterialReturnRejected(MaterialReturnRequest req, String performedBy) {
+        Instant now = Instant.now();
+        for (ReturnedItem item : req.getItems()) {
+            movementRepository.save(StockMovement.builder()
+                    .movementType(StockMovementType.MATERIAL_RETURN_REJECTED)
+                    .fromActorId(req.getSttId())
+                    .fromActorRole("ROLE_STT")
+                    .toActorId(req.getZmId())
+                    .toActorRole("ROLE_ZM")
+                    .equipmentId(item.getEquipmentId())
+                    .equipmentName(item.getEquipmentName())
+                    .quantity(item.getQuantity())
+                    .referenceId(req.getId())
+                    .caseId(req.getRelatedCaseId())
+                    .comment("Material return rejected: " + req.getReturnCode()
+                            + (req.getReviewComment() != null ? " — " + req.getReviewComment() : ""))
+                    .createdAt(now)
+                    .createdBy(performedBy)
+                    .performedAt(now)
+                    .performedBy(performedBy)
+                    .build());
+        }
+    }
+
+    private StockMovementType resolveDestinationMovementType(ReturnDestination destination) {
+        if (destination == null) return StockMovementType.RETURN_TO_USABLE_STOCK;
+        return switch (destination) {
+            case USABLE_STOCK -> StockMovementType.RETURN_TO_USABLE_STOCK;
+            case DAMAGED_STOCK -> StockMovementType.RETURN_TO_DAMAGED_STOCK;
+            case REPAIR_CENTER -> StockMovementType.RETURN_TO_REPAIR;
+            case RECONDITIONING -> StockMovementType.RETURN_TO_RECONDITIONING;
+            case CENTRAL_WAREHOUSE -> StockMovementType.RETURN_TO_CENTRAL_WAREHOUSE;
+            case SCRAP -> StockMovementType.RETURN_TO_SCRAP;
+        };
     }
 
     public List<StockMovement> getAll() {

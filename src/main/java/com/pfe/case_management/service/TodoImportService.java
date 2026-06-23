@@ -1,8 +1,9 @@
 package com.pfe.case_management.service;
 
-import com.pfe.Entity.AppUser;
-import com.pfe.Entity.UserRole;
-import com.pfe.Repository.UserRepository;
+import com.pfe.MainPackage.Entity.AppUser;
+import com.pfe.MainPackage.Entity.CaseModuleType;
+import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.case_management.dto.AdminPerformanceImportInjectResponse;
 import com.pfe.case_management.dto.AdminPerformanceImportPreviewResponse;
 import com.pfe.case_management.dto.AdminPerformanceImportPreviewRowResponse;
@@ -14,12 +15,20 @@ import com.pfe.case_management.dto.TodoImportPreviewResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsAlertResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsGovernorateItemResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsInvalidReasonResponse;
+import com.pfe.case_management.dto.BulkPltImportResult;
+import com.pfe.case_management.dto.PltCaseRow;
+import com.pfe.case_management.dto.ZmFieldWorkImportResponse;
 import com.pfe.case_management.dto.ZmTodoImportProcessResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsSttItemResponse;
+import com.pfe.support.TunisiaGovernorateSupport;
 import com.pfe.case_management.entity.ImportedTodoEntity;
 import com.pfe.case_management.entity.ImportedZmTodoEntity;
 import com.pfe.case_management.model.ImportedTodoSourceType;
+import com.pfe.case_management.model.TodoTimelineEvent;
+import com.pfe.case_management.model.ZmTodoBusinessType;
+import com.pfe.case_management.model.ZmTodoWorkflowStatus;
+import com.pfe.case_management.model.ZmTodoDispatchMode;
 import com.pfe.case_management.repository.ImportedTodoRepository;
 import com.pfe.case_management.repository.ImportedZmTodoRepository;
 import lombok.RequiredArgsConstructor;
@@ -62,11 +71,11 @@ import java.text.Normalizer;
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -141,6 +150,7 @@ public class TodoImportService {
     private final MongoTemplate mongoTemplate;
     private final UserRepository userRepository;
     private final ZmTodoAnalysisService zmTodoAnalysisService;
+    private final CaseService caseService;
 
     public AdminPerformanceImportPreviewResponse previewAdminPerformanceImport(MultipartFile file, String uploadedBy) {
         ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, uploadedBy);
@@ -212,21 +222,160 @@ public class TodoImportService {
         return prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, false).analytics();
     }
 
-    public ZmTodoImportProcessResponse processForZm(MultipartFile file, String zmEmail) {
+    public ZmFieldWorkImportResponse processForZm(MultipartFile file, String zmEmail, String businessTypeParam) {
+        return processForZm(file, zmEmail, businessTypeParam, "BY_GOVERNORATE");
+    }
+
+    public ZmFieldWorkImportResponse processForZm(
+            MultipartFile file,
+            String zmEmail,
+            String businessTypeParam,
+            String dispatchModeParam
+    ) {
         long totalStart = System.nanoTime();
+
+        ZmTodoBusinessType businessType = parseBusinessType(businessTypeParam);
+        ZmTodoDispatchMode dispatchMode = parseDispatchMode(dispatchModeParam);
         ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, null);
         ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
-        PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, true);
+
+        List<ParsedAnalyticsRow> allRows = parsedImport.previewRows();
+        int totalRows = allRows.size();
+
+        // Resolve how rows are matched to the connected ZM, depending on dispatch mode.
+        //   BY_ONLINE_USER  -> match by ZM name (Excel ZONE_MNANAGER == connected ZM); the
+        //                      "online user" is the authenticated ZM driving the import.
+        //   BY_GOVERNORATE  -> match by row GOUVERNORAT in the connected ZM's covered
+        //                      governorates for this intervention type (PLT/RES).
+        String dispatchModeUserName = null;
+        List<String> moduleGovernorates = null;
+
+        if (dispatchMode == ZmTodoDispatchMode.BY_GOVERNORATE) {
+            moduleGovernorates = resolveModuleGovernorates(zmIdentity.appUser(), businessType);
+            if (moduleGovernorates.isEmpty()) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "No governorate mappings found for " + businessType.name()
+                                + ". Configure your " + businessType.name()
+                                + " governorate coverage before using governorate-based dispatch."
+                );
+            }
+        } else {
+            // The connected ZM is the online user receiving the tasks.
+            dispatchModeUserName = zmIdentity.fullName();
+        }
+
+        final List<String> govList = moduleGovernorates;
+        List<ParsedAnalyticsRow> zmMatchedRows = allRows.stream()
+                .filter(row -> dispatchMode == ZmTodoDispatchMode.BY_GOVERNORATE
+                        ? matchesGovernorate(govList, row.gouvernorat())
+                        : zmIdentity.matches(row.zoneManagerNormalized()))
+                .toList();
+        int ignoredOtherZmCount = totalRows - zmMatchedRows.size();
+
+        // Filter rows where STATUT = "En cours"
+        List<ParsedAnalyticsRow> enCoursRows = zmMatchedRows.stream()
+                .filter(row -> isEnCoursStatut(row.statut()))
+                .toList();
+        int ignoredStatusCount = zmMatchedRows.size() - enCoursRows.size();
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
 
+        // --- PLT & RES: create real complaint CaseEntity objects (identical lifecycle) ---
+        if (businessType == ZmTodoBusinessType.PLT || businessType == ZmTodoBusinessType.RES) {
+            CaseModuleType module = businessType == ZmTodoBusinessType.RES
+                    ? CaseModuleType.RES
+                    : CaseModuleType.PLT;
+
+            List<PltCaseRow> caseRows = enCoursRows.stream()
+                    .map(this::toPltCaseRow)
+                    .toList();
+
+            BulkPltImportResult caseResult = caseService.bulkImportFieldImportComplaintCases(
+                    caseRows, zmIdentity.appUser(), batchId, parsedImport.sourceFileName(), module);
+
+            PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, false);
+            var savedAnalysis = zmTodoAnalysisService.saveAnalysis(
+                    zmEmail, now, parsedImport.sourceFileName(), batchId, prepared.analytics());
+
+            log.info(
+                    "todo_zm_field_import_complaint module={} file={} uploadedBy={} batchId={} totalRows={} zmMatched={} enCours={} created={} duplicates={} invalid={} totalMs={}",
+                    module, parsedImport.sourceFileName(), zmEmail, batchId,
+                    totalRows, zmMatchedRows.size(), enCoursRows.size(),
+                    caseResult.createdCount(), caseResult.duplicateCount(), caseResult.invalidCount(),
+                    elapsedMs(totalStart)
+            );
+
+            String message = buildImportedComplaintImportMessage(
+                    dispatchMode, businessType, caseResult.createdCount(), ignoredOtherZmCount, ignoredStatusCount, caseResult.duplicateCount());
+
+            return new ZmFieldWorkImportResponse(
+                    batchId,
+                    parsedImport.sourceFileName(),
+                    now,
+                    businessType.name(),
+                    "COMPLAINT_CASES",
+                    totalRows,
+                    zmMatchedRows.size(),
+                    enCoursRows.size(),
+                    0,
+                    caseResult.createdCount(),
+                    caseResult.duplicateCount(),
+                    ignoredOtherZmCount,
+                    ignoredStatusCount,
+                    caseResult.invalidCount(),
+                    message,
+                    savedAnalysis.getId(),
+                    dispatchMode.name(),
+                    dispatchModeUserName
+            );
+        }
+
+        // --- Default path (RES, UNKNOWN …): create ImportedZmTodoEntity field-work rows ---
+        Set<String> candidateCrmCases = enCoursRows.stream()
+                .map(ParsedAnalyticsRow::crmCaseNormalized)
+                .filter(this::hasText)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        Set<String> existingCrmCases = findExistingFieldWorkDuplicates(zmEmail, businessType, candidateCrmCases);
+
+        Set<String> seenInFile = new LinkedHashSet<>();
+        List<ParsedAnalyticsRow> rowsToSave = new ArrayList<>();
+        int duplicateCount = 0;
+
+        for (ParsedAnalyticsRow row : enCoursRows) {
+            String crmNorm = row.crmCaseNormalized();
+            boolean isDuplicate = false;
+
+            if (hasText(crmNorm)) {
+                if (!seenInFile.add(crmNorm)) {
+                    isDuplicate = true;
+                } else if (existingCrmCases.contains(crmNorm)) {
+                    isDuplicate = true;
+                }
+            }
+
+            if (isDuplicate) {
+                duplicateCount++;
+            } else {
+                rowsToSave.add(row);
+            }
+        }
+
+        LocalDateTime nowLocal = now.atZone(ZoneOffset.UTC).toLocalDateTime();
+
         long entityBuildStart = System.nanoTime();
-        List<ImportedZmTodoEntity> entities = prepared.matchedRows().stream()
-                .filter(row -> !hasAlreadyImportedDuplicate(row.issues()))
-                .map(row -> toZmImportedEntity(row, parsedImport.sourceFileName(), zmIdentity.displayManagerKey(), batchId, zmEmail, now))
+        List<ImportedZmTodoEntity> entities = rowsToSave.stream()
+                .map(row -> toZmFieldWorkEntity(
+                        row, parsedImport.sourceFileName(), zmIdentity.displayManagerKey(),
+                        batchId, zmEmail, now, nowLocal, businessType))
                 .toList();
         long entityBuildMs = elapsedMs(entityBuildStart);
+
+        int invalidRowsCount = (int) entities.stream()
+                .filter(e -> !Boolean.TRUE.equals(e.getValidRow()))
+                .count();
 
         long saveStart = System.nanoTime();
         if (!entities.isEmpty()) {
@@ -234,40 +383,93 @@ public class TodoImportService {
         }
         long saveMs = elapsedMs(saveStart);
 
+        PreparedZmAnalytics prepared = prepareZmAnalytics(parsedImport, zmIdentity, zmEmail, false);
         var savedAnalysis = zmTodoAnalysisService.saveAnalysis(
-                zmEmail,
-                now,
-                parsedImport.sourceFileName(),
-                batchId,
-                prepared.analytics()
-        );
+                zmEmail, now, parsedImport.sourceFileName(), batchId, prepared.analytics());
 
         log.info(
-                "todo_zm_process_complete file={} uploadedBy={} batchId={} matchedRows={} validRows={} invalidRows={} savedRows={} entityBuildMs={} saveMs={} totalMs={}",
-                parsedImport.sourceFileName(),
-                zmEmail,
-                batchId,
-                prepared.analytics().matchedRows(),
-                prepared.analytics().validMatchedRows(),
-                prepared.analytics().invalidMatchedRows(),
-                entities.size(),
-                entityBuildMs,
-                saveMs,
-                elapsedMs(totalStart)
+                "todo_zm_field_work_import file={} uploadedBy={} businessType={} batchId={} totalRows={} zmMatched={} enCours={} duplicates={} saved={} invalid={} entityBuildMs={} saveMs={} totalMs={}",
+                parsedImport.sourceFileName(), zmEmail, businessType, batchId,
+                totalRows, zmMatchedRows.size(), enCoursRows.size(), duplicateCount,
+                entities.size(), invalidRowsCount, entityBuildMs, saveMs, elapsedMs(totalStart)
         );
 
-        return new ZmTodoImportProcessResponse(
-                savedAnalysis.getId(),
+        String message = buildFieldWorkMessage(dispatchMode, businessType, entities.size(), ignoredOtherZmCount, ignoredStatusCount, duplicateCount);
+
+        return new ZmFieldWorkImportResponse(
+                batchId,
                 parsedImport.sourceFileName(),
                 now,
-                batchId,
-                prepared.analytics().totalRows(),
-                prepared.analytics().matchedRows(),
-                prepared.analytics().ignoredRows(),
-                prepared.analytics().validMatchedRows(),
-                prepared.analytics().invalidMatchedRows(),
-                entities.size()
+                businessType.name(),
+                "FIELD_TODOS",
+                totalRows,
+                zmMatchedRows.size(),
+                enCoursRows.size(),
+                entities.size(),
+                0,
+                duplicateCount,
+                ignoredOtherZmCount,
+                ignoredStatusCount,
+                invalidRowsCount,
+                message,
+                savedAnalysis.getId(),
+                dispatchMode.name(),
+                dispatchModeUserName
         );
+    }
+
+    private ZmTodoDispatchMode parseDispatchMode(String dispatchModeParam) {
+        if (!hasText(dispatchModeParam)) {
+            return ZmTodoDispatchMode.BY_GOVERNORATE;
+        }
+        return switch (dispatchModeParam.trim().toUpperCase(Locale.ROOT)) {
+            case "BY_ONLINE_USER" -> ZmTodoDispatchMode.BY_ONLINE_USER;
+            case "BY_GOVERNORATE" -> ZmTodoDispatchMode.BY_GOVERNORATE;
+            default -> throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Invalid dispatchMode: must be BY_ONLINE_USER or BY_GOVERNORATE"
+            );
+        };
+    }
+
+    private String ignoredUnmatchedReason(ZmTodoDispatchMode dispatchMode) {
+        return dispatchMode == ZmTodoDispatchMode.BY_GOVERNORATE
+                ? " ignored because their governorate is outside your coverage."
+                : " ignored because they belong to another ZM.";
+    }
+
+    /**
+     * Resolves the connected ZM's governorate coverage for the given intervention type.
+     * Coverage is keyed per module (ACT/RES/PLT) in {@code coverageByModule}; we read the
+     * module-specific list so a ZM with, e.g., 0 RES governorates cannot dispatch RES by
+     * governorate even if they have PLT coverage.
+     */
+    private List<String> resolveModuleGovernorates(AppUser zm, ZmTodoBusinessType businessType) {
+        if (zm == null) {
+            return List.of();
+        }
+
+        String moduleKey = businessType == ZmTodoBusinessType.PLT ? "PLT" : "RES";
+        Map<String, List<String>> coverageByModule = zm.getCoverageByModule();
+        if (coverageByModule == null) {
+            return List.of();
+        }
+
+        List<String> moduleGovs = coverageByModule.get(moduleKey);
+        if (moduleGovs == null || moduleGovs.isEmpty()) {
+            return List.of();
+        }
+
+        return moduleGovs.stream()
+                .filter(this::hasText)
+                .toList();
+    }
+
+    private boolean matchesGovernorate(List<String> moduleGovernorates, String rowGouvernorat) {
+        if (moduleGovernorates == null || moduleGovernorates.isEmpty() || !hasText(rowGouvernorat)) {
+            return false;
+        }
+        return TunisiaGovernorateSupport.containsEquivalent(moduleGovernorates, rowGouvernorat);
     }
 
     private PreparedZmAnalytics prepareZmAnalytics(
@@ -379,6 +581,8 @@ public class TodoImportService {
             String statut,
             String rowQuality,
             String gouvernorat,
+            String businessTypeFilter,
+            String workflowStatusFilter,
             LocalDate uploadedFrom,
             LocalDate uploadedTo
     ) {
@@ -396,6 +600,7 @@ public class TodoImportService {
             String containsPattern = ".*" + Pattern.quote(search.trim()) + ".*";
             query.addCriteria(new Criteria().orOperator(
                     Criteria.where("crmCase").regex(containsPattern, "i"),
+                    Criteria.where("msisdn").regex(containsPattern, "i"),
                     Criteria.where("description").regex(containsPattern, "i"),
                     Criteria.where("gouvernorat").regex(containsPattern, "i"),
                     Criteria.where("stt").regex(containsPattern, "i"),
@@ -424,6 +629,25 @@ public class TodoImportService {
 
         if (hasText(gouvernorat)) {
             query.addCriteria(Criteria.where("gouvernorat").regex("^" + Pattern.quote(gouvernorat.trim()) + "$", "i"));
+        }
+
+        if (hasText(businessTypeFilter)) {
+            try {
+                ZmTodoBusinessType type = ZmTodoBusinessType.valueOf(businessTypeFilter.trim().toUpperCase(Locale.ROOT));
+                query.addCriteria(Criteria.where("businessType").is(type));
+            } catch (IllegalArgumentException ignored) {
+                // Unknown type — return empty result set
+                query.addCriteria(Criteria.where("businessType").is(businessTypeFilter.trim().toUpperCase(Locale.ROOT)));
+            }
+        }
+
+        if (hasText(workflowStatusFilter)) {
+            try {
+                ZmTodoWorkflowStatus status = ZmTodoWorkflowStatus.valueOf(workflowStatusFilter.trim().toUpperCase(Locale.ROOT));
+                query.addCriteria(Criteria.where("workflowStatus").is(status));
+            } catch (IllegalArgumentException ignored) {
+                query.addCriteria(Criteria.where("workflowStatus").is(workflowStatusFilter.trim().toUpperCase(Locale.ROOT)));
+            }
         }
 
         if (uploadedFrom != null || uploadedTo != null) {
@@ -1541,6 +1765,215 @@ public class TodoImportService {
                 .build();
     }
 
+    private ImportedZmTodoEntity toZmFieldWorkEntity(
+            ParsedAnalyticsRow row,
+            String sourceFileName,
+            String managerFilterUsed,
+            String batchId,
+            String uploadedBy,
+            Instant uploadedAt,
+            LocalDateTime uploadedAtLocal,
+            ZmTodoBusinessType businessType
+    ) {
+        boolean originallyValid = row.validRow();
+        List<String> allIssues = new ArrayList<>(row.issues());
+
+        String rawLat = row.sourceValues() != null ? row.sourceValues().get("LATITUDE") : null;
+        String rawLon = row.sourceValues() != null ? row.sourceValues().get("LONGITUDE") : null;
+
+        Double decimalLatitude = TodoAnalyticsSupport.parseCoordinateToDecimal(rawLat);
+        Double decimalLongitude = TodoAnalyticsSupport.parseCoordinateToDecimal(rawLon);
+
+        if (decimalLatitude == null && hasText(rawLat)) {
+            allIssues.add("Coordinate conversion failed for latitude");
+        }
+        if (decimalLongitude == null && hasText(rawLon)) {
+            allIssues.add("Coordinate conversion failed for longitude");
+        }
+
+        TodoTimelineEvent importEvent = TodoTimelineEvent.builder()
+                .action("IMPORTED_AS_FIELD_WORK")
+                .note("Imported from " + businessType.name() + " Excel file, STATUT En cours, matched connected ZM.")
+                .timestamp(uploadedAt)
+                .actorEmail(uploadedBy)
+                .build();
+
+        return ImportedZmTodoEntity.builder()
+                .importBatchId(batchId)
+                .sourceType(ImportedTodoSourceType.ZM_TODO_INJECTION)
+                .uploadedBy(uploadedBy)
+                .uploadedAt(uploadedAt)
+                .sourceFileName(sourceFileName)
+                .managerFilterUsed(managerFilterUsed)
+                .crmCase(row.crmCase())
+                .crmCaseNormalized(row.crmCaseNormalized())
+                .rowNumber(row.rowNumber())
+                .validRow(originallyValid)
+                .validationIssues(allIssues.isEmpty() ? null : List.copyOf(allIssues))
+                .fxDateCrm(row.fxDateCrm())
+                .contact1(row.contact1())
+                .contact2(row.contact2())
+                .msisdn(row.msisdn())
+                .gouvernorat(row.gouvernorat())
+                .gouvernoratNormalized(row.gouvernoratNormalized())
+                .description(row.description())
+                .latitude(row.latitude())
+                .longitude(row.longitude())
+                .decimalLatitude(decimalLatitude)
+                .decimalLongitude(decimalLongitude)
+                .openDateSurTimos(row.openDateSurTimos())
+                .openDateSurTimosDate(row.openDateSurTimosDate())
+                .dateAffectationStt(row.dateAffectationStt())
+                .dateAffectationSttDate(row.dateAffectationSttDate())
+                .slaBusinessDays(row.slaBusinessDays())
+                .stt(row.stt())
+                .sttNormalized(row.sttNormalized())
+                .statut(row.statut())
+                .zoneManager(row.zoneManager())
+                .zoneManagerNormalized(row.zoneManagerNormalized())
+                .businessType(businessType)
+                .workflowStatus(ZmTodoWorkflowStatus.READY_FOR_STT_ASSIGNMENT)
+                .workCreated(true)
+                .workCreatedAt(uploadedAtLocal)
+                .lastActionAt(uploadedAtLocal)
+                .timeline(List.of(importEvent))
+                .sourceValues(null)
+                .build();
+    }
+
+    private boolean isEnCoursStatut(String statut) {
+        if (!hasText(statut)) {
+            return false;
+        }
+        String normalized = TodoAnalyticsSupport.normalizeLookupValue(statut);
+        return "en cours".equals(normalized);
+    }
+
+    private ZmTodoBusinessType parseBusinessType(String businessTypeParam) {
+        if (!hasText(businessTypeParam)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "businessType parameter is required (PLT or RES)");
+        }
+        return switch (businessTypeParam.trim().toUpperCase(Locale.ROOT)) {
+            case "PLT" -> ZmTodoBusinessType.PLT;
+            case "RES" -> ZmTodoBusinessType.RES;
+            default -> throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "Invalid businessType: must be PLT or RES");
+        };
+    }
+
+    private Set<String> findExistingFieldWorkDuplicates(
+            String uploadedBy,
+            ZmTodoBusinessType businessType,
+            Set<String> crmCases
+    ) {
+        if (crmCases.isEmpty()) {
+            return Set.of();
+        }
+
+        Query query = new Query();
+        query.addCriteria(Criteria.where("uploadedBy").is(uploadedBy));
+        query.addCriteria(Criteria.where("businessType").is(businessType));
+        query.addCriteria(Criteria.where("workCreated").is(true));
+        query.addCriteria(Criteria.where("crmCaseNormalized").in(crmCases));
+        query.fields().include("crmCaseNormalized");
+
+        return mongoTemplate.find(query, ImportedZmTodoEntity.class).stream()
+                .map(ImportedZmTodoEntity::getCrmCaseNormalized)
+                .filter(this::hasText)
+                .collect(Collectors.toSet());
+    }
+
+    private String buildFieldWorkMessage(
+            ZmTodoDispatchMode dispatchMode,
+            ZmTodoBusinessType businessType,
+            int created,
+            int ignoredUnmatched,
+            int ignoredStatus,
+            int duplicates
+    ) {
+        StringBuilder message = new StringBuilder();
+        message.append(businessType.name()).append(" import completed. ");
+
+        if (created > 0) {
+            message.append(created)
+                    .append(created == 1 ? " En cours todo was" : " En cours todos were")
+                    .append(" created for the connected ZM.");
+        } else {
+            message.append("No new field work todos were created.");
+        }
+
+        if (ignoredUnmatched > 0) {
+            message.append(' ').append(ignoredUnmatched)
+                    .append(ignoredUnmatched == 1 ? " row was" : " rows were")
+                    .append(ignoredUnmatchedReason(dispatchMode));
+        }
+
+        if (ignoredStatus > 0) {
+            message.append(' ').append(ignoredStatus)
+                    .append(ignoredStatus == 1 ? " row was" : " rows were")
+                    .append(" ignored because their status is not En cours.");
+        }
+
+        if (duplicates > 0) {
+            message.append(' ').append(duplicates)
+                    .append(duplicates == 1 ? " row was" : " rows were")
+                    .append(" skipped as duplicate field work todos.");
+        }
+
+        return message.toString().trim();
+    }
+
+    private PltCaseRow toPltCaseRow(ParsedAnalyticsRow row) {
+        String rawLat = row.sourceValues() != null ? row.sourceValues().get("LATITUDE") : null;
+        String rawLon = row.sourceValues() != null ? row.sourceValues().get("LONGITUDE") : null;
+        return new PltCaseRow(
+                row.crmCase(),
+                row.contact1(),
+                row.contact2(),
+                row.msisdn(),
+                row.gouvernorat(),
+                row.description(),
+                rawLat,
+                rawLon,
+                row.latitude(),
+                row.longitude(),
+                row.openDateSurTimosDate(),
+                row.stt(),
+                row.statut(),
+                row.rowNumber()
+        );
+    }
+
+    private String buildImportedComplaintImportMessage(
+            ZmTodoDispatchMode dispatchMode, ZmTodoBusinessType businessType,
+            int created, int ignoredUnmatched, int ignoredStatus, int duplicates) {
+        StringBuilder msg = new StringBuilder(businessType.name()).append(" import completed. ");
+        if (created > 0) {
+            msg.append(created)
+                    .append(created == 1 ? " complaint case was" : " complaint cases were")
+                    .append(" created for your ZM workspace.");
+        } else {
+            msg.append("No new complaint cases were created.");
+        }
+        if (ignoredUnmatched > 0) {
+            msg.append(' ').append(ignoredUnmatched)
+                    .append(ignoredUnmatched == 1 ? " row was" : " rows were")
+                    .append(ignoredUnmatchedReason(dispatchMode));
+        }
+        if (ignoredStatus > 0) {
+            msg.append(' ').append(ignoredStatus)
+                    .append(ignoredStatus == 1 ? " row was" : " rows were")
+                    .append(" ignored because their status is not En cours.");
+        }
+        if (duplicates > 0) {
+            msg.append(' ').append(duplicates)
+                    .append(duplicates == 1 ? " duplicate case was" : " duplicate cases were")
+                    .append(" skipped.");
+        }
+        return msg.toString().trim();
+    }
+
     private ImportedTodoPreviewRowResponse toPreviewRowResponse(ParsedPreviewRow row) {
         return new ImportedTodoPreviewRowResponse(
                 row.rowNumber(),
@@ -1579,7 +2012,12 @@ public class TodoImportService {
                 entity.getStt(),
                 entity.getStatut(),
                 entity.getZoneManager(),
-                entity.getUploadedAt()
+                entity.getUploadedAt(),
+                entity.getBusinessType() != null ? entity.getBusinessType().name() : null,
+                entity.getWorkflowStatus() != null ? entity.getWorkflowStatus().name() : null,
+                entity.getWorkCreated(),
+                entity.getDecimalLatitude() != null && entity.getDecimalLongitude() != null,
+                entity.getMsisdn()
         );
     }
 
@@ -2009,7 +2447,8 @@ public class TodoImportService {
         return new ResolvedZmIdentity(
                 fullName,
                 excelKey,
-                List.copyOf(normalizedCandidates)
+                List.copyOf(normalizedCandidates),
+                user
         );
     }
 
@@ -2615,7 +3054,8 @@ public class TodoImportService {
     private record ResolvedZmIdentity(
             String fullName,
             String displayManagerKey,
-            List<String> normalizedCandidateKeys
+            List<String> normalizedCandidateKeys,
+            AppUser appUser
     ) {
         private boolean matches(String normalizedZoneManager) {
             return normalizedZoneManager != null && normalizedCandidateKeys.contains(normalizedZoneManager);

@@ -21,10 +21,14 @@ public class SttStockItem {
     @Builder.Default
     private int totalDistributedToTechs = 0;
 
+    @Builder.Default
+    private int totalReturned = 0;
+
     private Instant lastReceivedAt;
     private Instant lastDistributedAt;
+    private Instant lastReturnedAt;
 
     public int getAvailableQuantity() {
-        return Math.max(0, totalReceived - totalDistributedToTechs);
+        return Math.max(0, totalReceived - totalDistributedToTechs - totalReturned);
     }
 }

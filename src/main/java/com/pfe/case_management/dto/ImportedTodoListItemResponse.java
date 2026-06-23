@@ -18,6 +18,11 @@ public record ImportedTodoListItemResponse(
         String stt,
         String statut,
         String zoneManager,
-        Instant uploadedAt
+        Instant uploadedAt,
+        String businessType,
+        String workflowStatus,
+        Boolean workCreated,
+        Boolean hasValidCoordinates,
+        String msisdn
 ) {
 }
