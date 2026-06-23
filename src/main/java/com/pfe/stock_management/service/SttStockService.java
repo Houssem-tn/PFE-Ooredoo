@@ -74,6 +74,7 @@ public class SttStockService {
     private final CaseStockConsumptionService caseStockConsumptionService;
     private final StockAlertEvaluationService stockAlertEvaluationService;
     private final StockUsagePermissionService stockUsagePermissionService;
+    private final DpmAllocationService dpmAllocationService;
 
     public void applyDpmConfirmation(DpmRequest dpm) {
         SttStock stock = sttStockRepository.findBySttId(dpm.getSttId())
@@ -104,6 +105,10 @@ public class SttStockService {
 
         stock.setLastUpdatedAt(Instant.now());
         sttStockRepository.save(stock);
+
+        // Materialise per-DPM source balances so future pooled distributions can be
+        // automatically attributed back to this DPM (FIFO) without the STT picking one.
+        dpmAllocationService.createSourceBalances(dpm);
 
         // Evaluate stock alert thresholds after DPM increases STT stock
         stockAlertEvaluationService.evaluateSttStock(dpm.getSttId());
@@ -204,6 +209,11 @@ public class SttStockService {
                 .build();
 
         SttDistribution saved = distributionRepository.save(distribution);
+
+        // Automatically attribute this pooled distribution back to confirmed DPM
+        // sources (FIFO). A single distribution can span multiple DPMs; any shortfall
+        // (e.g. legacy pre-upgrade stock) is left unattributed rather than mis-attributed.
+        dpmAllocationService.allocateForDistribution(saved);
 
         stockMovementService.recordDistribution(saved, callerEmail);
         notificationEventService.onStockDistributedToTech(saved);

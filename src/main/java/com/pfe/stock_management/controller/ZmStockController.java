@@ -4,13 +4,16 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.MainPackage.Service.UserService;
 import com.pfe.stock_management.dto.DpmTrackingDto;
+import com.pfe.stock_management.dto.TeamDistributionDto;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.service.DpmService;
 import com.pfe.stock_management.service.SttStockService;
+import com.pfe.stock_management.service.TeamDistributionService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -18,6 +21,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Instant;
 import java.util.List;
 
 @RestController
@@ -30,6 +34,7 @@ public class ZmStockController {
     private final SttStockService sttStockService;
     private final UserRepository userRepository;
     private final UserService userService;
+    private final TeamDistributionService teamDistributionService;
 
     @GetMapping("/my-dpms")
     public ResponseEntity<List<DpmRequest>> getMyDpms() {
@@ -89,6 +94,28 @@ public class ZmStockController {
                 .flatMap(sttId -> dpmService.getAllDpmsForStt(sttId).stream())
                 .toList();
         return ResponseEntity.ok(dpms);
+    }
+
+    /**
+     * Team-level distribution tracking scoped to this ZM's STTs. DPM-source-independent:
+     * includes new pooled distributions whose legacy {@code dpmId} is null. Optional
+     * filters: sttId, techId, equipmentId, from/to (on distribution date), status.
+     */
+    @GetMapping("/team-distributions")
+    public ResponseEntity<List<TeamDistributionDto>> getTeamDistributions(
+            @RequestParam(required = false) String sttId,
+            @RequestParam(required = false) String techId,
+            @RequestParam(required = false) String equipmentId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(required = false) String status
+    ) {
+        AppUser zm = currentZm();
+        List<String> scope = getResponsibleSttIds(zm);
+        return ResponseEntity.ok(teamDistributionService.getTeamDistributions(
+                scope,
+                new TeamDistributionService.TeamDistributionFilter(
+                        null, sttId, techId, equipmentId, from, to, status)));
     }
 
     /**

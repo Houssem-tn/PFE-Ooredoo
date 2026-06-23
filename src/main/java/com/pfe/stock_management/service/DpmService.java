@@ -49,6 +49,7 @@ public class DpmService {
     private final SttStockService sttStockService;
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
+    private final DpmAllocationService dpmAllocationService;
 
     // ── Active statuses the STT should see in their inbox ────────────────────
     private static final Set<DpmStatus> STT_ACTIVE_STATUSES = Set.of(
@@ -340,11 +341,29 @@ public class DpmService {
 
     public DpmTrackingDto getDpmTracking(String dpmId) {
         DpmRequest dpm = getById(dpmId);
-        List<SttDistribution> distributions =
+
+        // Legacy: distributions that carry this DPM id directly (pre-upgrade flow).
+        List<SttDistribution> legacyDistributions =
                 distributionRepository.findByDpmIdOrderByDistributedAtAsc(dpmId);
+
+        // New: automatic source allocations attributing pooled distributions to this DPM.
+        List<com.pfe.stock_management.entity.DpmAllocation> allocations =
+                dpmAllocationService.getAllocationsForDpm(dpmId);
+        Map<String, SttDistribution> distributionsById = allocations.isEmpty()
+                ? Map.of()
+                : distributionRepository.findAllById(
+                        allocations.stream()
+                                .map(com.pfe.stock_management.entity.DpmAllocation::getDistributionId)
+                                .distinct()
+                                .collect(Collectors.toList()))
+                    .stream()
+                    .collect(Collectors.toMap(SttDistribution::getId, d -> d, (a, b) -> a));
+
         return DpmTrackingDto.builder()
                 .dpm(dpm)
-                .techDistributions(distributions)
+                .techDistributions(legacyDistributions)
+                .allocations(dpmAllocationService.getAllocationDtosForDpm(dpmId, distributionsById))
+                .techRollups(dpmAllocationService.getTechRollupsForDpm(dpmId))
                 .build();
     }
 
