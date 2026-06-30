@@ -21,5 +21,8 @@ public class ReturnedItem {
     private String macAddress;
     private String imei;
 
+    /** Linked tracked-unit id when this returned item corresponds to an EquipmentInstance. */
+    private String instanceId;
+
     private ReturnCondition condition;
 }

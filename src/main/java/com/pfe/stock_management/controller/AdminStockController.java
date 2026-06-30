@@ -1,6 +1,7 @@
 package com.pfe.stock_management.controller;
 
 import com.pfe.stock_management.dto.DpmTrackingDto;
+import com.pfe.stock_management.dto.EquipmentInstanceDto;
 import com.pfe.stock_management.dto.TeamDistributionDto;
 import com.pfe.stock_management.dto.ZmStockAuditDto;
 import com.pfe.stock_management.entity.DpmRequest;
@@ -10,6 +11,7 @@ import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.service.DpmService;
+import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.SttStockService;
 import com.pfe.stock_management.service.StockMovementService;
 import com.pfe.stock_management.service.TeamDistributionService;
@@ -32,6 +34,7 @@ public class AdminStockController {
     private final SttStockService sttStockService;
     private final StockMovementService stockMovementService;
     private final TeamDistributionService teamDistributionService;
+    private final EquipmentInstanceService equipmentInstanceService;
 
     @GetMapping("/dpms")
     public ResponseEntity<List<DpmRequest>> getAllDpms() {
@@ -102,5 +105,34 @@ public class AdminStockController {
                 null,
                 new TeamDistributionService.TeamDistributionFilter(
                         zmId, sttId, techId, equipmentId, from, to, status)));
+    }
+
+    // ── Per-unit tracking (IMEI / Serial) audit ────────────────────────────────
+
+    /**
+     * Tracked-unit audit across all teams. Optional filters: equipmentId, imei, serial,
+     * ownerType, ownerId, status, caseId, dpmId, and a free-text {@code q} (IMEI/serial/name).
+     */
+    @GetMapping("/unit-tracking")
+    public ResponseEntity<List<EquipmentInstanceDto>> getUnitTracking(
+            @RequestParam(required = false) String equipmentId,
+            @RequestParam(required = false) String imei,
+            @RequestParam(required = false) String serial,
+            @RequestParam(required = false) String ownerType,
+            @RequestParam(required = false) String ownerId,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String caseId,
+            @RequestParam(required = false) String dpmId,
+            @RequestParam(required = false) String q
+    ) {
+        return ResponseEntity.ok(equipmentInstanceService.search(
+                new EquipmentInstanceService.InstanceAuditFilter(
+                        equipmentId, imei, serial, ownerType, ownerId, status, caseId, dpmId, q),
+                null));
+    }
+
+    @GetMapping("/unit-tracking/{id}")
+    public ResponseEntity<EquipmentInstanceDto> getUnitTrackingDetail(@PathVariable String id) {
+        return ResponseEntity.ok(equipmentInstanceService.getDetail(id));
     }
 }

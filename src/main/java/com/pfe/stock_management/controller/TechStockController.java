@@ -4,8 +4,11 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.dto.DeclareTechUsageRequest;
 import com.pfe.stock_management.dto.DeclareTechUsageResponse;
+import com.pfe.stock_management.dto.EquipmentInstanceDto;
 import com.pfe.stock_management.dto.PendingDistributionDto;
 import com.pfe.stock_management.entity.TechStock;
+import com.pfe.stock_management.enums.InstanceOwnerType;
+import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.SttStockService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -26,11 +29,21 @@ public class TechStockController {
 
     private final SttStockService sttStockService;
     private final UserRepository userRepository;
+    private final EquipmentInstanceService equipmentInstanceService;
 
     @GetMapping("/my-stock")
     public ResponseEntity<TechStock> getMyStock() {
         AppUser tech = currentTech();
         return ResponseEntity.ok(sttStockService.getStockForTech(tech.getId()));
+    }
+
+    /** Tracked units in this TECH's stock (IN_TECH_STOCK), for the usage unit picker. */
+    @GetMapping("/my-instances")
+    public ResponseEntity<List<EquipmentInstanceDto>> getMyInstances(
+            @RequestParam(required = false) String equipmentId) {
+        AppUser tech = currentTech();
+        return ResponseEntity.ok(
+                equipmentInstanceService.listOwnedAvailable(InstanceOwnerType.TECH, tech.getId(), equipmentId));
     }
 
     @PostMapping("/usage")

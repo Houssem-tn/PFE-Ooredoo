@@ -4,12 +4,14 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.MainPackage.Service.UserService;
 import com.pfe.stock_management.dto.DpmTrackingDto;
+import com.pfe.stock_management.dto.EquipmentInstanceDto;
 import com.pfe.stock_management.dto.TeamDistributionDto;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.service.DpmService;
+import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.SttStockService;
 import com.pfe.stock_management.service.TeamDistributionService;
 import lombok.RequiredArgsConstructor;
@@ -35,6 +37,7 @@ public class ZmStockController {
     private final UserRepository userRepository;
     private final UserService userService;
     private final TeamDistributionService teamDistributionService;
+    private final EquipmentInstanceService equipmentInstanceService;
 
     @GetMapping("/my-dpms")
     public ResponseEntity<List<DpmRequest>> getMyDpms() {
@@ -116,6 +119,37 @@ public class ZmStockController {
                 scope,
                 new TeamDistributionService.TeamDistributionFilter(
                         null, sttId, techId, equipmentId, from, to, status)));
+    }
+
+    // ── Per-unit tracking (IMEI / Serial) audit — scoped to this ZM's STTs ──────
+
+    @GetMapping("/unit-tracking")
+    public ResponseEntity<List<EquipmentInstanceDto>> getUnitTracking(
+            @RequestParam(required = false) String equipmentId,
+            @RequestParam(required = false) String imei,
+            @RequestParam(required = false) String serial,
+            @RequestParam(required = false) String ownerType,
+            @RequestParam(required = false) String ownerId,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String caseId,
+            @RequestParam(required = false) String dpmId,
+            @RequestParam(required = false) String q
+    ) {
+        AppUser zm = currentZm();
+        return ResponseEntity.ok(equipmentInstanceService.search(
+                new EquipmentInstanceService.InstanceAuditFilter(
+                        equipmentId, imei, serial, ownerType, ownerId, status, caseId, dpmId, q),
+                getResponsibleSttIds(zm)));
+    }
+
+    @GetMapping("/unit-tracking/{id}")
+    public ResponseEntity<EquipmentInstanceDto> getUnitTrackingDetail(@PathVariable String id) {
+        AppUser zm = currentZm();
+        EquipmentInstanceDto dto = equipmentInstanceService.getDetail(id);
+        if (dto.getOriginSttId() == null || !getResponsibleSttIds(zm).contains(dto.getOriginSttId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not in your territory");
+        }
+        return ResponseEntity.ok(dto);
     }
 
     /**

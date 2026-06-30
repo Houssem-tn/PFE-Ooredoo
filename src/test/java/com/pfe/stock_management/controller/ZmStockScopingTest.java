@@ -10,7 +10,9 @@ import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.service.DpmService;
+import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.SttStockService;
+import com.pfe.stock_management.service.TeamDistributionService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,6 +46,8 @@ class ZmStockScopingTest {
     @Mock private SttStockService sttStockService;
     @Mock private UserRepository userRepository;
     @Mock private UserService userService;
+    @Mock private TeamDistributionService teamDistributionService;
+    @Mock private EquipmentInstanceService equipmentInstanceService;
 
     private ZmStockController controller;
 
@@ -58,7 +62,8 @@ class ZmStockScopingTest {
 
     @BeforeEach
     void setUp() {
-        controller = new ZmStockController(dpmService, sttStockService, userRepository, userService);
+        controller = new ZmStockController(dpmService, sttStockService, userRepository, userService,
+                teamDistributionService, equipmentInstanceService);
     }
 
     @AfterEach

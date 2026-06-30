@@ -1,6 +1,7 @@
 package com.pfe.merged_analytics.repository;
 
 import com.pfe.merged_analytics.entity.MergedAnalyticsStudyEntity;
+import com.pfe.merged_analytics.model.MergedProcessingStatus;
 import org.springframework.data.mongodb.repository.MongoRepository;
 
 import java.util.List;
@@ -13,4 +14,7 @@ public interface MergedAnalyticsStudyRepository extends MongoRepository<MergedAn
     Optional<MergedAnalyticsStudyEntity> findByStudyIdAndUploadedBy(String studyId, String uploadedBy);
 
     List<MergedAnalyticsStudyEntity> findAllByUploadedByOrderByUploadedAtDesc(String uploadedBy);
+
+    /** Most recently uploaded study in the given processing state (used by Network Coverage). */
+    Optional<MergedAnalyticsStudyEntity> findFirstByProcessingStatusOrderByUploadedAtDesc(MergedProcessingStatus status);
 }

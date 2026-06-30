@@ -28,6 +28,16 @@ public class CaseStockConsumptionService {
             List<ConsumedEquipmentItem> consumedItems,
             String performedBy
     ) {
+        return createOrUpdate(caseEntity, technician, consumedItems, performedBy, null);
+    }
+
+    public CaseStockConsumption createOrUpdate(
+            CaseEntity caseEntity,
+            AppUser technician,
+            List<ConsumedEquipmentItem> consumedItems,
+            String performedBy,
+            String usageContext
+    ) {
         CaseStockConsumption record = repository.findByCaseId(caseEntity.getId())
                 .orElseGet(() -> CaseStockConsumption.builder()
                         .caseId(caseEntity.getId())
@@ -36,6 +46,9 @@ public class CaseStockConsumptionService {
 
         record.setCrmCase(caseEntity.getCrmCase());
         record.setCaseType(caseEntity.getType());
+        if (usageContext != null) {
+            record.setUsageContext(usageContext);
+        }
         record.setTechnicianId(technician.getId());
         record.setTechnicianName(technician.getFullName());
         record.setSttId(caseEntity.getSttId());
@@ -169,6 +182,7 @@ public class CaseStockConsumptionService {
                 .caseId(r.getCaseId())
                 .crmCase(r.getCrmCase())
                 .caseType(r.getCaseType())
+                .usageContext(r.getUsageContext())
                 .technicianId(r.getTechnicianId())
                 .technicianName(r.getTechnicianName())
                 .sttId(r.getSttId())

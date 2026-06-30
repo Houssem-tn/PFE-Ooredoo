@@ -25,5 +25,8 @@ public enum CaseTimelineEventType {
     // Material return events
     MATERIAL_RETURN_SUBMITTED,
     MATERIAL_RETURN_APPROVED,
-    MATERIAL_RETURN_REJECTED
+    MATERIAL_RETURN_REJECTED,
+
+    // RES client material recovery (no stock consumption)
+    CLIENT_MATERIAL_RECOVERED
 }

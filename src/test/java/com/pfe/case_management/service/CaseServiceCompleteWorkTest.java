@@ -13,6 +13,8 @@ import com.pfe.case_management.enums.ExecutionMode;
 import com.pfe.case_management.enums.ExecutorRole;
 import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.stock_management.material_return.MaterialReturnService;
+import com.pfe.stock_management.service.EquipmentUsagePolicyService;
 import com.pfe.stock_management.service.SttStockService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +22,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 
@@ -49,6 +52,12 @@ class CaseServiceCompleteWorkTest {
     private CasePdfExportService casePdfExportService;
     @Mock
     private SttStockService sttStockService;
+    @Mock
+    private MongoTemplate mongoTemplate;
+    @Mock
+    private MaterialReturnService materialReturnService;
+    @Mock
+    private EquipmentUsagePolicyService equipmentUsagePolicy;
 
     @AfterEach
     void clearSecurityContext() {
@@ -96,13 +105,16 @@ class CaseServiceCompleteWorkTest {
 
         CaseService service = new CaseService(
                 caseRepository,
+                mongoTemplate,
                 userRepository,
                 slaTrackingService,
                 notificationEventService,
                 new CaseTimelineService(),
                 fileStorageService,
                 casePdfExportService,
-                sttStockService
+                sttStockService,
+                materialReturnService,
+                equipmentUsagePolicy
         );
 
         CompleteWorkRequest request = new CompleteWorkRequest(
@@ -120,7 +132,7 @@ class CaseServiceCompleteWorkTest {
                 10.1,
                 Instant.parse("2026-05-07T10:15:00Z"),
                 3.0,
-                List.of(new com.pfe.case_management.dto.UsedEquipmentRequestItem("eq-1", null, null, 2))
+                List.of(new com.pfe.case_management.dto.UsedEquipmentRequestItem("eq-1", null, null, 2, null))
         );
 
         service.completeWork(caseEntity.getId(), request);

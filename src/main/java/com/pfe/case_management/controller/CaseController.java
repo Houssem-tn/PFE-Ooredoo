@@ -4,6 +4,7 @@ import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
 import com.pfe.case_management.dto.CompleteWorkRequest;
 import com.pfe.case_management.dto.CreateCaseRequest;
+import com.pfe.case_management.dto.DeclareClientRecoveryRequest;
 import com.pfe.case_management.dto.SetRdvRequest;
 import com.pfe.case_management.dto.ValidateZmRequest;
 import com.pfe.MainPackage.Entity.CaseModuleType;
@@ -122,6 +123,14 @@ public class CaseController {
             @Valid @RequestBody CompleteWorkRequest request
     ) {
         return ResponseEntity.ok(caseService.completeWork(id, request));
+    }
+
+    @PostMapping("/{id}/res-recovery")
+    public ResponseEntity<CaseEntity> declareClientRecovery(
+            @PathVariable String id,
+            @Valid @RequestBody DeclareClientRecoveryRequest request
+    ) {
+        return ResponseEntity.ok(caseService.declareClientRecovery(id, request));
     }
 
     @PostMapping("/{id}/work-proof")

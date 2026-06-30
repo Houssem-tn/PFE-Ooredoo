@@ -171,7 +171,7 @@ public final class TunisiaGovernorateSupport {
         registerAlias(aliases, "Kasserine", "Kasserine");
         registerAlias(aliases, "Sidi Bouzid", "Sidi Bouzid");
         registerAlias(aliases, "Gabes", "Gabes", "Gabès", "GabÃ¨s");
-        registerAlias(aliases, "Medenine", "Medenine", "Médenine", "MÃ©denine");
+        registerAlias(aliases, "Medenine", "Medenine", "Mednine", "Médenine", "MÃ©denine");
         registerAlias(aliases, "Tataouine", "Tataouine");
         registerAlias(aliases, "Gafsa", "Gafsa");
         registerAlias(aliases, "Tozeur", "Tozeur");

@@ -2,9 +2,11 @@ package com.pfe.coverage.controller;
 
 import com.pfe.coverage.dto.CoverageAnalysisResultResponse;
 import com.pfe.coverage.dto.CoverageAnalysisSummaryResponse;
+import com.pfe.coverage.dto.CoverageAnalyticsPointsResponse;
 import com.pfe.coverage.dto.PointCheckRequest;
 import com.pfe.coverage.dto.PointCheckResponse;
 import com.pfe.coverage.service.CoverageAnalysisService;
+import com.pfe.coverage.service.CoverageAnalyticsPointService;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -17,9 +19,14 @@ import java.util.Map;
 public class CoverageAnalysisController {
 
     private final CoverageAnalysisService service;
+    private final CoverageAnalyticsPointService analyticsPointService;
 
-    public CoverageAnalysisController(CoverageAnalysisService service) {
+    public CoverageAnalysisController(
+            CoverageAnalysisService service,
+            CoverageAnalyticsPointService analyticsPointService
+    ) {
         this.service = service;
+        this.analyticsPointService = analyticsPointService;
     }
 
     /**
@@ -65,6 +72,27 @@ public class CoverageAnalysisController {
     @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_ZM')")
     public List<CoverageAnalysisResultResponse> outsideCoverage(Authentication authentication) {
         return service.getOutsideCoverage(authentication.getName());
+    }
+
+    /**
+     * Returns map markers sourced directly from the latest imported Merged Operations
+     * file (merged-analytics), filtered by {@code source} (default MES = activation).
+     *
+     * Only rows with valid coordinates are returned. Supply all four bounding-box
+     * params to restrict results to the current viewport; {@code limit} caps the
+     * number of markers (server enforces a hard ceiling) to avoid loading huge studies.
+     */
+    @GetMapping("/analytics-points")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_ZM')")
+    public CoverageAnalyticsPointsResponse analyticsPoints(
+            @RequestParam(defaultValue = "MES") String source,
+            @RequestParam(required = false) Double minLat,
+            @RequestParam(required = false) Double minLng,
+            @RequestParam(required = false) Double maxLat,
+            @RequestParam(required = false) Double maxLng,
+            @RequestParam(defaultValue = "5000") int limit
+    ) {
+        return analyticsPointService.getPoints(source, minLat, minLng, maxLat, maxLng, limit);
     }
 
     /**

@@ -19,6 +19,9 @@ public class CaseConsumptionDto {
     private String crmCase;
     private CaseType caseType;
 
+    /** ACT_CONSUMPTION vs PLT_USAGE_SWAP. */
+    private String usageContext;
+
     private String technicianId;
     private String technicianName;
 

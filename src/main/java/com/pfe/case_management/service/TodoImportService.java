@@ -12,6 +12,7 @@ import com.pfe.case_management.dto.ImportedTodoPageResponse;
 import com.pfe.case_management.dto.ImportedTodoPreviewRowResponse;
 import com.pfe.case_management.dto.TodoImportInjectResponse;
 import com.pfe.case_management.dto.TodoImportPreviewResponse;
+import com.pfe.case_management.dto.ActCaseRow;
 import com.pfe.case_management.dto.ZmTodoAnalyticsAlertResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsGovernorateItemResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsInvalidReasonResponse;
@@ -31,6 +32,7 @@ import com.pfe.case_management.model.ZmTodoWorkflowStatus;
 import com.pfe.case_management.model.ZmTodoDispatchMode;
 import com.pfe.case_management.repository.ImportedTodoRepository;
 import com.pfe.case_management.repository.ImportedZmTodoRepository;
+import com.pfe.case_management.repository.ZmFieldImportAuditRepository;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
@@ -119,6 +121,30 @@ public class TodoImportService {
             "STATUT",
             "ZONE_MNANAGER"
     );
+    private static final List<String> ACT_PROCESS_COLUMNS = List.of(
+            "CRM_CASE",
+            "FX_DATE_CRM",
+            "CONTACT1",
+            "MSISDN",
+            "GOUVERNORAT",
+            "DELEGATION",
+            "LOCALITE",
+            "LATITUDE",
+            "LONGITUDE",
+            "OFFRE",
+            "DES_PACK",
+            "OPEN_DATE_SUR_TIMOS",
+            "DATE_AFFECTATION_STT",
+            "STT",
+            "STATUT",
+            "ZONE_MNANAGER"
+    );
+    private static final List<String> ACT_REQUIRED_COLUMNS = List.of(
+            "CRM_CASE",
+            "GOUVERNORAT",
+            "STATUT"
+    );
+    private static final Map<String, List<String>> ACT_PROCESS_COLUMN_ALIASES = buildActProcessColumnAliases();
     private static final List<DateTimeFormatter> SUPPORTED_DATE_FORMATTERS = List.of(
             new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yyyy").toFormatter(Locale.ROOT),
             new DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("M/d/yy").toFormatter(Locale.ROOT),
@@ -147,6 +173,7 @@ public class TodoImportService {
 
     private final ImportedTodoRepository importedTodoRepository;
     private final ImportedZmTodoRepository importedZmTodoRepository;
+    private final ZmFieldImportAuditRepository zmFieldImportAuditRepository;
     private final MongoTemplate mongoTemplate;
     private final UserRepository userRepository;
     private final ZmTodoAnalysisService zmTodoAnalysisService;
@@ -236,17 +263,25 @@ public class TodoImportService {
 
         ZmTodoBusinessType businessType = parseBusinessType(businessTypeParam);
         ZmTodoDispatchMode dispatchMode = parseDispatchMode(dispatchModeParam);
-        ParsedAnalyticsImport parsedImport = parseAdminPerformanceWorkbook(file, null);
+        ParsedAnalyticsImport parsedImport = businessType == ZmTodoBusinessType.ACT
+                ? parseActProcessWorkbook(file, null, dispatchMode)
+                : parseAdminPerformanceWorkbook(file, null);
         ResolvedZmIdentity zmIdentity = resolveZmIdentity(zmEmail);
 
         List<ParsedAnalyticsRow> allRows = parsedImport.previewRows();
         int totalRows = allRows.size();
+        List<ParsedAnalyticsRow> dispatchInputRows = businessType == ZmTodoBusinessType.ACT
+                ? allRows.stream().filter(ParsedAnalyticsRow::validRow).toList()
+                : allRows;
+        int parserInvalidRowsCount = businessType == ZmTodoBusinessType.ACT
+                ? totalRows - dispatchInputRows.size()
+                : 0;
 
         // Resolve how rows are matched to the connected ZM, depending on dispatch mode.
         //   BY_ONLINE_USER  -> match by ZM name (Excel ZONE_MNANAGER == connected ZM); the
         //                      "online user" is the authenticated ZM driving the import.
         //   BY_GOVERNORATE  -> match by row GOUVERNORAT in the connected ZM's covered
-        //                      governorates for this intervention type (PLT/RES).
+        //                      governorates for this intervention type (ACT/PLT/RES).
         String dispatchModeUserName = null;
         List<String> moduleGovernorates = null;
 
@@ -266,12 +301,12 @@ public class TodoImportService {
         }
 
         final List<String> govList = moduleGovernorates;
-        List<ParsedAnalyticsRow> zmMatchedRows = allRows.stream()
+        List<ParsedAnalyticsRow> zmMatchedRows = dispatchInputRows.stream()
                 .filter(row -> dispatchMode == ZmTodoDispatchMode.BY_GOVERNORATE
                         ? matchesGovernorate(govList, row.gouvernorat())
                         : zmIdentity.matches(row.zoneManagerNormalized()))
                 .toList();
-        int ignoredOtherZmCount = totalRows - zmMatchedRows.size();
+        int ignoredOtherZmCount = dispatchInputRows.size() - zmMatchedRows.size();
 
         // Filter rows where STATUT = "En cours"
         List<ParsedAnalyticsRow> enCoursRows = zmMatchedRows.stream()
@@ -281,6 +316,60 @@ public class TodoImportService {
 
         String batchId = UUID.randomUUID().toString();
         Instant now = Instant.now();
+
+        // --- ACT: create real activation CaseEntity objects directly for the importing ZM ---
+        if (businessType == ZmTodoBusinessType.ACT) {
+            List<ActCaseRow> caseRows = enCoursRows.stream()
+                    .map(this::toActCaseRow)
+                    .toList();
+
+            BulkPltImportResult caseResult = caseService.bulkImportFieldImportActivationCases(
+                    caseRows,
+                    zmIdentity.appUser(),
+                    batchId,
+                    parsedImport.sourceFileName()
+            );
+
+            log.info(
+                    "todo_zm_field_import_activation file={} uploadedBy={} batchId={} totalRows={} zmMatched={} enCours={} created={} duplicates={} invalid={} totalMs={}",
+                    parsedImport.sourceFileName(), zmEmail, batchId,
+                    totalRows, zmMatchedRows.size(), enCoursRows.size(),
+                    caseResult.createdCount(), caseResult.duplicateCount(), caseResult.invalidCount(),
+                    elapsedMs(totalStart)
+            );
+
+            String message = buildImportedActivationImportMessage(
+                    dispatchMode,
+                    caseResult.createdCount(),
+                    ignoredOtherZmCount,
+                    ignoredStatusCount,
+                    caseResult.duplicateCount()
+            );
+
+            ZmFieldWorkImportResponse response = new ZmFieldWorkImportResponse(
+                    batchId,
+                    parsedImport.sourceFileName(),
+                    now,
+                    businessType.name(),
+                    "ACTIVATION_CASES",
+                    totalRows,
+                    zmMatchedRows.size(),
+                    enCoursRows.size(),
+                    0,
+                    0,
+                    caseResult.createdCount(),
+                    caseResult.duplicateCount(),
+                    ignoredOtherZmCount,
+                    ignoredStatusCount,
+                    parserInvalidRowsCount + caseResult.invalidCount(),
+                    message,
+                    null,
+                    dispatchMode.name(),
+                    dispatchModeUserName
+            );
+            saveFieldImportAudit(businessType, dispatchMode, response, zmEmail);
+            return response;
+        }
 
         // --- PLT & RES: create real complaint CaseEntity objects (identical lifecycle) ---
         if (businessType == ZmTodoBusinessType.PLT || businessType == ZmTodoBusinessType.RES) {
@@ -310,7 +399,7 @@ public class TodoImportService {
             String message = buildImportedComplaintImportMessage(
                     dispatchMode, businessType, caseResult.createdCount(), ignoredOtherZmCount, ignoredStatusCount, caseResult.duplicateCount());
 
-            return new ZmFieldWorkImportResponse(
+            ZmFieldWorkImportResponse response = new ZmFieldWorkImportResponse(
                     batchId,
                     parsedImport.sourceFileName(),
                     now,
@@ -321,6 +410,7 @@ public class TodoImportService {
                     enCoursRows.size(),
                     0,
                     caseResult.createdCount(),
+                    0,
                     caseResult.duplicateCount(),
                     ignoredOtherZmCount,
                     ignoredStatusCount,
@@ -330,6 +420,8 @@ public class TodoImportService {
                     dispatchMode.name(),
                     dispatchModeUserName
             );
+            saveFieldImportAudit(businessType, dispatchMode, response, zmEmail);
+            return response;
         }
 
         // --- Default path (RES, UNKNOWN …): create ImportedZmTodoEntity field-work rows ---
@@ -396,7 +488,7 @@ public class TodoImportService {
 
         String message = buildFieldWorkMessage(dispatchMode, businessType, entities.size(), ignoredOtherZmCount, ignoredStatusCount, duplicateCount);
 
-        return new ZmFieldWorkImportResponse(
+        ZmFieldWorkImportResponse response = new ZmFieldWorkImportResponse(
                 batchId,
                 parsedImport.sourceFileName(),
                 now,
@@ -407,6 +499,7 @@ public class TodoImportService {
                 enCoursRows.size(),
                 entities.size(),
                 0,
+                0,
                 duplicateCount,
                 ignoredOtherZmCount,
                 ignoredStatusCount,
@@ -416,6 +509,8 @@ public class TodoImportService {
                 dispatchMode.name(),
                 dispatchModeUserName
         );
+        saveFieldImportAudit(businessType, dispatchMode, response, zmEmail);
+        return response;
     }
 
     private ZmTodoDispatchMode parseDispatchMode(String dispatchModeParam) {
@@ -449,20 +544,33 @@ public class TodoImportService {
             return List.of();
         }
 
-        String moduleKey = businessType == ZmTodoBusinessType.PLT ? "PLT" : "RES";
+        String moduleKey = switch (businessType) {
+            case ACT -> "ACT";
+            case PLT -> "PLT";
+            case RES -> "RES";
+            default -> null;
+        };
+        if (moduleKey == null) {
+            return List.of();
+        }
+
         Map<String, List<String>> coverageByModule = zm.getCoverageByModule();
-        if (coverageByModule == null) {
-            return List.of();
+        if (coverageByModule != null) {
+            List<String> moduleGovs = coverageByModule.get(moduleKey);
+            if (moduleGovs != null && !moduleGovs.isEmpty()) {
+                return moduleGovs.stream()
+                        .filter(this::hasText)
+                        .toList();
+            }
         }
 
-        List<String> moduleGovs = coverageByModule.get(moduleKey);
-        if (moduleGovs == null || moduleGovs.isEmpty()) {
-            return List.of();
+        // Backward compatibility: ACT coverage historically lived in assignedGovernorates before
+        // module-scoped coverageByModule was introduced.
+        if (businessType == ZmTodoBusinessType.ACT) {
+            return safeGovernorates(zm.getAssignedGovernorates());
         }
 
-        return moduleGovs.stream()
-                .filter(this::hasText)
-                .toList();
+        return List.of();
     }
 
     private boolean matchesGovernorate(List<String> moduleGovernorates, String rowGouvernorat) {
@@ -937,6 +1045,315 @@ public class TodoImportService {
                 : "Unsupported import file content. Open the file in Excel and save it as .xlsx or .csv, then upload it again.");
     }
 
+    private ParsedAnalyticsImport parseActProcessWorkbook(
+            MultipartFile file,
+            String uploadedBy,
+            ZmTodoDispatchMode dispatchMode
+    ) {
+        validateFile(file);
+
+        String sourceFileName = resolveSourceFileName(file);
+        long parseStart = System.nanoTime();
+
+        try (InputStream inputStream = file.getInputStream();
+             Workbook workbook = WorkbookFactory.create(inputStream)) {
+            if (workbook.getNumberOfSheets() == 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no sheets");
+            }
+
+            Sheet sheet = workbook.getSheetAt(0);
+            Row headerRow = sheet.getRow(sheet.getFirstRowNum());
+            if (headerRow == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded Excel file has no header row");
+            }
+
+            DataFormatter formatter = new DataFormatter(Locale.ROOT);
+            FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+
+            List<String> requiredColumns = resolveActRequiredColumns(dispatchMode);
+            Map<String, Integer> headerIndexes = resolveHeaderIndexes(headerRow, formatter, evaluator, ACT_PROCESS_COLUMN_ALIASES);
+            validateRequiredColumns(headerIndexes, requiredColumns, "Missing required ACT Excel columns: ");
+
+            List<SourceRow> sourceRows = new ArrayList<>();
+            for (int rowIndex = sheet.getFirstRowNum() + 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex);
+                Map<String, String> sourceValues = extractSourceValues(
+                        row,
+                        headerIndexes,
+                        formatter,
+                        evaluator,
+                        ACT_PROCESS_COLUMNS
+                );
+
+                if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
+                    continue;
+                }
+
+                sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
+            }
+
+            log.info(
+                    "todo_zm_act_import_parse file={} uploadedBy={} parser=poi extractedRows={} extractionMs={}",
+                    sourceFileName,
+                    uploadedBy,
+                    sourceRows.size(),
+                    elapsedMs(parseStart)
+            );
+
+            return buildActProcessImport(sourceFileName, sourceRows, uploadedBy, dispatchMode);
+        } catch (EncryptedDocumentException ex) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Password-protected Excel files are not supported",
+                    ex
+            );
+        } catch (IOException ex) {
+            if (shouldAttemptFallback(sourceFileName, ex)) {
+                try {
+                    return parseActStructuredTextWorkbook(file, sourceFileName, uploadedBy, dispatchMode);
+                } catch (Exception fallbackEx) {
+                    log.warn("Failed to read ACT import spreadsheet fallback for {}", sourceFileName, fallbackEx);
+                    throw new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST,
+                            resolveFallbackReadError(ex, fallbackEx, sourceFileName),
+                            fallbackEx
+                    );
+                }
+            }
+
+            log.warn("Failed to read uploaded ACT import file {}", sourceFileName, ex);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, resolveExcelReadError(ex), ex);
+        }
+    }
+
+    private ParsedAnalyticsImport parseActStructuredTextWorkbook(
+            MultipartFile file,
+            String sourceFileName,
+            String uploadedBy,
+            ZmTodoDispatchMode dispatchMode
+    ) throws Exception {
+        byte[] bytes = file.getBytes();
+        String content = decodeTextContent(bytes);
+        List<String> failures = new ArrayList<>();
+        List<String> requiredColumns = resolveActRequiredColumns(dispatchMode);
+
+        if (looksLikeSpreadsheetXml(content)) {
+            try {
+                return buildActProcessImport(
+                        sourceFileName,
+                        toSourceRows(
+                                parseSpreadsheetXmlMatrix(
+                                        bytes,
+                                        ACT_PROCESS_COLUMN_ALIASES,
+                                        requiredColumns,
+                                        "No Spreadsheet XML table with the required ACT columns was found"
+                                ),
+                                ACT_PROCESS_COLUMN_ALIASES,
+                                requiredColumns,
+                                ACT_PROCESS_COLUMNS,
+                                "Missing required ACT Excel columns: "
+                        ),
+                        uploadedBy,
+                        dispatchMode
+                );
+            } catch (Exception ex) {
+                failures.add(sanitizeErrorMessage(deepestMessage(ex)));
+            }
+        }
+
+        if (looksLikeHtml(content)) {
+            try {
+                return buildActProcessImport(
+                        sourceFileName,
+                        toSourceRows(
+                                parseHtmlMatrix(
+                                        content,
+                                        ACT_PROCESS_COLUMN_ALIASES,
+                                        requiredColumns,
+                                        "No HTML table with the required ACT columns was found"
+                                ),
+                                ACT_PROCESS_COLUMN_ALIASES,
+                                requiredColumns,
+                                ACT_PROCESS_COLUMNS,
+                                "Missing required ACT Excel columns: "
+                        ),
+                        uploadedBy,
+                        dispatchMode
+                );
+            } catch (Exception ex) {
+                failures.add(sanitizeErrorMessage(deepestMessage(ex)));
+            }
+        }
+
+        try {
+            return buildActProcessImport(
+                    sourceFileName,
+                    toSourceRows(
+                            parseDelimitedMatrix(
+                                    content,
+                                    ACT_PROCESS_COLUMN_ALIASES,
+                                    requiredColumns,
+                                    "No supported delimited table with the required ACT columns was found"
+                            ),
+                            ACT_PROCESS_COLUMN_ALIASES,
+                            requiredColumns,
+                            ACT_PROCESS_COLUMNS,
+                            "Missing required ACT Excel columns: "
+                    ),
+                    uploadedBy,
+                    dispatchMode
+            );
+        } catch (Exception ex) {
+            failures.add(sanitizeErrorMessage(deepestMessage(ex)));
+        }
+
+        String summary = failures.stream()
+                .filter(this::hasText)
+                .distinct()
+                .collect(Collectors.joining(" | "));
+
+        throw new IOException(hasText(summary)
+                ? summary
+                : "Unsupported import file content. Open the file in Excel and save it as .xlsx or .csv, then upload it again.");
+    }
+
+    private List<String> resolveActRequiredColumns(ZmTodoDispatchMode dispatchMode) {
+        if (dispatchMode != ZmTodoDispatchMode.BY_ONLINE_USER) {
+            return ACT_REQUIRED_COLUMNS;
+        }
+
+        ArrayList<String> required = new ArrayList<>(ACT_REQUIRED_COLUMNS.size() + 1);
+        required.addAll(ACT_REQUIRED_COLUMNS);
+        required.add("ZONE_MNANAGER");
+        return List.copyOf(required);
+    }
+
+    private ParsedAnalyticsImport buildActProcessImport(
+            String sourceFileName,
+            List<SourceRow> sourceRows,
+            String uploadedBy,
+            ZmTodoDispatchMode dispatchMode
+    ) {
+        long classificationStart = System.nanoTime();
+        ImportValueCache cache = new ImportValueCache();
+        Set<String> distinctZoneManagers = new LinkedHashSet<>();
+        Set<String> distinctStts = new LinkedHashSet<>();
+        Set<String> distinctGovernorates = new LinkedHashSet<>();
+        List<ParsedAnalyticsRow> previewRows = new ArrayList<>(sourceRows.size());
+        int validRows = 0;
+
+        for (SourceRow sourceRow : sourceRows) {
+            ParsedAnalyticsRow row = buildActProcessRow(sourceRow.rowNumber(), sourceRow.sourceValues(), cache, dispatchMode);
+
+            if (TodoAnalyticsSupport.hasText(row.zoneManagerNormalized())) {
+                distinctZoneManagers.add(row.zoneManager());
+            }
+            if (TodoAnalyticsSupport.hasText(row.sttNormalized())) {
+                distinctStts.add(row.stt());
+            }
+            if (TodoAnalyticsSupport.hasText(row.gouvernoratNormalized())) {
+                distinctGovernorates.add(row.gouvernorat());
+            }
+
+            previewRows.add(row);
+            if (row.validRow()) {
+                validRows += 1;
+            }
+        }
+
+        log.info(
+                "todo_zm_act_import_classification file={} uploadedBy={} totalRows={} classificationMs={} validRows={} invalidRows={} distinctZoneManagers={} distinctStts={} distinctGovernorates={}",
+                sourceFileName,
+                uploadedBy,
+                sourceRows.size(),
+                elapsedMs(classificationStart),
+                validRows,
+                sourceRows.size() - validRows,
+                distinctZoneManagers.size(),
+                distinctStts.size(),
+                distinctGovernorates.size()
+        );
+
+        return new ParsedAnalyticsImport(
+                sourceFileName,
+                sourceRows.size(),
+                validRows,
+                sourceRows.size() - validRows,
+                distinctZoneManagers.size(),
+                distinctStts.size(),
+                distinctGovernorates.size(),
+                previewRows
+        );
+    }
+
+    private ParsedAnalyticsRow buildActProcessRow(
+            int rowNumber,
+            Map<String, String> sourceValues,
+            ImportValueCache cache,
+            ZmTodoDispatchMode dispatchMode
+    ) {
+        List<String> issues = new ArrayList<>();
+
+        String crmCase = cache.clean(sourceValues.get("CRM_CASE"));
+        String zoneManager = cache.clean(sourceValues.get("ZONE_MNANAGER"));
+        String stt = cache.clean(sourceValues.get("STT"));
+        String gouvernoratRaw = cache.clean(sourceValues.get("GOUVERNORAT"));
+        String openDateRaw = cache.clean(sourceValues.get("OPEN_DATE_SUR_TIMOS"));
+        String affectationRaw = cache.clean(sourceValues.get("DATE_AFFECTATION_STT"));
+
+        if (!hasText(crmCase)) {
+            issues.add("CASE_CRM is required");
+        }
+
+        if (!hasText(gouvernoratRaw)) {
+            issues.add("FX_GOUVERNORAT is required");
+        }
+
+        if (dispatchMode == ZmTodoDispatchMode.BY_ONLINE_USER && !hasText(zoneManager)) {
+            issues.add("ZONE_MNANAGER is required for online-user dispatch");
+        }
+
+        String gouvernorat = null;
+        if (hasText(gouvernoratRaw)) {
+            try {
+                gouvernorat = TunisiaGovernorateSupport.requireSupported(gouvernoratRaw);
+            } catch (IllegalArgumentException ex) {
+                issues.add("Unknown Tunisian governorate");
+            }
+        }
+
+        LocalDate openDate = cache.parseDate(openDateRaw);
+        LocalDate affectationDate = cache.parseDate(affectationRaw);
+        Integer slaBusinessDays = TodoAnalyticsSupport.calculateBusinessDays(openDate, affectationDate);
+
+        return new ParsedAnalyticsRow(
+                rowNumber,
+                crmCase,
+                cache.normalizeLookup(crmCase),
+                cache.clean(sourceValues.get("FX_DATE_CRM")),
+                cache.clean(sourceValues.get("CONTACT1")),
+                null,
+                cache.clean(sourceValues.get("MSISDN")),
+                gouvernorat,
+                cache.normalizeLookup(gouvernorat),
+                null,
+                cache.normalizeCoordinate(sourceValues.get("LATITUDE")),
+                cache.normalizeCoordinate(sourceValues.get("LONGITUDE")),
+                openDateRaw,
+                openDate,
+                affectationRaw,
+                affectationDate,
+                slaBusinessDays,
+                stt,
+                cache.normalizeLookup(stt),
+                cache.clean(sourceValues.get("STATUT")),
+                zoneManager,
+                cache.normalizeLookup(zoneManager),
+                new LinkedHashMap<>(sourceValues),
+                List.copyOf(issues)
+        );
+    }
+
     private List<SourceRow> toSourceRows(List<List<String>> matrix) {
         if (matrix.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded spreadsheet does not contain any data rows");
@@ -948,6 +1365,33 @@ public class TodoImportService {
         List<SourceRow> sourceRows = new ArrayList<>();
         for (int rowIndex = 1; rowIndex < matrix.size(); rowIndex++) {
             Map<String, String> sourceValues = extractSourceValues(matrix.get(rowIndex), headerIndexes);
+            if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
+                continue;
+            }
+
+            sourceRows.add(new SourceRow(rowIndex + 1, sourceValues));
+        }
+
+        return sourceRows;
+    }
+
+    private List<SourceRow> toSourceRows(
+            List<List<String>> matrix,
+            Map<String, List<String>> columnAliases,
+            Collection<String> requiredColumns,
+            Collection<String> extractedColumns,
+            String missingColumnsMessage
+    ) {
+        if (matrix.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The uploaded spreadsheet does not contain any data rows");
+        }
+
+        Map<String, Integer> headerIndexes = resolveHeaderIndexes(matrix.get(0), columnAliases);
+        validateRequiredColumns(headerIndexes, requiredColumns, missingColumnsMessage);
+
+        List<SourceRow> sourceRows = new ArrayList<>();
+        for (int rowIndex = 1; rowIndex < matrix.size(); rowIndex++) {
+            Map<String, String> sourceValues = extractSourceValues(matrix.get(rowIndex), headerIndexes, extractedColumns);
             if (sourceValues.isEmpty() || isRowEmpty(sourceValues.values())) {
                 continue;
             }
@@ -1179,9 +1623,71 @@ public class TodoImportService {
         return indexes;
     }
 
+    private Map<String, Integer> resolveHeaderIndexes(
+            Row headerRow,
+            DataFormatter formatter,
+            FormulaEvaluator evaluator,
+            Map<String, List<String>> columnAliases
+    ) {
+        Map<String, Integer> rawIndexes = new LinkedHashMap<>();
+
+        for (int cellIndex = 0; cellIndex < headerRow.getLastCellNum(); cellIndex++) {
+            String rawHeader = readCellValue(headerRow.getCell(cellIndex), formatter, evaluator);
+            if (!hasText(rawHeader)) {
+                continue;
+            }
+
+            rawIndexes.putIfAbsent(normalizeHeader(rawHeader), cellIndex);
+        }
+
+        return mapAliases(rawIndexes, columnAliases);
+    }
+
+    private Map<String, Integer> resolveHeaderIndexes(
+            List<String> headers,
+            Map<String, List<String>> columnAliases
+    ) {
+        Map<String, Integer> rawIndexes = new LinkedHashMap<>();
+
+        for (int index = 0; index < headers.size(); index++) {
+            String rawHeader = headers.get(index);
+            if (!hasText(rawHeader)) {
+                continue;
+            }
+
+            rawIndexes.putIfAbsent(normalizeHeader(rawHeader), index);
+        }
+
+        return mapAliases(rawIndexes, columnAliases);
+    }
+
+    private Map<String, Integer> mapAliases(
+            Map<String, Integer> rawIndexes,
+            Map<String, List<String>> columnAliases
+    ) {
+        Map<String, Integer> indexes = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : columnAliases.entrySet()) {
+            for (String alias : entry.getValue()) {
+                Integer index = rawIndexes.get(normalizeHeader(alias));
+                if (index != null) {
+                    indexes.put(entry.getKey(), index);
+                    break;
+                }
+            }
+        }
+        return indexes;
+    }
+
     private boolean containsRequiredColumns(Map<String, Integer> headerIndexes) {
         return REQUIRED_COLUMNS.stream()
                 .allMatch(column -> headerIndexes.containsKey(normalizeHeader(column)));
+    }
+
+    private boolean containsRequiredColumns(
+            Map<String, Integer> headerIndexes,
+            Collection<String> requiredColumns
+    ) {
+        return requiredColumns.stream().allMatch(headerIndexes::containsKey);
     }
 
     private void validateRequiredColumns(Map<String, Integer> headerIndexes) {
@@ -1193,6 +1699,23 @@ public class TodoImportService {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
                     "Missing required Excel columns: " + String.join(", ", missingColumns)
+            );
+        }
+    }
+
+    private void validateRequiredColumns(
+            Map<String, Integer> headerIndexes,
+            Collection<String> requiredColumns,
+            String errorPrefix
+    ) {
+        List<String> missingColumns = requiredColumns.stream()
+                .filter(column -> !headerIndexes.containsKey(column))
+                .toList();
+
+        if (!missingColumns.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    errorPrefix + String.join(", ", missingColumns)
             );
         }
     }
@@ -1222,6 +1745,46 @@ public class TodoImportService {
 
         for (String column : REQUIRED_COLUMNS) {
             Integer cellIndex = headerIndexes.get(normalizeHeader(column));
+            String value = cellIndex == null || cellIndex >= rowValues.size()
+                    ? ""
+                    : rowValues.get(cellIndex);
+            values.put(column, value);
+        }
+
+        return values;
+    }
+
+    private Map<String, String> extractSourceValues(
+            Row row,
+            Map<String, Integer> headerIndexes,
+            DataFormatter formatter,
+            FormulaEvaluator evaluator,
+            Collection<String> columns
+    ) {
+        Map<String, String> values = new LinkedHashMap<>();
+
+        for (String column : columns) {
+            Integer cellIndex = headerIndexes.get(column);
+            if (cellIndex == null) {
+                values.put(column, null);
+                continue;
+            }
+
+            values.put(column, readCellValue(row == null ? null : row.getCell(cellIndex), formatter, evaluator));
+        }
+
+        return values;
+    }
+
+    private Map<String, String> extractSourceValues(
+            List<String> rowValues,
+            Map<String, Integer> headerIndexes,
+            Collection<String> columns
+    ) {
+        Map<String, String> values = new LinkedHashMap<>();
+
+        for (String column : columns) {
+            Integer cellIndex = headerIndexes.get(column);
             String value = cellIndex == null || cellIndex >= rowValues.size()
                     ? ""
                     : rowValues.get(cellIndex);
@@ -1553,6 +2116,138 @@ public class TodoImportService {
         throw new IOException("No supported delimited table with the required todo columns was found");
     }
 
+    private List<List<String>> parseHtmlMatrix(
+            String content,
+            Map<String, List<String>> columnAliases,
+            Collection<String> requiredColumns,
+            String notFoundMessage
+    ) throws IOException {
+        Elements tables = Jsoup.parse(content).select("table");
+        for (int tableIndex = 0; tableIndex < tables.size(); tableIndex++) {
+            Elements rows = tables.get(tableIndex).select("tr");
+            List<List<String>> matrix = new ArrayList<>();
+
+            for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+                Elements cells = rows.get(rowIndex).select("th,td");
+                if (cells.isEmpty()) {
+                    continue;
+                }
+
+                List<String> values = new ArrayList<>(cells.size());
+                for (int cellIndex = 0; cellIndex < cells.size(); cellIndex++) {
+                    values.add(cells.get(cellIndex).text().trim());
+                }
+                matrix.add(values);
+            }
+
+            if (!matrix.isEmpty() && containsRequiredColumns(resolveHeaderIndexes(matrix.get(0), columnAliases), requiredColumns)) {
+                return matrix;
+            }
+        }
+
+        throw new IOException(notFoundMessage);
+    }
+
+    private List<List<String>> parseSpreadsheetXmlMatrix(
+            byte[] bytes,
+            Map<String, List<String>> columnAliases,
+            Collection<String> requiredColumns,
+            String notFoundMessage
+    ) throws Exception {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setExpandEntityReferences(false);
+
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        Document document = builder.parse(new ByteArrayInputStream(bytes));
+        NodeList tableNodes = document.getElementsByTagNameNS("*", "Table");
+
+        for (int tableIndex = 0; tableIndex < tableNodes.getLength(); tableIndex++) {
+            Node tableNode = tableNodes.item(tableIndex);
+            if (tableNode == null || tableNode.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            List<List<String>> matrix = new ArrayList<>();
+            NodeList rowNodes = tableNode.getChildNodes();
+
+            for (int rowIndex = 0; rowIndex < rowNodes.getLength(); rowIndex++) {
+                Node rowNode = rowNodes.item(rowIndex);
+                if (!isElementNamed(rowNode, "Row")) {
+                    continue;
+                }
+
+                List<String> values = new ArrayList<>();
+                NodeList cellNodes = rowNode.getChildNodes();
+                int currentColumnIndex = 1;
+
+                for (int cellIndex = 0; cellIndex < cellNodes.getLength(); cellIndex++) {
+                    Node cellNode = cellNodes.item(cellIndex);
+                    if (!isElementNamed(cellNode, "Cell")) {
+                        continue;
+                    }
+
+                    int targetColumnIndex = resolveIndexedPosition(cellNode, currentColumnIndex);
+                    while (values.size() < targetColumnIndex - 1) {
+                        values.add("");
+                    }
+
+                    values.add(extractSpreadsheetXmlCellValue(cellNode));
+                    currentColumnIndex = targetColumnIndex + 1;
+                }
+
+                if (!values.isEmpty()) {
+                    matrix.add(values);
+                }
+            }
+
+            if (!matrix.isEmpty() && containsRequiredColumns(resolveHeaderIndexes(matrix.get(0), columnAliases), requiredColumns)) {
+                return matrix;
+            }
+        }
+
+        throw new IOException(notFoundMessage);
+    }
+
+    private List<List<String>> parseDelimitedMatrix(
+            String content,
+            Map<String, List<String>> columnAliases,
+            Collection<String> requiredColumns,
+            String notFoundMessage
+    ) throws IOException {
+        List<String> lines = content.lines()
+                .map(line -> line == null ? "" : line.replace("\uFEFF", ""))
+                .filter(line -> !line.isBlank())
+                .toList();
+
+        if (lines.isEmpty()) {
+            throw new IOException("The uploaded file does not contain readable rows");
+        }
+
+        char[] separators = new char[]{'\t', ';', ',', '|'};
+        for (char separator : separators) {
+            List<String> headerValues = splitDelimitedLine(lines.get(0), separator);
+            if (!containsRequiredColumns(resolveHeaderIndexes(headerValues, columnAliases), requiredColumns)) {
+                continue;
+            }
+
+            List<List<String>> matrix = new ArrayList<>();
+            matrix.add(headerValues);
+
+            for (int lineIndex = 1; lineIndex < lines.size(); lineIndex++) {
+                matrix.add(splitDelimitedLine(lines.get(lineIndex), separator));
+            }
+
+            return matrix;
+        }
+
+        throw new IOException(notFoundMessage);
+    }
+
     private List<String> splitDelimitedLine(String line, char separator) {
         List<String> values = new ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -1852,13 +2547,14 @@ public class TodoImportService {
     private ZmTodoBusinessType parseBusinessType(String businessTypeParam) {
         if (!hasText(businessTypeParam)) {
             throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST, "businessType parameter is required (PLT or RES)");
+                    HttpStatus.BAD_REQUEST, "businessType parameter is required (ACT, PLT or RES)");
         }
         return switch (businessTypeParam.trim().toUpperCase(Locale.ROOT)) {
+            case "ACT" -> ZmTodoBusinessType.ACT;
             case "PLT" -> ZmTodoBusinessType.PLT;
             case "RES" -> ZmTodoBusinessType.RES;
             default -> throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST, "Invalid businessType: must be PLT or RES");
+                    HttpStatus.BAD_REQUEST, "Invalid businessType: must be ACT, PLT or RES");
         };
     }
 
@@ -1924,6 +2620,10 @@ public class TodoImportService {
         return message.toString().trim();
     }
 
+    private List<String> safeGovernorates(List<String> governorates) {
+        return TunisiaGovernorateSupport.normalizeStoredValues(governorates);
+    }
+
     private PltCaseRow toPltCaseRow(ParsedAnalyticsRow row) {
         String rawLat = row.sourceValues() != null ? row.sourceValues().get("LATITUDE") : null;
         String rawLon = row.sourceValues() != null ? row.sourceValues().get("LONGITUDE") : null;
@@ -1938,6 +2638,32 @@ public class TodoImportService {
                 rawLon,
                 row.latitude(),
                 row.longitude(),
+                row.openDateSurTimosDate(),
+                row.stt(),
+                row.statut(),
+                row.rowNumber()
+        );
+    }
+
+    private ActCaseRow toActCaseRow(ParsedAnalyticsRow row) {
+        Map<String, String> sourceValues = row.sourceValues() != null ? row.sourceValues() : Map.of();
+        String rawLat = sourceValues.get("LATITUDE");
+        String rawLon = sourceValues.get("LONGITUDE");
+
+        return new ActCaseRow(
+                row.crmCase(),
+                TodoAnalyticsSupport.parseDate(row.fxDateCrm()),
+                row.contact1(),
+                row.msisdn(),
+                row.gouvernorat(),
+                TodoAnalyticsSupport.cleanString(sourceValues.get("DELEGATION")),
+                TodoAnalyticsSupport.cleanString(sourceValues.get("LOCALITE")),
+                rawLat,
+                rawLon,
+                row.latitude(),
+                row.longitude(),
+                TodoAnalyticsSupport.cleanString(sourceValues.get("OFFRE")),
+                TodoAnalyticsSupport.cleanString(sourceValues.get("DES_PACK")),
                 row.openDateSurTimosDate(),
                 row.stt(),
                 row.statut(),
@@ -1972,6 +2698,78 @@ public class TodoImportService {
                     .append(" skipped.");
         }
         return msg.toString().trim();
+    }
+
+    private String buildImportedActivationImportMessage(
+            ZmTodoDispatchMode dispatchMode,
+            int created,
+            int ignoredUnmatched,
+            int ignoredStatus,
+            int duplicates
+    ) {
+        StringBuilder msg = new StringBuilder("ACT import completed. ");
+        if (created > 0) {
+            msg.append(created)
+                    .append(created == 1 ? " activation case was" : " activation cases were")
+                    .append(" created for your ZM workspace.");
+        } else {
+            msg.append("No new activation cases were created.");
+        }
+        if (ignoredUnmatched > 0) {
+            msg.append(' ').append(ignoredUnmatched)
+                    .append(ignoredUnmatched == 1 ? " row was" : " rows were")
+                    .append(ignoredUnmatchedReason(dispatchMode));
+        }
+        if (ignoredStatus > 0) {
+            msg.append(' ').append(ignoredStatus)
+                    .append(ignoredStatus == 1 ? " row was" : " rows were")
+                    .append(" ignored because their status is not En cours.");
+        }
+        if (duplicates > 0) {
+            msg.append(' ').append(duplicates)
+                    .append(duplicates == 1 ? " duplicate case was" : " duplicate cases were")
+                    .append(" skipped.");
+        }
+        return msg.toString().trim();
+    }
+
+    private void saveFieldImportAudit(
+            ZmTodoBusinessType businessType,
+            ZmTodoDispatchMode dispatchMode,
+            ZmFieldWorkImportResponse response,
+            String uploadedBy
+    ) {
+        int createdCaseCount = response.createdComplaintCasesCount() + response.createdActivationCasesCount();
+        int successRows = "FIELD_TODOS".equalsIgnoreCase(response.target())
+                ? response.createdWorkTodoCount()
+                : createdCaseCount;
+        int failedRows = Math.max(0, response.totalRows() - successRows);
+
+        zmFieldImportAuditRepository.save(
+                com.pfe.case_management.entity.ZmFieldImportAuditEntity.builder()
+                        .importBatchId(response.importBatchId())
+                        .uploadedBy(uploadedBy)
+                        .uploadedAt(response.uploadedAt())
+                        .sourceFileName(response.sourceFileName())
+                        .businessType(businessType)
+                        .target(response.target())
+                        .dispatchMode(dispatchMode)
+                        .dispatchModeUserName(response.dispatchModeUserName())
+                        .totalRows(response.totalRows())
+                        .matchedConnectedZmRows(response.matchedConnectedZmRows())
+                        .enCoursRows(response.enCoursRows())
+                        .successRows(successRows)
+                        .createdWorkTodoCount(response.createdWorkTodoCount())
+                        .createdCaseCount(createdCaseCount)
+                        .duplicateCount(response.duplicateCount())
+                        .ignoredOtherZmCount(response.ignoredOtherZmCount())
+                        .ignoredStatusCount(response.ignoredStatusCount())
+                        .invalidRowsCount(response.invalidRowsCount())
+                        .failedRows(failedRows)
+                        .message(response.message())
+                        .analysisId(response.analysisId())
+                        .build()
+        );
     }
 
     private ImportedTodoPreviewRowResponse toPreviewRowResponse(ParsedPreviewRow row) {
@@ -2667,6 +3465,27 @@ public class TodoImportService {
         registerGovernorateAlias(aliases, "Tozeur", "Tozeur");
         registerGovernorateAlias(aliases, "Tunis", "Tunis");
         registerGovernorateAlias(aliases, "Zaghouan", "Zaghouan");
+        return Map.copyOf(aliases);
+    }
+
+    private static Map<String, List<String>> buildActProcessColumnAliases() {
+        Map<String, List<String>> aliases = new LinkedHashMap<>();
+        aliases.put("CRM_CASE", List.of("CRM_CASE", "CASE_CRM"));
+        aliases.put("FX_DATE_CRM", List.of("FX_DATE_CRM", "FX_DATE_CREATION_CRM", "DATE_CREATION_CRM"));
+        aliases.put("CONTACT1", List.of("CONTACT1", "CONTACT_CLIENT", "FX_CONTACT_CLIENT"));
+        aliases.put("MSISDN", List.of("MSISDN", "FX_MSISDN"));
+        aliases.put("GOUVERNORAT", List.of("GOUVERNORAT", "FX_GOUVERNORAT"));
+        aliases.put("DELEGATION", List.of("DELEGATION", "FX_DELEGATION"));
+        aliases.put("LOCALITE", List.of("LOCALITE", "FX_LOCALITE"));
+        aliases.put("LATITUDE", List.of("LATITUDE", "LATITUDE_SITE", "FX_LATITUDE_SITE"));
+        aliases.put("LONGITUDE", List.of("LONGITUDE", "LONGITUDE_SITE", "FX_LONGITUDE_SITE"));
+        aliases.put("OFFRE", List.of("OFFRE", "FX_OFFRE"));
+        aliases.put("DES_PACK", List.of("DES_PACK", "FX_DES_PACK"));
+        aliases.put("OPEN_DATE_SUR_TIMOS", List.of("OPEN_DATE_SUR_TIMOS"));
+        aliases.put("DATE_AFFECTATION_STT", List.of("DATE_AFFECTATION_STT"));
+        aliases.put("STT", List.of("STT", "NAME_STT"));
+        aliases.put("STATUT", List.of("STATUT", "FX_STATUT"));
+        aliases.put("ZONE_MNANAGER", List.of("ZONE_MNANAGER", "ZONE_MANAGER"));
         return Map.copyOf(aliases);
     }
 

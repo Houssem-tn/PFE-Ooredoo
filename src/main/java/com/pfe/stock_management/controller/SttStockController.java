@@ -4,11 +4,14 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.dto.DistributableDpmDto;
 import com.pfe.stock_management.dto.DistributeToTechRequest;
+import com.pfe.stock_management.dto.EquipmentInstanceDto;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
+import com.pfe.stock_management.enums.InstanceOwnerType;
 import com.pfe.stock_management.service.DpmService;
+import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.SttStockService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -30,6 +33,7 @@ public class SttStockController {
     private final DpmService dpmService;
     private final SttStockService sttStockService;
     private final UserRepository userRepository;
+    private final EquipmentInstanceService equipmentInstanceService;
 
     @GetMapping("/incoming-dpms")
     public ResponseEntity<List<DpmRequest>> getIncomingDpms() {
@@ -76,6 +80,15 @@ public class SttStockController {
     public ResponseEntity<List<DistributableDpmDto>> getDistributableDpms() {
         AppUser stt = currentStt();
         return ResponseEntity.ok(sttStockService.getDistributableDpms(stt.getId()));
+    }
+
+    /** Tracked units in this STT's stock (IN_STT_STOCK), for the distribution unit picker. */
+    @GetMapping("/my-instances")
+    public ResponseEntity<List<EquipmentInstanceDto>> getMyInstances(
+            @RequestParam(required = false) String equipmentId) {
+        AppUser stt = currentStt();
+        return ResponseEntity.ok(
+                equipmentInstanceService.listOwnedAvailable(InstanceOwnerType.STT, stt.getId(), equipmentId));
     }
 
     private AppUser currentStt() {

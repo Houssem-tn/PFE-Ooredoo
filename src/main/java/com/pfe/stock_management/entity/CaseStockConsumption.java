@@ -27,6 +27,9 @@ public class CaseStockConsumption {
     private String crmCase;
     private CaseType caseType;
 
+    /** Distinguishes ACT_CONSUMPTION vs PLT_USAGE_SWAP for audit clarity. */
+    private String usageContext;
+
     private String technicianId;
     private String technicianName;
 
