@@ -5,6 +5,7 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Entity.UserRole;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.MainPackage.Service.NotificationEventService;
+import com.pfe.case_management.dto.RecoveredEquipmentRequestItem;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.repository.CaseRepository;
@@ -17,6 +18,7 @@ import com.pfe.stock_management.model.SttStockItem;
 import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.EquipmentRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
+import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.StockMovementService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -80,6 +82,7 @@ public class MaterialReturnService {
     private final CaseTimelineService caseTimelineService;
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
+    private final EquipmentInstanceService equipmentInstanceService;
 
     // ── STT: eligible ZMs ──────────────────────────────────────────────────────
 
@@ -235,6 +238,163 @@ public class MaterialReturnService {
         runSideEffect("notify ZM about submitted return", () ->
                 notificationEventService.onMaterialReturnSubmitted(saved));
         return toDto(saved);
+    }
+
+    // ── RES: client material recovery → return ──────────────────────────────────
+
+    /**
+     * Creates a material return from equipment recovered off a client during a RES intervention.
+     * Unlike {@link #createReturn} this does NOT touch any STT stock (the material comes from the
+     * client, not the warehouse). The responsible STT and ZM are derived from the case so the
+     * recovery flows into the normal ZM-scheduled handover workflow. Called by the case execution
+     * flow, so the acting user may be a TECH/STT/ADMIN rather than the STT owner.
+     */
+    public MaterialReturnRequest createCaseRecoveryReturn(
+            CaseEntity caseEntity,
+            AppUser declarer,
+            List<RecoveredEquipmentRequestItem> items,
+            String comment) {
+
+        if (items == null || items.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Declare at least one recovered item.");
+        }
+
+        AppUser stt = resolveCaseStt(caseEntity);
+        AppUser zm = resolveCaseZm(caseEntity);
+
+        List<String> equipmentIds = items.stream()
+                .map(RecoveredEquipmentRequestItem::equipmentId).toList();
+        Map<String, Equipment> equipmentMap = new HashMap<>();
+        equipmentRepository.findAllById(equipmentIds).forEach(e -> equipmentMap.put(e.getId(), e));
+
+        List<ReturnedItem> returnedItems = items.stream().map(item -> {
+            Equipment eq = equipmentMap.get(item.equipmentId());
+            String name = item.equipmentName() != null && !item.equipmentName().isBlank()
+                    ? item.equipmentName()
+                    : (eq != null ? eq.getName() : item.equipmentId());
+            String unit = item.unit() != null && !item.unit().isBlank()
+                    ? item.unit()
+                    : (eq != null && eq.getUnit() != null ? eq.getUnit().name() : null);
+            String articleCode = eq != null ? eq.getArticleCode() : null;
+            return ReturnedItem.builder()
+                    .equipmentId(item.equipmentId())
+                    .equipmentName(name)
+                    .articleCode(articleCode)
+                    .unit(unit)
+                    .quantity(item.quantity())
+                    .serialNumber(item.serialNumber())
+                    .macAddress(item.macAddress())
+                    .imei(item.imei())
+                    .condition(parseCondition(item.condition()))
+                    .build();
+        }).toList();
+
+        // Overall condition = worst-of, but keep it simple: use the first item's condition or GOOD.
+        ReturnCondition overallCondition = returnedItems.stream()
+                .map(ReturnedItem::getCondition)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(ReturnCondition.GOOD);
+
+        Instant now = Instant.now();
+        ReturnTimelineEvent submittedEvent = ReturnTimelineEvent.builder()
+                .eventType("SUBMITTED")
+                .description("Recovered client material declared during résiliation by "
+                        + declarer.getFullName())
+                .actor(declarer.getEmail())
+                .actorName(declarer.getFullName())
+                .timestamp(now)
+                .build();
+
+        MaterialReturnRequest returnRequest = MaterialReturnRequest.builder()
+                .returnCode(generateReturnCode())
+                .sttId(stt.getId())
+                .sttName(stt.getFullName())
+                .sttEmail(stt.getEmail())
+                .zmId(zm.getId())
+                .zmName(zm.getFullName())
+                .zmEmail(zm.getEmail())
+                .relatedCaseId(caseEntity.getId())
+                .relatedCaseType(caseEntity.getType() != null ? caseEntity.getType().name() : null)
+                .crmCase(caseEntity.getCrmCase())
+                .returnSource(ReturnSource.RESILIATION_RECOVERY)
+                .reason(ReturnReason.CLIENT_RESILIATION_RECOVERY)
+                .condition(overallCondition)
+                .destination(ReturnDestination.USABLE_STOCK)
+                .items(returnedItems)
+                .comment(comment)
+                .proofImageUrls(List.of())
+                .status(MaterialReturnStatus.PENDING_ZM_REVIEW)
+                .createdAt(now)
+                .submittedAt(now)
+                .timeline(new ArrayList<>(List.of(submittedEvent)))
+                .build();
+
+        MaterialReturnRequest saved = returnRepository.save(returnRequest);
+        log.info("[MaterialReturn] Client recovery return created: id={} returnCode={} caseId={} sttId={} zmId={}",
+                saved.getId(), saved.getReturnCode(), caseEntity.getId(), saved.getSttId(), saved.getZmId());
+
+        // ── Per-unit tracking: register recovered tracked units (RECOVERED_FROM_CLIENT) and
+        // link them to this return for traceability. No-op for non-tracked equipment / blank ids.
+        boolean linkedAnyInstance = false;
+        for (ReturnedItem item : saved.getItems()) {
+            Equipment eq = equipmentMap.get(item.getEquipmentId());
+            if (eq == null || eq.getTrackingMode() == null
+                    || eq.getTrackingMode() == com.pfe.stock_management.enums.TrackingMode.NONE) {
+                continue;
+            }
+            String instanceId = equipmentInstanceService.recordClientRecovery(
+                    eq, caseEntity, item.getImei(), item.getSerialNumber(), saved, declarer.getEmail());
+            if (instanceId != null) {
+                item.setInstanceId(instanceId);
+                linkedAnyInstance = true;
+            }
+        }
+        if (linkedAnyInstance) {
+            // Persist the linked instanceIds; `saved` already holds them in memory and stays
+            // effectively final for the side-effect lambdas below.
+            returnRepository.save(saved);
+        }
+
+        runSideEffect("record recovery return movement", () ->
+                stockMovementService.recordMaterialReturn(saved, declarer.getEmail()));
+        runSideEffect("notify ZM about recovery return", () ->
+                notificationEventService.onMaterialReturnSubmitted(saved));
+
+        return saved;
+    }
+
+    private AppUser resolveCaseStt(CaseEntity caseEntity) {
+        String sttId = caseEntity.getSttId() != null ? caseEntity.getSttId() : caseEntity.getAssignedSttId();
+        if (sttId == null || sttId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "This case has no assigned STT, so recovered material cannot be routed for return.");
+        }
+        return userRepository.findById(sttId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Assigned STT for this case was not found."));
+    }
+
+    private AppUser resolveCaseZm(CaseEntity caseEntity) {
+        String zmId = caseEntity.getZmId() != null ? caseEntity.getZmId() : caseEntity.getOwnerZmId();
+        if (zmId == null || zmId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "This case has no owning Zone Manager, so recovered material cannot be routed for return.");
+        }
+        return userRepository.findById(zmId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Owning Zone Manager for this case was not found."));
+    }
+
+    private ReturnCondition parseCondition(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return ReturnCondition.GOOD;
+        }
+        try {
+            return ReturnCondition.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            return ReturnCondition.UNKNOWN;
+        }
     }
 
     // ── STT: list my returns ───────────────────────────────────────────────────
@@ -519,6 +679,12 @@ public class MaterialReturnService {
                 .build());
 
         MaterialReturnRequest saved = returnRepository.save(req);
+
+        // Per-unit tracking: tracked units linked to this return are now physically back at
+        // the ZM/depot → status RETURNED_TO_DEPOT.
+        runSideEffect("mark returned tracked units to depot", () ->
+                equipmentInstanceService.markReturnedToDepot(saved.getId(), zm.getEmail()));
+
         runSideEffect("notify STT about handed-over return", () ->
                 notificationEventService.onMaterialHandedOver(saved));
         runSideEffect("notify ZM about return closure", () ->

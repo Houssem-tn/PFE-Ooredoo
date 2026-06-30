@@ -63,4 +63,9 @@ public class WorkInfo {
     private Double locationAccuracyMeters;
     private List<UsedEquipmentItem> usedEquipment;
     private String stockAppliedTechId;
+
+    /** RES only: equipment retrieved from the client (recovered material, not stock consumption). */
+    private List<RecoveredEquipmentItem> recoveredEquipment;
+    private Instant recoveredAt;
+    private String recoveredBy;
 }

@@ -5,6 +5,7 @@ import com.pfe.MainPackage.Entity.FileRole;
 import com.pfe.MainPackage.Service.FileStorageService;
 import com.pfe.stock_management.dto.CreateEquipmentRequest;
 import com.pfe.stock_management.entity.Equipment;
+import com.pfe.stock_management.enums.TrackingMode;
 import com.pfe.stock_management.repository.EquipmentRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -52,6 +53,13 @@ public class EquipmentService {
                 .description(request.getDescription())
                 .unit(request.getUnit())
                 .category(request.getCategory())
+                .packItem(request.isPackItem())
+                // Business rule: a pack item can never be consumed in ACT (the client
+                // already receives it in the boutique pack), so force the flag off.
+                .usableInAct(request.isUsableInAct() && !request.isPackItem())
+                .usableInPlt(request.isUsableInPlt())
+                .recoverableFromClient(request.isRecoverableFromClient())
+                .trackingMode(request.getTrackingMode() != null ? request.getTrackingMode() : TrackingMode.NONE)
                 .createdBy(caller)
                 .active(true)
                 .build();
@@ -88,6 +96,12 @@ public class EquipmentService {
         eq.setDescription(request.getDescription());
         eq.setUnit(request.getUnit());
         eq.setCategory(request.getCategory());
+        eq.setPackItem(request.isPackItem());
+        // Pack items are never ACT-consumable — keep entity/data consistent on update too.
+        eq.setUsableInAct(request.isUsableInAct() && !request.isPackItem());
+        eq.setUsableInPlt(request.isUsableInPlt());
+        eq.setRecoverableFromClient(request.isRecoverableFromClient());
+        eq.setTrackingMode(request.getTrackingMode() != null ? request.getTrackingMode() : TrackingMode.NONE);
 
         if (image != null && !image.isEmpty()) {
             String caller = currentUser();

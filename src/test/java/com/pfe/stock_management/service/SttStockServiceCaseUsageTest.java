@@ -11,6 +11,7 @@ import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.model.TechStockItem;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.stock_management.repository.DpmRepository;
+import com.pfe.stock_management.repository.EquipmentRepository;
 import com.pfe.stock_management.repository.SttDistributionRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
 import com.pfe.stock_management.repository.TechStockRepository;
@@ -60,6 +61,20 @@ class SttStockServiceCaseUsageTest {
     private TechStockUsageRepository techStockUsageRepository;
     @Mock
     private MongoTemplate mongoTemplate;
+    @Mock
+    private CaseStockConsumptionService caseStockConsumptionService;
+    @Mock
+    private StockAlertEvaluationService stockAlertEvaluationService;
+    @Mock
+    private StockUsagePermissionService stockUsagePermissionService;
+    @Mock
+    private DpmAllocationService dpmAllocationService;
+    @Mock
+    private EquipmentUsagePolicyService equipmentUsagePolicy;
+    @Mock
+    private EquipmentInstanceService equipmentInstanceService;
+    @Mock
+    private EquipmentRepository equipmentRepository;
 
     @Test
     void syncCaseUsageForWorkSubmission_decrementsStockAndRecordsMovement() {
@@ -69,12 +84,11 @@ class SttStockServiceCaseUsageTest {
         TechStock techStock = techStock(technician.getId(), 10, 0);
 
         when(techStockRepository.findByTechId(technician.getId())).thenReturn(Optional.of(techStock));
-        when(techStockRepository.save(any(TechStock.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         List<UsedEquipmentItem> storedItems = service.syncCaseUsageForWorkSubmission(
                 caseEntity,
                 technician,
-                List.of(new UsedEquipmentRequestItem("eq-1", null, null, 2)),
+                List.of(new UsedEquipmentRequestItem("eq-1", null, null, 2, null)),
                 "tech@example.com"
         );
 
@@ -86,7 +100,9 @@ class SttStockServiceCaseUsageTest {
         assertEquals("PCS", storedItems.get(0).getUnit());
         assertEquals(2, storedItems.get(0).getQuantity());
 
-        verify(techStockRepository).save(techStock);
+        // Work-submission usage is persisted as an atomic $inc on the embedded array element
+        // (not a full document save), so verify the actual persistence mechanism.
+        verify(mongoTemplate).updateFirst(any(), any(), eq(TechStock.class));
         verify(stockMovementService).recordCaseUsage(eq(caseEntity), eq(technician), any(), eq(2), eq("tech@example.com"));
     }
 
@@ -104,7 +120,7 @@ class SttStockServiceCaseUsageTest {
                 () -> service.syncCaseUsageForWorkSubmission(
                         caseEntity,
                         technician,
-                        List.of(new UsedEquipmentRequestItem("eq-1", null, null, 20)),
+                        List.of(new UsedEquipmentRequestItem("eq-1", null, null, 20, null)),
                         "tech@example.com"
                 )
         );
@@ -140,7 +156,7 @@ class SttStockServiceCaseUsageTest {
         List<UsedEquipmentItem> storedItems = service.syncCaseUsageForWorkSubmission(
                 caseEntity,
                 technician,
-                List.of(new UsedEquipmentRequestItem("eq-1", null, null, 2)),
+                List.of(new UsedEquipmentRequestItem("eq-1", null, null, 2, null)),
                 "tech@example.com"
         );
 
@@ -195,7 +211,14 @@ class SttStockServiceCaseUsageTest {
                 stockMovementService,
                 notificationEventService,
                 techStockUsageRepository,
-                mongoTemplate
+                mongoTemplate,
+                caseStockConsumptionService,
+                stockAlertEvaluationService,
+                stockUsagePermissionService,
+                dpmAllocationService,
+                equipmentUsagePolicy,
+                equipmentInstanceService,
+                equipmentRepository
         );
     }
 

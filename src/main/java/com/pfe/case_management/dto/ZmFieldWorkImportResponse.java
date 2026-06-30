@@ -7,13 +7,14 @@ public record ZmFieldWorkImportResponse(
         String sourceFileName,
         Instant uploadedAt,
         String businessType,
-        /** "COMPLAINT_CASES" for PLT, "FIELD_TODOS" for RES and future types */
+        /** "COMPLAINT_CASES", "ACTIVATION_CASES", or "FIELD_TODOS" depending on the import path */
         String target,
         int totalRows,
         int matchedConnectedZmRows,
         int enCoursRows,
         int createdWorkTodoCount,
         int createdComplaintCasesCount,
+        int createdActivationCasesCount,
         int duplicateCount,
         int ignoredOtherZmCount,
         int ignoredStatusCount,

@@ -12,6 +12,7 @@ import com.pfe.MainPackage.Service.FileStorageService;
 import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.dto.AssignSttRequest;
 import com.pfe.case_management.dto.AssignTechRequest;
+import com.pfe.case_management.dto.ActCaseRow;
 import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
 import com.pfe.case_management.dto.BulkPltImportResult;
 import com.pfe.case_management.dto.CaseBoardSummaryResponse;
@@ -42,7 +43,13 @@ import com.pfe.case_management.model.TechnicalMetrics;
 import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.model.ZmValidation;
+import com.pfe.case_management.dto.DeclareClientRecoveryRequest;
+import com.pfe.case_management.model.RecoveredEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.stock_management.material_return.MaterialReturnRequest;
+import com.pfe.stock_management.material_return.MaterialReturnService;
+import com.pfe.stock_management.material_return.ReturnedItem;
+import com.pfe.stock_management.service.EquipmentUsagePolicyService;
 import com.pfe.stock_management.service.SttStockService;
 import com.pfe.support.TunisiaGovernorateSupport;
 import lombok.RequiredArgsConstructor;
@@ -75,6 +82,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -85,6 +93,10 @@ public class CaseService {
 
     private static final String PLT_IMPORT_SOURCE = "PLT_TODO_IMPORT";
     private static final String RES_IMPORT_SOURCE = "RES_TODO_IMPORT";
+    private static final String ACT_IMPORT_SOURCE = "ACT_TODO_IMPORT";
+    private static final Pattern IMPORTED_DMS_COORDINATE_PATTERN = Pattern.compile(
+            "(\\d{1,3})[\\u00B0Â°\\s]+(\\d{1,2})[\\s'’]+(\\d{1,2}(?:\\.\\d+)?)\\s*([NSEWnsew])?"
+    );
 
     private static final Set<CaseStatus> ASSIGN_STT_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_ZM,
@@ -186,6 +198,8 @@ public class CaseService {
     private final FileStorageService fileStorageService;
     private final CasePdfExportService casePdfExportService;
     private final SttStockService sttStockService;
+    private final MaterialReturnService materialReturnService;
+    private final EquipmentUsagePolicyService equipmentUsagePolicy;
 
     public CaseEntity createCase(CreateCaseRequest request) {
         ensureCurrentUserHasRole("ROLE_ADMIN");
@@ -600,6 +614,104 @@ public class CaseService {
         return new BulkPltImportResult(created, duplicates, invalid);
     }
 
+    /**
+     * Creates activation cases directly in the connected ZM workspace from the ACT TIMOS import
+     * flow. Unlike the legacy admin distribution pipeline, this method never stages work in an
+     * admin queue: every created case is immediately owned by the importing ZM.
+     */
+    public BulkPltImportResult bulkImportFieldImportActivationCases(
+            List<ActCaseRow> rows,
+            AppUser connectedZm,
+            String batchId,
+            String sourceFileName
+    ) {
+        if (rows == null || rows.isEmpty()) {
+            return new BulkPltImportResult(0, 0, 0);
+        }
+
+        Instant now = Instant.now();
+
+        List<String> candidateCrmCases = rows.stream()
+                .map(ActCaseRow::crmCase)
+                .filter(c -> c != null && !c.isBlank())
+                .map(String::trim)
+                .distinct()
+                .toList();
+
+        Set<String> existingCrmCases = candidateCrmCases.isEmpty()
+                ? Set.of()
+                : repository.findByTypeAndCrmCaseIn(CaseType.ACTIVATION, candidateCrmCases)
+                        .stream()
+                        .map(CaseEntity::getCrmCase)
+                        .filter(c -> c != null && !c.isBlank())
+                        .map(String::trim)
+                        .collect(Collectors.toSet());
+
+        Set<String> seenInBatch = new LinkedHashSet<>();
+        int created = 0;
+        int duplicates = 0;
+        int invalid = 0;
+
+        for (ActCaseRow row : rows) {
+            if (row.crmCase() == null || row.crmCase().isBlank()) {
+                log.warn("ACT import: skipping row {} with missing CASE_CRM", row.rowNumber());
+                invalid++;
+                continue;
+            }
+
+            if (row.gouvernorat() == null || row.gouvernorat().isBlank()) {
+                log.warn("ACT import: skipping row {} crmCase={} because governorate is blank", row.rowNumber(), row.crmCase());
+                invalid++;
+                continue;
+            }
+
+            String trimmedCrm = row.crmCase().trim();
+            if (!seenInBatch.add(trimmedCrm) || existingCrmCases.contains(trimmedCrm)) {
+                duplicates++;
+                continue;
+            }
+
+            try {
+                CaseEntity activation = buildFieldImportActivationEntity(
+                        row,
+                        connectedZm,
+                        batchId,
+                        sourceFileName,
+                        now
+                );
+                repository.save(activation);
+                created++;
+            } catch (Exception ex) {
+                log.warn("ACT import: failed to create activation case crmCase={}: {}", trimmedCrm, ex.getMessage());
+                invalid++;
+            }
+        }
+
+        log.info("field_import_bulk module=ACT batchId={} sourceFile={} zmEmail={} rows={} created={} duplicates={} invalid={}",
+                batchId, sourceFileName, connectedZm.getEmail(), rows.size(), created, duplicates, invalid);
+
+        if (created > 0) {
+            try {
+                notificationEventService.onCasesBulkAssignedToZm(new BulkCaseAssignmentSummary(
+                        connectedZm.getEmail(),
+                        connectedZm.getFullName(),
+                        CaseType.ACTIVATION,
+                        null,
+                        BulkCaseOperationType.INJECTION,
+                        created,
+                        batchId,
+                        connectedZm.getEmail(),
+                        "/zm/cases/activation"
+                ));
+            } catch (Exception notifEx) {
+                log.warn("ACT import: aggregated notification failed batchId={} zmEmail={}: {}",
+                        batchId, connectedZm.getEmail(), notifEx.getMessage());
+            }
+        }
+
+        return new BulkPltImportResult(created, duplicates, invalid);
+    }
+
     private CaseEntity buildFieldImportComplaintEntity(
             PltCaseRow row,
             AppUser connectedZm,
@@ -690,6 +802,98 @@ public class CaseService {
         );
 
         return complaint;
+    }
+
+    private CaseEntity buildFieldImportActivationEntity(
+            ActCaseRow row,
+            AppUser connectedZm,
+            String batchId,
+            String sourceFileName,
+            Instant now
+    ) {
+        String gouvernorat = row.gouvernorat();
+        if (!isBlank(gouvernorat)) {
+            try {
+                gouvernorat = TunisiaGovernorateSupport.requireSupported(gouvernorat);
+            } catch (IllegalArgumentException | ResponseStatusException ignored) {
+                // The import layer already canonicalizes governorates; keep that value if strict
+                // support validation fails here for an unexpected alias.
+            }
+        }
+
+        Instant dateCreationCrm = row.dateCreationCrmDate() != null
+                ? row.dateCreationCrmDate().atStartOfDay().toInstant(ZoneOffset.UTC)
+                : null;
+        Instant openingDateTimos = row.openDateSurTimosDate() != null
+                ? row.openDateSurTimosDate().atStartOfDay().toInstant(ZoneOffset.UTC)
+                : null;
+
+        Double decimalLat = parseImportedCoordinate(row.rawLatitude(), row.normalizedLatitude());
+        Double decimalLon = parseImportedCoordinate(row.rawLongitude(), row.normalizedLongitude());
+
+        CaseEntity activation = CaseEntity.builder()
+                .type(CaseType.ACTIVATION)
+                .caseModule(CaseModuleType.ACT)
+                .crmCase(row.crmCase().trim())
+                .dateCreationCrm(dateCreationCrm)
+                .openingDateTimos(openingDateTimos)
+                .status(CaseStatus.ASSIGNED_TO_ZM)
+                .clientPhone(row.contactClient())
+                .msisdn(row.msisdn())
+                .latitude(decimalLat != null ? String.valueOf(decimalLat) : row.normalizedLatitude())
+                .longitude(decimalLon != null ? String.valueOf(decimalLon) : row.normalizedLongitude())
+                .localite(row.localite())
+                .delegation(row.delegation())
+                .gouvernorat(gouvernorat)
+                .ownerZmId(connectedZm.getId())
+                .ownerZmName(connectedZm.getFullName())
+                .offre(row.offre())
+                .desPack(row.desPack())
+                .zmId(connectedZm.getId())
+                .zmEmail(connectedZm.getEmail())
+                .zmName(connectedZm.getFullName())
+                .dateAffectationZm(now)
+                .sourceAssignedSttName(row.sttFromExcel())
+                .sourceStatut(row.statutFromExcel())
+                .sourceGovernorate(gouvernorat)
+                .sourceLastImportedAt(now)
+                .source(ACT_IMPORT_SOURCE)
+                .createdAt(now)
+                .updatedAt(now)
+                .createdBy(connectedZm.getEmail())
+                .build();
+
+        caseTimelineService.append(
+                activation,
+                CaseTimelineEventType.CASE_CREATED,
+                "Activation imported from ACT file",
+                "Imported from " + sourceFileName + " (batch " + batchId + ") into the ZM ACT import workflow.",
+                connectedZm.getEmail(),
+                null,
+                CaseStatus.ASSIGNED_TO_ZM,
+                timelineData(
+                        "source", ACT_IMPORT_SOURCE,
+                        "caseModule", CaseModuleType.ACT.name(),
+                        "importBatchId", batchId,
+                        "crmCase", row.crmCase().trim()
+                )
+        );
+
+        caseTimelineService.append(
+                activation,
+                CaseTimelineEventType.ASSIGNMENT_UPDATED,
+                "Assigned to Zone Manager",
+                "Automatically assigned to ZM " + safe(connectedZm.getFullName(), connectedZm.getEmail()) + " from ACT import.",
+                connectedZm.getEmail(),
+                null,
+                CaseStatus.ASSIGNED_TO_ZM,
+                timelineData(
+                        "assigneeRole", "ROLE_ZM",
+                        "assigneeEmail", connectedZm.getEmail()
+                )
+        );
+
+        return activation;
     }
 
     public CaseEntity getCaseById(String caseId) {
@@ -1121,6 +1325,83 @@ public class CaseService {
                 "usedEquipmentCount", usedEquipment.size(),
                 "usedEquipmentQuantity", usedEquipment.stream().mapToInt(UsedEquipmentItem::getQuantity).sum()
             )
+        );
+
+        return sanitizeCaseForCurrentViewer(repository.save(c));
+    }
+
+    /**
+     * RES only: the executor declares equipment retrieved from the client. No TECH/STT stock is
+     * consumed — instead the items are recorded on the case and linked to a material return
+     * (source = résiliation recovery) so the STT hands them back to the ZM/depot through the
+     * existing scheduled-handover workflow.
+     */
+    public CaseEntity declareClientRecovery(String caseId, DeclareClientRecoveryRequest request) {
+        CaseEntity c = getCaseOrThrow(caseId);
+        String actor = getCurrentUsername();
+        Instant now = Instant.now();
+
+        ensureCurrentUserCanExecuteCase(c);
+
+        if (request == null || request.items() == null || request.items().isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Declare at least one recovered item.");
+        }
+
+        // Enforces RES context + recoverableFromClient classification (server-side, frontend-independent).
+        List<String> equipmentIds = request.items().stream()
+                .filter(i -> i != null && i.equipmentId() != null && !i.equipmentId().isBlank())
+                .map(i -> i.equipmentId().trim())
+                .distinct()
+                .collect(Collectors.toList());
+        equipmentUsagePolicy.assertRecoverable(c, equipmentIds);
+
+        AppUser declarer = userRepository.findByEmail(actor)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found"));
+
+        // Create the linked material return (resolves STT/ZM from the case, no stock touched).
+        MaterialReturnRequest createdReturn =
+                materialReturnService.createCaseRecoveryReturn(c, declarer, request.items(), request.comment());
+
+        // Mirror the recovered items onto the case work block for audit / case detail.
+        List<RecoveredEquipmentItem> recovered = createdReturn.getItems().stream()
+                .map(item -> RecoveredEquipmentItem.builder()
+                        .equipmentId(item.getEquipmentId())
+                        .equipmentName(item.getEquipmentName())
+                        .articleCode(item.getArticleCode())
+                        .unit(item.getUnit())
+                        .quantity(item.getQuantity())
+                        .serialNumber(item.getSerialNumber())
+                        .macAddress(item.getMacAddress())
+                        .imei(item.getImei())
+                        .condition(item.getCondition() != null ? item.getCondition().name() : null)
+                        .returnCode(createdReturn.getReturnCode())
+                        .instanceId(item.getInstanceId())
+                        .build())
+                .collect(Collectors.toList());
+
+        WorkInfo work = c.getWork() != null ? c.getWork() : new WorkInfo();
+        work.setRecoveredEquipment(recovered);
+        work.setRecoveredAt(now);
+        work.setRecoveredBy(actor);
+        c.setWork(work);
+        c.setUpdatedAt(now);
+
+        int totalUnits = recovered.stream().mapToInt(RecoveredEquipmentItem::getQuantity).sum();
+        caseTimelineService.append(
+                c,
+                CaseTimelineEventType.CLIENT_MATERIAL_RECOVERED,
+                "Client material recovered",
+                recovered.size() + " item type(s) (" + totalUnits + " unit(s)) recovered from the client and "
+                        + "linked to material return " + createdReturn.getReturnCode() + " for handover to the ZM/depot.",
+                actor,
+                c.getStatus(),
+                c.getStatus(),
+                timelineData(
+                        "returnId", createdReturn.getId(),
+                        "returnCode", createdReturn.getReturnCode(),
+                        "recoveredItemTypes", recovered.size(),
+                        "recoveredUnits", totalUnits
+                )
         );
 
         return sanitizeCaseForCurrentViewer(repository.save(c));
@@ -1882,6 +2163,57 @@ public class CaseService {
             return TunisiaGovernorateSupport.requireSupported(governorate);
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
+        }
+    }
+
+    private Double parseImportedCoordinate(String rawValue, String normalizedValue) {
+        Double parsed = TodoAnalyticsSupport.parseCoordinateToDecimal(rawValue);
+        if (parsed != null) {
+            return parsed;
+        }
+
+        String candidate = firstNonBlank(rawValue, normalizedValue);
+        if (candidate == null) {
+            return null;
+        }
+
+        Matcher dmsMatcher = IMPORTED_DMS_COORDINATE_PATTERN.matcher(candidate.trim());
+        if (dmsMatcher.find()) {
+            try {
+                double degrees = Double.parseDouble(dmsMatcher.group(1));
+                double minutes = Double.parseDouble(dmsMatcher.group(2));
+                double seconds = Double.parseDouble(dmsMatcher.group(3));
+                double decimal = degrees + minutes / 60.0 + seconds / 3600.0;
+                String hemisphere = dmsMatcher.group(4);
+                if (hemisphere != null) {
+                    char h = Character.toUpperCase(hemisphere.trim().charAt(0));
+                    if (h == 'S' || h == 'W') {
+                        decimal = -decimal;
+                    }
+                }
+                return Math.round(decimal * 1_000_000d) / 1_000_000d;
+            } catch (NumberFormatException ignored) {
+                // Fall back to direct decimal parsing below.
+            }
+        }
+
+        String direct = candidate.trim().replace(',', '.');
+        double sign = 1.0d;
+        if (!direct.isEmpty()) {
+            char suffix = Character.toUpperCase(direct.charAt(direct.length() - 1));
+            if (suffix == 'N' || suffix == 'E') {
+                direct = direct.substring(0, direct.length() - 1).trim();
+            } else if (suffix == 'S' || suffix == 'W') {
+                direct = direct.substring(0, direct.length() - 1).trim();
+                sign = -1.0d;
+            }
+        }
+
+        direct = direct.replaceAll("\\s+", "");
+        try {
+            return Double.parseDouble(direct) * sign;
+        } catch (NumberFormatException ignored) {
+            return null;
         }
     }
 

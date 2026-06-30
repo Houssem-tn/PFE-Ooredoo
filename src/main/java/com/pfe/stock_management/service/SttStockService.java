@@ -17,18 +17,24 @@ import com.pfe.stock_management.dto.DistributeToTechRequest;
 import com.pfe.stock_management.dto.PendingDistributionDto;
 import com.pfe.stock_management.dto.TechUsageItemRequest;
 import com.pfe.stock_management.entity.DpmRequest;
+import com.pfe.stock_management.entity.Equipment;
+import com.pfe.stock_management.entity.EquipmentInstance;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.entity.TechStockUsage;
 import com.pfe.stock_management.enums.DistributionStatus;
 import com.pfe.stock_management.enums.DpmStatus;
+import com.pfe.stock_management.enums.InstanceOwnerType;
+import com.pfe.stock_management.enums.TrackingMode;
 import com.pfe.stock_management.model.DistributionItem;
 import com.pfe.stock_management.model.DpmItem;
 import com.pfe.stock_management.model.SttStockItem;
 import com.pfe.stock_management.model.TechStockItem;
+import com.pfe.stock_management.model.TrackedUnitRef;
 import com.pfe.stock_management.model.UsageItem;
 import com.pfe.stock_management.repository.DpmRepository;
+import com.pfe.stock_management.repository.EquipmentRepository;
 import com.pfe.stock_management.repository.SttDistributionRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
 import com.pfe.stock_management.repository.TechStockRepository;
@@ -75,6 +81,9 @@ public class SttStockService {
     private final StockAlertEvaluationService stockAlertEvaluationService;
     private final StockUsagePermissionService stockUsagePermissionService;
     private final DpmAllocationService dpmAllocationService;
+    private final EquipmentUsagePolicyService equipmentUsagePolicy;
+    private final EquipmentInstanceService equipmentInstanceService;
+    private final EquipmentRepository equipmentRepository;
 
     public void applyDpmConfirmation(DpmRequest dpm) {
         SttStock stock = sttStockRepository.findBySttId(dpm.getSttId())
@@ -163,6 +172,11 @@ public class SttStockService {
         Map<String, SttStockItem> stockMap = sttStock.getItems().stream()
                 .collect(Collectors.toMap(SttStockItem::getEquipmentId, si -> si));
 
+        // Tracking config for the requested items (drives per-unit instance selection).
+        Map<String, Equipment> equipmentById = equipmentRepository.findAllById(
+                        request.getItems().stream().map(i -> i.getEquipmentId()).collect(Collectors.toList()))
+                .stream().collect(Collectors.toMap(Equipment::getId, e -> e, (a, b) -> a));
+
         List<DistributionItem> distributionItems = new ArrayList<>();
 
         for (var itemReq : request.getItems()) {
@@ -177,11 +191,27 @@ public class SttStockService {
                                 + ": available=" + si.getAvailableQuantity()
                                 + ", requested=" + itemReq.getQuantity());
             }
+
+            // For tracked equipment the STT must select the exact units. Validate up-front
+            // (read-only) so nothing is mutated if the selection is wrong.
+            Equipment eq = equipmentById.get(itemReq.getEquipmentId());
+            List<String> instanceIds = null;
+            if (eq != null && eq.getTrackingMode() != null && eq.getTrackingMode() != TrackingMode.NONE) {
+                instanceIds = itemReq.getInstanceIds() == null ? List.of() : itemReq.getInstanceIds();
+                if (instanceIds.size() != itemReq.getQuantity()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            si.getEquipmentName() + " is tracked: select exactly " + itemReq.getQuantity()
+                                    + " unit(s) by IMEI/Serial (received " + instanceIds.size() + ").");
+                }
+                equipmentInstanceService.assertDistributable(itemReq.getEquipmentId(), instanceIds, stt.getId());
+            }
+
             distributionItems.add(DistributionItem.builder()
                     .equipmentId(si.getEquipmentId())
                     .equipmentName(si.getEquipmentName())
                     .unit(si.getUnit())
                     .quantity(itemReq.getQuantity())
+                    .instanceIds(instanceIds)
                     .build());
         }
 
@@ -209,6 +239,23 @@ public class SttStockService {
                 .build();
 
         SttDistribution saved = distributionRepository.save(distribution);
+
+        // Transfer the exact tracked units STT → TECH (status → IN_TECH_STOCK) and persist
+        // their denormalised IMEI/Serial on the distribution line for display & audit. Quantity
+        // counters above remain authoritative; instances add per-unit traceability.
+        boolean movedAnyInstance = false;
+        for (DistributionItem di : saved.getItems()) {
+            if (di.getInstanceIds() == null || di.getInstanceIds().isEmpty()) {
+                continue;
+            }
+            List<EquipmentInstance> moved = equipmentInstanceService.moveStockToTech(
+                    di.getEquipmentId(), di.getInstanceIds(), stt, tech, saved.getId(), callerEmail);
+            di.setTrackedUnits(EquipmentInstanceService.toRefs(moved));
+            movedAnyInstance = true;
+        }
+        if (movedAnyInstance) {
+            saved = distributionRepository.save(saved);
+        }
 
         // Automatically attribute this pooled distribution back to confirmed DPM
         // sources (FIFO). A single distribution can span multiple DPMs; any shortfall
@@ -254,6 +301,14 @@ public class SttStockService {
         if (technician == null || isBlank(technician.getId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Technician is required for stock usage synchronization");
         }
+
+        // ── Business-usage classification enforcement ─────────────────────────
+        // Blocks pack items / non-ACT items in ACT, non-PLT items in PLT, and any
+        // consumption on RES cases — even if the frontend filter is bypassed.
+        equipmentUsagePolicy.assertConsumable(caseEntity, equipmentIdsOf(requestedItems));
+        String usageContext = equipmentUsagePolicy.consumptionAuditLabel(
+                equipmentUsagePolicy.resolveContext(caseEntity));
+        // ─────────────────────────────────────────────────────────────────────
 
         // ── Over-limit enforcement ────────────────────────────────────────────
         // Limits are ZM-configured per item via StockThreshold.caseUsageLimit.
@@ -388,9 +443,14 @@ public class SttStockService {
                         .build());
             }
             if (!consumedItems.isEmpty()) {
-                caseStockConsumptionService.createOrUpdate(caseEntity, technician, consumedItems, performedBy);
+                caseStockConsumptionService.createOrUpdate(caseEntity, technician, consumedItems, performedBy, usageContext);
             }
         }
+
+        // ── Per-unit tracking: reconcile the exact tracked units consumed on this case ──
+        equipmentInstanceService.syncCaseUsageInstances(
+                caseEntity, InstanceOwnerType.TECH, technician.getId(), technician.getFullName(),
+                quantitiesByEquipment(requestedUsage), mergeInstanceIdsFromUsed(requestedItems), performedBy);
 
         // Evaluate TECH stock alerts after consumption
         stockAlertEvaluationService.evaluateTechStock(technician.getId());
@@ -406,6 +466,11 @@ public class SttStockService {
     ) {
         if (caseEntity == null || caseEntity.getWork() == null) {
             return;
+        }
+
+        // Restore any tracked units consumed on this case back to their holder's stock.
+        if (restoreStock) {
+            equipmentInstanceService.restoreAllCaseUsage(caseEntity.getId(), performedBy);
         }
 
         String appliedTechId = trimToNull(caseEntity.getWork().getStockAppliedTechId());
@@ -448,6 +513,15 @@ public class SttStockService {
         if (!matchById && !matchByEmail) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This case is not assigned to you");
         }
+
+        // Same ACT/PLT/RES classification enforcement as the work-submission path.
+        List<String> declaredIds = request.getItems() == null ? List.of()
+                : request.getItems().stream()
+                        .filter(i -> i != null && !isBlank(i.getEquipmentId()))
+                        .map(i -> i.getEquipmentId().trim())
+                        .distinct()
+                        .collect(Collectors.toList());
+        equipmentUsagePolicy.assertConsumable(caseEntity, declaredIds);
 
         TechStock techStock = techStockRepository.findByTechId(tech.getId())
                 .orElseThrow(() -> new ResponseStatusException(
@@ -505,6 +579,12 @@ public class SttStockService {
                     .set("lastUpdatedAt", declaredAt);
             mongoTemplate.updateFirst(query, update, TechStock.class);
         }
+
+        // ── Per-unit tracking: reconcile the exact tracked units consumed on this case ──
+        equipmentInstanceService.syncCaseUsageInstances(
+                caseEntity, InstanceOwnerType.TECH, tech.getId(), tech.getFullName(),
+                quantitiesByEquipment(mergedItems), mergeInstanceIdsFromTech(request.getItems()),
+                trimToNull(tech.getEmail()) != null ? tech.getEmail() : tech.getId());
 
         TechStockUsage usage = techStockUsageRepository.save(TechStockUsage.builder()
                 .techId(tech.getId())
@@ -1029,6 +1109,47 @@ public class SttStockService {
         return merged;
     }
 
+    // ── Per-unit tracking helpers ───────────────────────────────────────────────
+
+    /** equipmentId → consumed quantity, from a merged usage map. */
+    private Map<String, Integer> quantitiesByEquipment(Map<String, UsageItem> usage) {
+        Map<String, Integer> result = new LinkedHashMap<>();
+        usage.forEach((equipmentId, item) -> result.put(equipmentId, item.getQuantity()));
+        return result;
+    }
+
+    /** equipmentId → selected tracked-unit ids, merged across duplicate request lines. */
+    private Map<String, List<String>> mergeInstanceIdsFromUsed(List<UsedEquipmentRequestItem> items) {
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        if (items == null) {
+            return result;
+        }
+        for (UsedEquipmentRequestItem item : items) {
+            if (item == null || isBlank(item.equipmentId()) || item.instanceIds() == null) {
+                continue;
+            }
+            result.computeIfAbsent(item.equipmentId().trim(), k -> new ArrayList<>())
+                    .addAll(item.instanceIds());
+        }
+        return result;
+    }
+
+    /** equipmentId → selected tracked-unit ids, merged across duplicate request lines. */
+    private Map<String, List<String>> mergeInstanceIdsFromTech(List<TechUsageItemRequest> items) {
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        if (items == null) {
+            return result;
+        }
+        for (TechUsageItemRequest item : items) {
+            if (item == null || isBlank(item.getEquipmentId()) || item.getInstanceIds() == null) {
+                continue;
+            }
+            result.computeIfAbsent(item.getEquipmentId().trim(), k -> new ArrayList<>())
+                    .addAll(item.getInstanceIds());
+        }
+        return result;
+    }
+
     private String trimToNull(String value) {
         if (value == null) {
             return null;
@@ -1087,6 +1208,11 @@ public class SttStockService {
             List<UsedEquipmentRequestItem> requestedItems,
             String performedBy
     ) {
+        // Same business-usage enforcement as the TECH path, for STT self-execution.
+        equipmentUsagePolicy.assertConsumable(caseEntity, equipmentIdsOf(requestedItems));
+        String usageContext = equipmentUsagePolicy.consumptionAuditLabel(
+                equipmentUsagePolicy.resolveContext(caseEntity));
+
         SttStock stock = sttStockRepository.findBySttId(stt.getId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "STT stock not found for self-execution"));
@@ -1158,8 +1284,13 @@ public class SttStockService {
         stock.setLastUpdatedAt(Instant.now());
         sttStockRepository.save(stock);
 
+        // ── Per-unit tracking: reconcile the exact tracked units consumed on this case ──
+        equipmentInstanceService.syncCaseUsageInstances(
+                caseEntity, InstanceOwnerType.STT, stt.getId(), stt.getFullName(),
+                new LinkedHashMap<>(requested), mergeInstanceIdsFromUsed(requestedItems), performedBy);
+
         if (!consumedItems.isEmpty()) {
-            caseStockConsumptionService.createOrUpdate(caseEntity, stt, consumedItems, performedBy);
+            caseStockConsumptionService.createOrUpdate(caseEntity, stt, consumedItems, performedBy, usageContext);
         }
         return result;
     }
@@ -1167,5 +1298,17 @@ public class SttStockService {
     private String currentUser() {
         var auth = SecurityContextHolder.getContext().getAuthentication();
         return (auth != null) ? auth.getName() : "system";
+    }
+
+    /** Distinct, non-blank equipment ids from a requested-usage list (for the usage policy check). */
+    private List<String> equipmentIdsOf(List<UsedEquipmentRequestItem> items) {
+        if (items == null) {
+            return List.of();
+        }
+        return items.stream()
+                .filter(i -> i != null && !isBlank(i.equipmentId()))
+                .map(i -> i.equipmentId().trim())
+                .distinct()
+                .collect(Collectors.toList());
     }
 }

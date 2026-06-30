@@ -50,6 +50,7 @@ public class DpmService {
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
     private final DpmAllocationService dpmAllocationService;
+    private final EquipmentInstanceService equipmentInstanceService;
 
     // ── Active statuses the STT should see in their inbox ────────────────────
     private static final Set<DpmStatus> STT_ACTIVE_STATUSES = Set.of(
@@ -270,6 +271,22 @@ public class DpmService {
             return saved;
         }
 
+        // ── Per-unit tracking validation (IMEI / Serial) ──────────────────────
+        // For tracked equipment the STT must enter exactly one detail row per confirmed unit
+        // with the IMEI/Serial required by its trackingMode, all unique within the equipment.
+        // Validate the whole reception up-front so nothing is persisted on a tracking error.
+        Map<String, Equipment> equipmentById = equipmentRepository.findAllById(
+                        dpm.getItems().stream().map(DpmItem::getEquipmentId).collect(Collectors.toList()))
+                .stream().collect(Collectors.toMap(Equipment::getId, e -> e, (a, b) -> a));
+        for (DpmItem item : dpm.getItems()) {
+            Equipment eq = equipmentById.get(item.getEquipmentId());
+            DpmItemConfirmation conf = confirmationMap.get(item.getEquipmentId());
+            int confirmedQty = item.getConfirmedQuantity() != null ? item.getConfirmedQuantity() : 0;
+            if (eq != null && confirmedQty > 0) {
+                equipmentInstanceService.validateUnitsForConfirmation(eq, confirmedQty, conf.getUnits());
+            }
+        }
+
         if (isNewFlow) {
             dpm.setStatus(DpmStatus.MATERIAL_RECEIVED);
         } else {
@@ -286,6 +303,18 @@ public class DpmService {
         DpmRequest saved = dpmRepository.save(dpm);
 
         sttStockService.applyDpmConfirmation(saved);
+
+        // Materialise per-unit instances for tracked equipment (validated above). Quantity
+        // counters above stay authoritative; instances add per-unit traceability.
+        for (DpmItem item : saved.getItems()) {
+            Equipment eq = equipmentById.get(item.getEquipmentId());
+            int confirmedQty = item.getConfirmedQuantity() != null ? item.getConfirmedQuantity() : 0;
+            if (eq != null && confirmedQty > 0) {
+                DpmItemConfirmation conf = confirmationMap.get(item.getEquipmentId());
+                equipmentInstanceService.createForDpm(eq, saved, conf.getUnits(), callerEmail);
+            }
+        }
+
         stockMovementService.recordDpmConfirmed(saved, callerEmail);
         notificationEventService.onDpmConfirmed(saved);
 
