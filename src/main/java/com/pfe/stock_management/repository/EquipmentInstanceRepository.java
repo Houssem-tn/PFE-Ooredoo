@@ -27,6 +27,9 @@ public interface EquipmentInstanceRepository extends MongoRepository<EquipmentIn
     // ── Audit / provenance lookups ────────────────────────────────────────────
     List<EquipmentInstance> findBySourceDpmId(String sourceDpmId);
 
+    /** All tracked units that originated from any of the given STTs — used to scope the ZM dashboard. */
+    List<EquipmentInstance> findByOriginSttIdIn(Collection<String> originSttIds);
+
     List<EquipmentInstance> findByCaseId(String caseId);
 
     List<EquipmentInstance> findByReturnId(String returnId);
