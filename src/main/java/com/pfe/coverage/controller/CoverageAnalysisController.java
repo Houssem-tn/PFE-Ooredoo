@@ -2,7 +2,7 @@ package com.pfe.coverage.controller;
 
 import com.pfe.coverage.dto.CoverageAnalysisResultResponse;
 import com.pfe.coverage.dto.CoverageAnalysisSummaryResponse;
-import com.pfe.coverage.dto.CoverageAnalyticsPointsResponse;
+import com.pfe.coverage.dto.CoverageAnalyticsGeoJson;
 import com.pfe.coverage.dto.PointCheckRequest;
 import com.pfe.coverage.dto.PointCheckResponse;
 import com.pfe.coverage.service.CoverageAnalysisService;
@@ -76,23 +76,55 @@ public class CoverageAnalysisController {
 
     /**
      * Returns map markers sourced directly from the latest imported Merged Operations
-     * file (merged-analytics), filtered by {@code source} (default MES = activation).
+     * file (merged-analytics), filtered by {@code source} (default MES = activation),
+     * as a GeoJSON {@code FeatureCollection} for the Network Coverage map.
      *
-     * Only rows with valid coordinates are returned. Supply all four bounding-box
-     * params to restrict results to the current viewport; {@code limit} caps the
-     * number of markers (server enforces a hard ceiling) to avoid loading huge studies.
+     * <p>Viewport loading: pass {@code bbox=minLng,minLat,maxLng,maxLat} (MapLibre bounds
+     * order) to restrict results to the visible map bounds — only points inside are
+     * returned, capped server-side. {@code zoom} is accepted for future server-side tuning;
+     * optional {@code governorate} / {@code delegation} narrow the result further.</p>
      */
     @GetMapping("/analytics-points")
     @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_ZM')")
-    public CoverageAnalyticsPointsResponse analyticsPoints(
+    public CoverageAnalyticsGeoJson.FeatureCollection analyticsPoints(
             @RequestParam(defaultValue = "MES") String source,
-            @RequestParam(required = false) Double minLat,
-            @RequestParam(required = false) Double minLng,
-            @RequestParam(required = false) Double maxLat,
-            @RequestParam(required = false) Double maxLng,
-            @RequestParam(defaultValue = "5000") int limit
+            @RequestParam(required = false) String bbox,
+            @RequestParam(required = false) Integer zoom,
+            @RequestParam(required = false) String governorate,
+            @RequestParam(required = false) String delegation,
+            @RequestParam(defaultValue = "12000") int limit
     ) {
-        return analyticsPointService.getPoints(source, minLat, minLng, maxLat, maxLng, limit);
+        Double minLng = null, minLat = null, maxLng = null, maxLat = null;
+        if (bbox != null && !bbox.isBlank()) {
+            String[] parts = bbox.split(",");
+            if (parts.length == 4) {
+                try {
+                    minLng = Double.parseDouble(parts[0].trim());
+                    minLat = Double.parseDouble(parts[1].trim());
+                    maxLng = Double.parseDouble(parts[2].trim());
+                    maxLat = Double.parseDouble(parts[3].trim());
+                } catch (NumberFormatException ignored) {
+                    // Malformed bbox → fall back to an unbounded (source-only) query.
+                    minLng = minLat = maxLng = maxLat = null;
+                }
+            }
+        }
+        return analyticsPointService.getPoints(
+                source, minLat, minLng, maxLat, maxLng, governorate, delegation, limit);
+    }
+
+    /**
+     * Searches MES analytics rows by MSISDN so the map can locate/highlight a case directly.
+     * Returns 0..N matches (a single MSISDN normally maps to one row); the UI focuses the match,
+     * or lets the user pick when several rows share the MSISDN.
+     */
+    @GetMapping("/analytics-points/search")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_ZM')")
+    public List<CoverageAnalyticsGeoJson.Properties> searchAnalyticsPoints(
+            @RequestParam(defaultValue = "MES") String source,
+            @RequestParam String msisdn
+    ) {
+        return analyticsPointService.searchByMsisdn(source, msisdn);
     }
 
     /**
