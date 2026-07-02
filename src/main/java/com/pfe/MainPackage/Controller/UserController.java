@@ -62,6 +62,13 @@ public class UserController {
         return service.findMe(authentication.getName());
     }
 
+    @PutMapping("/me")
+    @PreAuthorize("isAuthenticated()")
+    public UserDTO updateMe(Authentication authentication,
+                            @Valid @RequestBody UpdateMyProfileRequest req) {
+        return service.updateMe(authentication.getName(), req);
+    }
+
     @PostMapping
     @PreAuthorize("hasAuthority('ROLE_ADMIN')")
     public UserDTO create(@Valid @RequestBody UserCreateRequest req) {

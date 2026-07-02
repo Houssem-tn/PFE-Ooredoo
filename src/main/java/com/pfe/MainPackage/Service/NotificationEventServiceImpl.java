@@ -4,6 +4,7 @@ import com.pfe.MainPackage.Dto.NotificationMessageDto;
 import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Entity.Notification;
 import com.pfe.MainPackage.Entity.UserRole;
+import com.pfe.MainPackage.Repository.NotificationRepository;
 import com.pfe.Notification.NotificationDestinationResolver;
 import com.pfe.Notification.NotificationPayloadFactory;
 import com.pfe.Notification.WebSocketNotificationSender;
@@ -29,15 +30,18 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     private final NotificationPayloadFactory payloadFactory;
     private final NotificationDestinationResolver destinationResolver;
     private final NotificationService notificationService;
+    private final NotificationRepository notificationRepository;
 
     public NotificationEventServiceImpl(WebSocketNotificationSender sender,
                                         NotificationPayloadFactory payloadFactory,
                                         NotificationDestinationResolver destinationResolver,
-                                        NotificationService notificationService) {
+                                        NotificationService notificationService,
+                                        NotificationRepository notificationRepository) {
         this.sender = sender;
         this.payloadFactory = payloadFactory;
         this.destinationResolver = destinationResolver;
         this.notificationService = notificationService;
+        this.notificationRepository = notificationRepository;
     }
 
     @Override
@@ -110,6 +114,29 @@ public class NotificationEventServiceImpl implements NotificationEventService {
 
         NotificationMessageDto payload = payloadFactory.buildCaseAssignedToTech(caseEntity, triggeredBy);
         sendToRecipient(caseEntity.getTechEmail(), payload);
+    }
+
+    @Override
+    public void onCaseMessageCreated(CaseEntity caseEntity, String recipientEmail, String senderName, String senderRole) {
+        if (caseEntity == null || isBlank(recipientEmail)) {
+            return;
+        }
+
+        String normalized = recipientEmail.trim().toLowerCase();
+
+        // Grouping: one unread "new message" alert per case+recipient is enough. Bursts of
+        // chat messages update the badge through the unread-summary endpoint, not the Alert Center.
+        boolean alreadyNotified = notificationRepository
+                .existsByRecipientEmailAndEventTypeAndEntityIdAndReadFalse(
+                        normalized, "CASE_MESSAGE_RECEIVED", caseEntity.getId());
+        if (alreadyNotified) {
+            log.info("[Notification] case_message_notification_grouped recipient={} caseId={}",
+                    normalized, caseEntity.getId());
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildCaseMessageReceived(caseEntity, senderName, senderRole);
+        sendToRecipient(normalized, payload);
     }
 
     @Override

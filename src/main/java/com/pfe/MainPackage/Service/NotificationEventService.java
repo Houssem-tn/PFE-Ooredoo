@@ -22,6 +22,13 @@ public interface NotificationEventService {
 
     void onCaseAssignedToTech(CaseEntity caseEntity, String triggeredBy);
 
+    /**
+     * New message in a case discussion (ZM ↔ STT). Grouped per case: while an unread
+     * CASE_MESSAGE_RECEIVED alert for the same case+recipient exists, no additional
+     * notification is persisted.
+     */
+    void onCaseMessageCreated(CaseEntity caseEntity, String recipientEmail, String senderName, String senderRole);
+
     void onComplaintImportCompleted(String recipientEmail, int processedRows, int importedRows, int skippedRows);
 
     void onSlaWarning(CaseEntity caseEntity);

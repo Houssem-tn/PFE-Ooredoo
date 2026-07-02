@@ -3,6 +3,7 @@ package com.pfe.exception;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
 import org.springframework.http.*;
@@ -33,6 +34,15 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleConflict(IllegalStateException ex, HttpServletRequest req) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(new ApiError(Instant.now(), 409, "CONFLICT", ex.getMessage(), req.getRequestURI()));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException ex, HttpServletRequest req) {
+        String message = ex.getMessage() != null && !ex.getMessage().isBlank()
+                ? ex.getMessage()
+                : "Access denied";
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(new ApiError(Instant.now(), 403, "FORBIDDEN", message, req.getRequestURI()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

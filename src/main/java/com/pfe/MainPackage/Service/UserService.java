@@ -10,12 +10,15 @@ import com.pfe.case_management.service.CaseAnalyticsService;
 import com.pfe.exception.NotFoundException;
 import com.pfe.MainPackage.mapper.UserMapper;
 import com.pfe.support.TunisiaGovernorateSupport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -25,6 +28,8 @@ import java.util.Set;
 
 @Service
 public class UserService {
+    private static final Logger log = LoggerFactory.getLogger(UserService.class);
+
     private final UserRepository repo;
     private final UserMapper mapper;
     private final PasswordEncoder encoder;
@@ -89,6 +94,38 @@ public class UserService {
         AppUser user = repo.findByEmail(email.toLowerCase())
                 .orElseThrow(() -> new NotFoundException("User not found: " + email));
         return mapper.toDto(user);
+    }
+
+    /**
+     * Self-service profile update for the authenticated user. The caller is
+     * resolved from the security context (email), never from a client-supplied
+     * id. ADMIN accounts are read-only and rejected with 403. Only the safe
+     * fields (full name, phone) are ever touched here — email/username, role,
+     * account status and permissions are left untouched by design.
+     */
+    public UserDTO updateMe(String email, UpdateMyProfileRequest req) {
+        AppUser user = repo.findByEmail(email.toLowerCase())
+                .orElseThrow(() -> new NotFoundException("User not found: " + email));
+
+        if (user.getRole() == UserRole.ROLE_ADMIN) {
+            throw new AccessDeniedException("Admin profile is read-only and cannot be modified");
+        }
+
+        String normalizedFullName = req.fullName().trim().replaceAll("\\s+", " ");
+        user.setFullName(normalizedFullName);
+
+        String normalizedPhone = (req.phone() != null && !req.phone().isBlank())
+                ? req.phone().trim()
+                : null;
+        user.setPhone(normalizedPhone);
+
+        AppUser saved = repo.save(user);
+
+        // Audit trail: profile self-update.
+        log.info("AUDIT PROFILE_UPDATED userId={} role={} at={}",
+                saved.getId(), saved.getRole(), Instant.now());
+
+        return mapper.toDto(saved);
     }
 
     public UserDTO create(UserCreateRequest req) {

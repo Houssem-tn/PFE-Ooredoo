@@ -97,6 +97,28 @@ public class NotificationPayloadFactory {
         return dto;
     }
 
+    /**
+     * Grouped case-discussion alert: only one unread notification per case+recipient exists
+     * at a time (deduplicated in NotificationEventServiceImpl), so a burst of chat messages
+     * does not flood the Alert Center.
+     */
+    public NotificationMessageDto buildCaseMessageReceived(CaseEntity caseEntity, String senderName, String senderRole) {
+        String senderLabel = "ROLE_ZM".equals(senderRole) ? "ZM" : "STT";
+        NotificationMessageDto dto = buildCasePayload(
+                "CASE_MESSAGE_RECEIVED",
+                "New message on case " + safe(caseEntity.getCrmCase()),
+                safe(senderName) + " (" + senderLabel + ") sent you a message on case " + safe(caseEntity.getCrmCase()),
+                caseEntity,
+                senderName,
+                senderRole
+        );
+        dto.setLevel("INFO");
+        dto.setCategory("CASE");
+        dto.setActionType("OPEN_CASE");
+        dto.setRelatedCaseId(caseEntity.getId());
+        return dto;
+    }
+
     public NotificationMessageDto buildComplaintImportCompleted(
             String triggeredBy,
             int processedRows,
