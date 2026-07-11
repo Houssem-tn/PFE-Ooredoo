@@ -39,6 +39,20 @@ RUN apt-get update \
 # every source edit.
 COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
+
+# TEMPORARY DIAGNOSTIC: forcing curl over wget (previous commit) did not
+# fix the "Failed to validate Maven distribution SHA-256" failure — the
+# hash itself is independently re-verified correct against Apache's own
+# .sha512 (see maven-wrapper.properties). Print exactly what this
+# environment actually downloads/computes so the real cause is visible in
+# CI logs instead of guessed at again. Remove once root-caused.
+RUN curl -fsSL -o /tmp/diag-maven.zip \
+      "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.12/apache-maven-3.9.12-bin.zip" \
+    && echo "DIAG: size=$(stat -c%s /tmp/diag-maven.zip 2>/dev/null || wc -c < /tmp/diag-maven.zip)" \
+    && echo "DIAG: sha256=$(sha256sum /tmp/diag-maven.zip)" \
+    && echo "DIAG: expected=305773a68d6ddfd413df58c82b3f8050e89778e777f3a745c8e5b8cbea4018ef" \
+    && rm -f /tmp/diag-maven.zip
+
 RUN chmod +x mvnw && ./mvnw -q -B dependency:go-offline
 
 COPY src/ src/
