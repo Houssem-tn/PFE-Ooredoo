@@ -5,7 +5,15 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.0.2</version>
+        <!-- Patch bump only (4.0.2 -> 4.0.7, same 4.0.x line) — fixes a
+             real Trivy-reported Critical CVE (CVE-2026-40976, Spring Boot
+             security-bypass) and transitively brings the BOM-managed
+             tomcat-embed-core/spring-security-web versions up to their
+             own fixed releases too (verified via `mvn dependency:tree`
+             after this bump — see the image-scan fix commit; 4.0.6 alone
+             wasn't enough, tomcat-embed-core still landed one patch
+             short of its own fixed version). -->
+        <version>4.0.7</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com</groupId>
@@ -196,6 +204,24 @@
         </dependency>
 
     </dependencies>
+
+    <!-- Pins a transitive dependency's version up to a patched release
+         without touching the library that actually pulls it in.
+         io.minio:minio:8.6.0 (declared above) brings in
+         org.bouncycastle:bcprov-jdk18on:1.81, which a real Trivy image
+         scan flagged as CVE-2025-14813 (Critical). 1.81.1 is BouncyCastle's
+         own smallest/most conservative patch release that fixes it — not
+         jumping to the newest 1.8x line — and minio's own version is left
+         alone entirely. -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>1.81.1</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <build>
         <plugins>
