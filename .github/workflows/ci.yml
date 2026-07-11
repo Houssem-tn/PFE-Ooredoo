@@ -375,7 +375,7 @@ jobs:
           retention-days: 30
 
       - name: Trivy scan — fail on Critical
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
           severity: CRITICAL
@@ -384,7 +384,7 @@ jobs:
 
       - name: Trivy scan — report High (non-blocking, SARIF upload)
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
           severity: HIGH,CRITICAL
