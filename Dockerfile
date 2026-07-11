@@ -19,23 +19,21 @@ FROM eclipse-temurin:17-jdk-jammy AS build
 WORKDIR /build
 
 # mvnw prefers wget over curl when both are present; forced curl here
-# (removed wget) on the theory that was the difference from local testing.
-# It wasn't: a diagnostic step (since removed) proved the raw download's
-# sha256 matches distributionSha256Sum exactly, every time, including in
-# this exact environment — the file and the value in
-# maven-wrapper.properties are both genuinely correct. The two real CI
-# failures were still intermittent: the checksum-verified value is right,
-# but mvnw's OWN download (a separate request from the diagnostic's) isn't
-# guaranteed to land on it every single time — consistent with a transient
-# hiccup somewhere between here and repo.maven.apache.org (a CDN edge, a
-# network blip), not a deterministic corruption. Keeping curl (still no
-# reason to prefer wget's code path, which was never verified working at
-# all) and wrapping the wrapper's own download+verify in a small retry
-# loop — this does NOT weaken the checksum check itself (still runs in
-# full every attempt, still fails the build if every retry's checksum is
-# wrong), it only tolerates a one-off bad download the same way a flaky
-# network blip should be tolerated rather than treated as a permanent
-# integrity failure.
+# (removed wget) — did not fix it. A manual diagnostic (since removed)
+# proved a plain `curl` of the exact same URL, in the exact same failing
+# job, produces bytes matching distributionSha256Sum exactly. A 3-attempt
+# retry loop (since removed) then proved this ISN'T transient either: all
+# 3 attempts failed identically, each in well under a second — consistent
+# with genuinely fast GHA network (the working manual diagnostic was
+# equally fast), not with attempts silently skipping real work. So: the
+# correct bytes are provably reachable from this exact environment, but
+# mvnw's *own* download+verify path fails 100% of the time regardless.
+# That points at something in mvnw's shell logic itself misbehaving under
+# this environment's /bin/sh (dash, not bash — never exercised locally,
+# where Git Bash's ./mvnw always runs under real bash) rather than the
+# network or the pinned hash. MVNW_VERBOSE=true turns on the wrapper
+# script's own internal logging (the URL/paths it actually computes and
+# uses) so the next run shows the real cause instead of guessing further.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && apt-get remove -y --purge wget \
@@ -46,13 +44,7 @@ RUN apt-get update \
 # every source edit.
 COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
-RUN chmod +x mvnw \
-    && for attempt in 1 2 3; do \
-         ./mvnw -q -B dependency:go-offline && break; \
-         echo "mvnw dependency:go-offline failed (attempt $attempt/3)" >&2; \
-         if [ "$attempt" = 3 ]; then exit 1; fi; \
-         sleep 5; \
-       done
+RUN chmod +x mvnw && MVNW_VERBOSE=true ./mvnw -B dependency:go-offline
 
 COPY src/ src/
 RUN ./mvnw -q -B clean package
