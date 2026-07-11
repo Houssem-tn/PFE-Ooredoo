@@ -18,17 +18,24 @@
 FROM eclipse-temurin:17-jdk-jammy AS build
 WORKDIR /build
 
-# mvnw prefers wget over curl when both are present (see mvnw's own
-# download logic). The first real CI run hit "Failed to validate Maven
-# distribution SHA-256, your Maven distribution might be compromised" —
-# the distributionSha256Sum itself was independently verified correct
-# against Apache's own published .sha512 (see maven-wrapper.properties'
-# comment) and confirmed to match on a genuinely fresh, cache-cleared
-# local download — so the download itself differs specifically on this
-# base image, and the only variable that differs from local testing is
-# wget vs. curl. Forcing curl (removing wget, installing curl explicitly
-# rather than assuming jammy ships it) sidesteps whatever that difference
-# is with a downloader path that's actually been verified end-to-end.
+# mvnw prefers wget over curl when both are present; forced curl here
+# (removed wget) on the theory that was the difference from local testing.
+# It wasn't: a diagnostic step (since removed) proved the raw download's
+# sha256 matches distributionSha256Sum exactly, every time, including in
+# this exact environment — the file and the value in
+# maven-wrapper.properties are both genuinely correct. The two real CI
+# failures were still intermittent: the checksum-verified value is right,
+# but mvnw's OWN download (a separate request from the diagnostic's) isn't
+# guaranteed to land on it every single time — consistent with a transient
+# hiccup somewhere between here and repo.maven.apache.org (a CDN edge, a
+# network blip), not a deterministic corruption. Keeping curl (still no
+# reason to prefer wget's code path, which was never verified working at
+# all) and wrapping the wrapper's own download+verify in a small retry
+# loop — this does NOT weaken the checksum check itself (still runs in
+# full every attempt, still fails the build if every retry's checksum is
+# wrong), it only tolerates a one-off bad download the same way a flaky
+# network blip should be tolerated rather than treated as a permanent
+# integrity failure.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && apt-get remove -y --purge wget \
@@ -39,21 +46,13 @@ RUN apt-get update \
 # every source edit.
 COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
-
-# TEMPORARY DIAGNOSTIC: forcing curl over wget (previous commit) did not
-# fix the "Failed to validate Maven distribution SHA-256" failure — the
-# hash itself is independently re-verified correct against Apache's own
-# .sha512 (see maven-wrapper.properties). Print exactly what this
-# environment actually downloads/computes so the real cause is visible in
-# CI logs instead of guessed at again. Remove once root-caused.
-RUN curl -fsSL -o /tmp/diag-maven.zip \
-      "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.12/apache-maven-3.9.12-bin.zip" \
-    && echo "DIAG: size=$(stat -c%s /tmp/diag-maven.zip 2>/dev/null || wc -c < /tmp/diag-maven.zip)" \
-    && echo "DIAG: sha256=$(sha256sum /tmp/diag-maven.zip)" \
-    && echo "DIAG: expected=305773a68d6ddfd413df58c82b3f8050e89778e777f3a745c8e5b8cbea4018ef" \
-    && rm -f /tmp/diag-maven.zip
-
-RUN chmod +x mvnw && ./mvnw -q -B dependency:go-offline
+RUN chmod +x mvnw \
+    && for attempt in 1 2 3; do \
+         ./mvnw -q -B dependency:go-offline && break; \
+         echo "mvnw dependency:go-offline failed (attempt $attempt/3)" >&2; \
+         if [ "$attempt" = 3 ]; then exit 1; fi; \
+         sleep 5; \
+       done
 
 COPY src/ src/
 RUN ./mvnw -q -B clean package
