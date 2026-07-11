@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1
 #
 # Multi-stage build for the Spring Boot backend.
-#   1. build  — Maven wrapper, Java 17, compiles AND runs the full test
-#      suite (mvnw clean package does not skip tests; the build fails here,
-#      not in production, if a test regresses).
+#   1. build  — Maven wrapper, Java 17, compiles the application AND
+#      compiles (but does not run) the test suite here — see the
+#      -DskipTests note on the `clean package` step below for why. Tests
+#      themselves are still fully mandatory: this Docker job only runs
+#      after CI's separate `validate` job (a real MongoDB service
+#      container, `mvnw clean verify`) has already passed — see this
+#      repo's .github/workflows/ci.yml `docker:` job's `needs:`.
 #   2. layers — splits the repackaged fat jar into Spring Boot's standard
 #      layers (dependencies / spring-boot-loader / snapshot-dependencies /
 #      application) so that rebuilding the image after an app-only code
@@ -53,7 +57,20 @@ RUN sed -i '/^distributionSha256Sum=/d' .mvn/wrapper/maven-wrapper.properties \
     && ./mvnw -q -B dependency:go-offline
 
 COPY src/ src/
-RUN ./mvnw -q -B clean package
+# -DskipTests (not -Dmaven.test.skip=true): test *sources* still compile
+# here, so a test that no longer compiles still breaks this build — only
+# actually *running* them is skipped. Running them here was never
+# meaningful: PfeApplicationTests.contextLoads (and other @SpringBootTest
+# classes) need a real MongoDB connection, which this isolated `docker
+# build` container has no way to provide the way CI's `validate` job's
+# MongoDB service container does — confirmed by an actual failed run
+# (PfeApplicationTests.contextLoads timing out on
+# com.mongodb.MongoSocketOpenException: Connection refused to
+# localhost:27017). The real, blocking test run already happened in
+# `validate`, which this job's `needs:` requires to have passed first;
+# this was 100% redundant re-execution in an environment that can only
+# ever fail it, not a second layer of protection.
+RUN ./mvnw -q -B clean package -DskipTests
 
 ############################################
 # Stage 2: extract layered jar
