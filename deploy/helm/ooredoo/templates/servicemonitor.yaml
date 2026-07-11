@@ -1,0 +1,53 @@
+{{/*
+Requires the Prometheus Operator CRDs (ServiceMonitor is
+monitoring.coreos.com/v1, not a built-in Kubernetes kind) — gated behind
+both monitoring.enabled AND monitoring.serviceMonitor.enabled so this
+never renders against a cluster that doesn't have them (see values.yaml's
+monitoring.enabled comment on why "renders nothing" beats "renders a
+manifest kubectl apply then rejects"). additionalLabels must match your
+Prometheus Operator's own serviceMonitorSelector (kube-prometheus-stack's
+default is `release: <helm-release-name>`) or Prometheus silently never
+picks these up — see OBSERVABILITY_BACKUP.md "ServiceMonitor behavior".
+*/}}
+{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backend
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ocr
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+{{- end }}

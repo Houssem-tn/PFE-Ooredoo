@@ -7,6 +7,7 @@ import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.support.TunisiaGovernorateSupport;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -25,6 +26,7 @@ public class ActivationDistributionRoutingService {
 
     private final UserRepository userRepository;
     private final CaseRepository caseRepository;
+    private final BusinessMetrics businessMetrics;
 
     public RoutingDecision resolveZmForGovernorate(String governorate) {
         if (!ActivationAnalyticsSupport.hasText(governorate)) {
@@ -45,6 +47,7 @@ public class ActivationDistributionRoutingService {
                 .toList();
 
         if (candidates.isEmpty()) {
+            businessMetrics.recordCaseAssignmentFailure("ACT");
             return RoutingDecision.unassigned(normalizedGovernorate);
         }
 

@@ -4,6 +4,7 @@ import com.pfe.MainPackage.Entity.FileEntityType;
 import com.pfe.MainPackage.Entity.FileMetadata;
 import com.pfe.MainPackage.Entity.FileRole;
 import com.pfe.MainPackage.Repository.FileMetadataRepository;
+import com.pfe.metrics.BusinessMetrics;
 import io.minio.BucketExistsArgs;
 import io.minio.MinioClient;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,13 +35,15 @@ class FileStorageServiceTest {
     private MinioClient minioClient;
     @Mock
     private FileMetadataRepository fileMetadataRepository;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     private FileStorageService service;
     private Path tempStorageDir;
 
     @BeforeEach
     void setUp() throws IOException {
-        service = new FileStorageService(minioClient, fileMetadataRepository);
+        service = new FileStorageService(minioClient, fileMetadataRepository, businessMetrics);
         tempStorageDir = Files.createTempDirectory("pfe-file-storage-test");
         ReflectionTestUtils.setField(service, "bucket", "test-bucket");
         ReflectionTestUtils.setField(service, "localStorageDir", tempStorageDir.toString());

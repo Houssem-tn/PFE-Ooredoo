@@ -1,0 +1,81 @@
+{{/*
+Single Ingress, frontend-only backend reference. The frontend's own
+nginx.conf already reverse-proxies /api, /ws-notifications and
+/ws-notifications-sockjs to the backend Service (see
+Pfe-Oreedoo-Front/nginx.conf) — so this Ingress only ever needs to route
+everything to the frontend Service, never directly to backend/mongodb/
+minio/ocr. That keeps the "only Ingress exposes the app externally, never
+Mongo/MinIO/OCR" requirement true by construction, not by convention.
+*/}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ooredoo
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+  annotations:
+    {{- if eq .Values.ingress.className "nginx" }}
+    # ingress-nginx annotations — see KUBERNETES.md "Ingress" for the
+    # Traefik equivalents/caveats if .Values.ingress.className is
+    # switched to "traefik" instead.
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.bodySize | quote }}
+    nginx.ingress.kubernetes.io/proxy-read-timeout: {{ .Values.ingress.proxyReadTimeoutSeconds | quote }}
+    nginx.ingress.kubernetes.io/proxy-send-timeout: {{ .Values.ingress.proxyReadTimeoutSeconds | quote }}
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: {{ .Values.ingress.proxyConnectTimeoutSeconds | quote }}
+    # ingress-nginx already forwards the Upgrade/Connection headers
+    # required for WebSocket/SockJS transparently over HTTP/1.1 — no
+    # dedicated "enable websockets" annotation exists or is needed, this
+    # just makes the HTTP/1.1 requirement explicit.
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.certManager }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.clusterIssuer | quote }}
+    {{- end }}
+    {{- if .Values.ingress.tls.enabled }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    {{- else }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    {{- end }}
+    {{- else if eq .Values.ingress.className "traefik" }}
+    # Traefik (K3s's bundled default) autodetects WebSocket upgrades on a
+    # plain Ingress with no extra annotation. It has no direct equivalent
+    # of nginx's client_max_body_size — Traefik does not enforce a request
+    # body size limit at the proxy layer at all — so upload size limiting
+    # for this app comes entirely from the backend's own
+    # spring.servlet.multipart.max-file-size / max-request-size
+    # (application.properties, already enforced regardless of Ingress
+    # controller). See KUBERNETES.md "Ingress" for the ServersTransport/
+    # Middleware CRDs you'd add if you need Traefik-side timeout tuning
+    # beyond its defaults (not included here to avoid depending on
+    # Traefik CRDs this chart can't validate with kubeconform).
+    {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.certManager }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.clusterIssuer | quote }}
+    {{- end }}
+    {{- if .Values.ingress.tls.enabled }}
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    {{- else }}
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    {{- end }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: {{ .Values.frontend.service.port }}
+{{- end }}

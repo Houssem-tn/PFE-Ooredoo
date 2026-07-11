@@ -10,6 +10,7 @@ import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.enums.CaseTimelineEventType;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.case_management.service.CaseTimelineService;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.Equipment;
 import com.pfe.stock_management.entity.SttStock;
@@ -83,6 +84,7 @@ public class MaterialReturnService {
     private final StockMovementService stockMovementService;
     private final NotificationEventService notificationEventService;
     private final EquipmentInstanceService equipmentInstanceService;
+    private final BusinessMetrics businessMetrics;
 
     // ── STT: eligible ZMs ──────────────────────────────────────────────────────
 
@@ -221,6 +223,7 @@ public class MaterialReturnService {
                 .build();
 
         MaterialReturnRequest saved = returnRepository.save(returnRequest);
+        businessMetrics.recordMaterialReturnCreated();
         log.info("[MaterialReturn] Created: id={} returnCode={} sttId={} zmId={} status={}",
                 saved.getId(), saved.getReturnCode(), saved.getSttId(), saved.getZmId(), saved.getStatus());
 

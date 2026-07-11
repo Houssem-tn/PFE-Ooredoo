@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Two console appenders (plain text for local dev, JSON for every
+  Kubernetes environment), switched by logging.json.enabled (see
+  application.properties). logging.level.* properties (application*.
+  properties) continue to control WHAT gets logged — Spring Boot's own
+  LoggingSystem applies those on top of whatever's configured here
+  regardless of the appender/format in use; this file only controls
+  WHERE/HOW log lines are formatted.
+
+  JSON field names match OBSERVABILITY_BACKUP.md's "Logging fields" table
+  exactly: timestamp, level, service, environment, namespace, pod,
+  requestId, message. requestId comes from MDC, populated by
+  RequestCorrelationFilter (com.pfe.config.RequestCorrelationFilter) —
+  never a user identifier, see that class's own comment.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty scope="context" name="jsonEnabled" source="logging.json.enabled" defaultValue="false"/>
+    <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="ooredoo-backend"/>
+    <springProperty scope="context" name="appEnv" source="spring.profiles.active" defaultValue="dev"/>
+
+    <!-- Set via the Kubernetes Downward API (see deployment-backend.yaml) —
+         empty/absent outside a cluster (local dev), which is fine: the
+         JSON encoder below just omits an empty field rather than failing. -->
+    <springProperty scope="context" name="podName" source="POD_NAME" defaultValue=""/>
+    <springProperty scope="context" name="podNamespace" source="POD_NAMESPACE" defaultValue=""/>
+
+    <appender name="CONSOLE_PLAIN" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{requestId:--}] %logger{36} - %msg%n%wEx</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="CONSOLE_JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <customFields>{"service":"${appName}","environment":"${appEnv}","namespace":"${podNamespace}","pod":"${podName}"}</customFields>
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <message>message</message>
+                <logger>logger</logger>
+                <thread>thread</thread>
+                <level>level</level>
+                <levelValue>[ignore]</levelValue>
+                <version>[ignore]</version>
+            </fieldNames>
+            <!-- MDC key "requestId" (set by RequestCorrelationFilter) becomes
+                 top-level JSON field "requestId", not nested under an "mdc"
+                 object — simpler to query in Loki (LogQL:
+                 `| json | requestId = "..."`). -->
+            <includeMdcKeyName>requestId</includeMdcKeyName>
+        </encoder>
+    </appender>
+
+    <if condition='property("jsonEnabled").equals("true")'>
+        <then>
+            <root level="INFO">
+                <appender-ref ref="CONSOLE_JSON"/>
+            </root>
+        </then>
+        <else>
+            <root level="INFO">
+                <appender-ref ref="CONSOLE_PLAIN"/>
+            </root>
+        </else>
+    </if>
+</configuration>

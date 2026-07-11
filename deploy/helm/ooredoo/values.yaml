@@ -1,0 +1,658 @@
+# =============================================================================
+# Default values for the ooredoo chart.
+#
+# These defaults are intentionally staging-safe (small resources, one
+# replica, NetworkPolicies/PDBs/HPAs off by default) so `helm install` with
+# no -f flags never accidentally resembles a production install. Real
+# environments are selected explicitly:
+#
+#   helm upgrade --install ooredoo . -n ooredoo-staging   -f values.yaml -f values-staging.yaml
+#   helm upgrade --install ooredoo . -n ooredoo-prod      -f values.yaml -f values-production.yaml
+#
+# See Pfe/KUBERNETES.md for the full explanation of every non-obvious
+# choice referenced in comments below.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+namespace:
+  # Whether this chart creates its own Namespace object. Kept true by
+  # default so `helm install` is self-contained; --create-namespace on the
+  # Helm CLI does the same thing without this if you'd rather manage
+  # namespaces outside the chart entirely (set to false in that case).
+  create: true
+  name: ooredoo-staging
+
+# ---------------------------------------------------------------------------
+# Image registry
+# ---------------------------------------------------------------------------
+# GHCR packages pushed by the default GITHUB_TOKEN (see .github/workflows/
+# ci.yml in each of the 3 source repos) are private by default. This
+# session could not confirm current visibility via `gh api` (the
+# authenticated token lacks the read:packages scope) — see KUBERNETES.md
+# "Image registry access" for how to check/change it yourself. Assume
+# private and keep this populated unless you've confirmed otherwise.
+#
+# The Secret itself is never created by this chart (see "do not store the
+# token in manifests" in KUBERNETES.md) — create it once per namespace:
+#   kubectl create secret docker-registry ghcr-secret \
+#     --docker-server=ghcr.io --docker-username=<user> --docker-password=<token> \
+#     --namespace=ooredoo-staging
+imagePullSecrets:
+  - name: ghcr-secret
+
+# ---------------------------------------------------------------------------
+# Frontend (Angular, served by nginx-unprivileged)
+# ---------------------------------------------------------------------------
+frontend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/houssem-tn/ooredoo-frontend
+    # Immutable, never "latest" — see CI.md for how this tag was produced
+    # and verified (real Trivy scan, 0 Critical, real GHCR push).
+    tag: sha-f3bf729
+    pullPolicy: IfNotPresent
+  # nginx-unprivileged listens on 8080 (see Pfe-Oreedoo-Front/Dockerfile) —
+  # matches the image, not configurable without rebuilding it.
+  containerPort: 8080
+  service:
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  probes:
+    # nginx.conf's own /healthz (static 200, no proxying — see that file's
+    # comment on why it deliberately doesn't depend on the backend).
+    path: /healthz
+    port: 8080
+  podSecurityContext:
+    runAsNonRoot: true
+    # nginxinc/nginx-unprivileged's own default (see its Dockerfile) — the
+    # image is already built to run as this user, not something imposed
+    # here for the first time.
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    # nginx (even the unprivileged variant) needs to bind its listen socket
+    # and manage worker processes/temp files — a fully read-only rootfs
+    # breaks startup unless every nginx temp path is separately tmpfs-mounted.
+    # Kept writable here rather than fighting the stock image; every other
+    # hardening control (non-root, no extra caps, no privilege escalation)
+    # still applies. See KUBERNETES.md "Security contexts" for the tradeoff.
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+  # nginx needs to write its PID file / temp dirs somewhere writable even
+  # under the security context above.
+  emptyDirs:
+    - name: nginx-tmp
+      mountPath: /tmp
+    - name: nginx-cache
+      mountPath: /var/cache/nginx
+    - name: nginx-run
+      mountPath: /var/run
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# Backend (Spring Boot)
+# ---------------------------------------------------------------------------
+backend:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/houssem-tn/ooredoo-backend
+    tag: sha-85e1fc9
+    pullPolicy: IfNotPresent
+  containerPort: 8080
+  service:
+    port: 8080
+
+  # SPRING_PROFILES_ACTIVE=prod is used in every real Kubernetes
+  # environment (staging included) — not just "production" — because
+  # ProductionSafetyEnvironmentPostProcessor's strict validation (real,
+  # non-localhost service URLs; a real JWT secret; explicit CORS origins)
+  # is exactly what a Kubernetes Service-DNS-based deployment already
+  # satisfies, and catching a misconfiguration in staging is the entire
+  # point of having a staging environment. See
+  # APPSTOCK/PFE-Ooredoo/src/main/java/com/pfe/config/
+  # ProductionSafetyEnvironmentPostProcessor.java and
+  # deploy/docker-compose.prod-check.yml (the Compose-level equivalent of
+  # this same idea) — do not change this to "dev" to work around a
+  # validation failure; fix the underlying value instead.
+  springProfile: prod
+
+  mongodb:
+    database: pfe
+  minio:
+    # http://minio:9000 — "minio" is this chart's literal MinIO Service
+    # name (see services.yaml / statefulset-minio.yaml), matching
+    # deploy/docker-compose.yml's own MINIO_URL=http://minio:9000 exactly,
+    # so this is the same, already-validated value, not a new one.
+    url: http://minio:9000
+  ocr:
+    # Same reasoning as MinIO above — "ocr" is this chart's OCR Service
+    # name, matching deploy/docker-compose.yml's OCR_API_URL exactly.
+    url: http://ocr:8000/extract
+
+  # Real frontend/CORS origin(s) — MUST NOT contain localhost/127.0.0.1 or
+  # ProductionSafetyEnvironmentPostProcessor refuses to start (see above).
+  # Overridden per environment in values-staging.yaml / values-production.yaml.
+  corsAllowedOrigins: "https://ooredoo.example.com"
+  frontendUrl: "https://ooredoo.example.com"
+
+  mail:
+    enabled: false
+    host: smtp.gmail.com
+    port: 587
+    from: ""
+
+  jwt:
+    expirationMs: 86400000
+
+  # Secret material — see secrets.yaml. Intentionally left empty, not a
+  # plausible-looking "CHANGE_ME_..." placeholder: secrets.yaml wraps
+  # jwtSecret in Helm's `required`, so `helm template`/`helm install`
+  # fails immediately with a clear error if it's still empty, rather than
+  # rendering something that merely *looks* unsafe and hoping
+  # ProductionSafetyEnvironmentPostProcessor happens to catch it later
+  # (an earlier draft's placeholder was actually long enough to slip
+  # past that check unedited — see secrets.yaml's own comment on why
+  # `required` replaced that approach). Real values are supplied via
+  # `--set-string` / a separate untracked values file / an existing
+  # Secret (see existingSecret below), never committed.
+  secrets:
+    # Set to the name of a pre-existing Secret (created out-of-band, e.g.
+    # by Sealed Secrets / External Secrets Operator / `kubectl create
+    # secret`) with the same keys this chart's own secrets.yaml would
+    # create (jwt-secret, mail-username, mail-password) to skip
+    # templating the built-in one entirely. Leave empty to let this
+    # chart render its own Secret from the values below.
+    existingSecret: ""
+    jwtSecret: ""
+    mail:
+      username: ""
+      password: ""
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  probes:
+    # Verified real endpoints — see CI.md's integration-workflow section
+    # (these are the exact paths exercised by the real Compose integration
+    # smoke tests) and application.properties
+    # (management.endpoint.health.probes.enabled=true,
+    # management.endpoint.health.group.readiness.include=readinessState,mongo).
+    # Do not expose any other actuator path — management.endpoints.web.
+    # exposure.include=health only, in the app's own config, unchanged here.
+    livenessPath: /actuator/health/liveness
+    readinessPath: /actuator/health/readiness
+    startupPath: /actuator/health/readiness
+
+  # server.shutdown=graceful + spring.lifecycle.timeout-per-shutdown-phase=20s
+  # (application.properties) — grace period must exceed that so Kubernetes
+  # doesn't SIGKILL mid-drain.
+  terminationGracePeriodSeconds: 30
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    # The JVM itself only ever writes to its own tmpdir (java.io.tmpdir,
+    # used by OcrController's File.createTempFile — see OcrController.java)
+    # — safe to keep the rest of the filesystem read-only.
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  emptyDirs:
+    - name: tmp
+      mountPath: /tmp
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# OCR (EasyOCR / FastAPI microservice)
+# ---------------------------------------------------------------------------
+ocr:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/houssem-tn/ooredoo-ocr
+    tag: sha-bd96b1a
+    pullPolicy: IfNotPresent
+  containerPort: 8000
+  service:
+    port: 8000
+
+  # EacyOCR/app/ocr_engine.py loads two full EasyOCR Reader models
+  # (English, Arabic+English) into memory at *import* time — this is what
+  # makes OCR the heaviest of the three app containers by far and why it
+  # needs a generous startup allowance (see probes below) and materially
+  # more memory than backend/frontend. 2Gi/2 CPU limits below are a starting
+  # point based on the model set actually loaded (two EasyOCR detector +
+  # recognizer pairs, CPU-only torch — see EacyOCR/Dockerfile's own
+  # comments on why torch is pinned to the CPU wheel); revise after
+  # observing real usage (`kubectl top pod`) in staging.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  probes:
+    # app/main.py's root health_check — see EacyOCR/Dockerfile's own
+    # HEALTHCHECK, which uses the same path with a 60s start-period for
+    # the same reason the startupProbe below is generous.
+    path: /
+    port: 8000
+    # Model loading is CPU-bound and can take well over a minute on a
+    # cold container (see EacyOCR/Dockerfile's HEALTHCHECK start-period:
+    # 60s comment) — a startupProbe defers liveness/readiness checks
+    # entirely until this succeeds once, instead of racing a fixed
+    # initialDelaySeconds against unpredictable model-load time.
+    startup:
+      failureThreshold: 30
+      periodSeconds: 10 # up to 300s allowance before the pod is considered failed to start
+
+  terminationGracePeriodSeconds: 15
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    # app/utils.py's ensure_upload_dir() and easyocr's own temp/cache
+    # usage need a writable filesystem beyond just /tmp in practice — kept
+    # writable rather than risk breaking OCR extraction to satisfy a
+    # stricter setting the image wasn't built for. Non-root + no extra
+    # capabilities + no privilege escalation still all apply.
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+  emptyDirs:
+    - name: tmp
+      mountPath: /app/temp_uploads
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+
+# ---------------------------------------------------------------------------
+# MongoDB
+# ---------------------------------------------------------------------------
+mongodb:
+  image:
+    repository: mongo
+    # Explicit stable version — matches deploy/docker-compose.yml's own
+    # mongo:7.0 pin (see that file's comment on why it's pinned, not
+    # :latest).
+    tag: "7.0"
+    pullPolicy: IfNotPresent
+  port: 27017
+
+  auth:
+    existingSecret: ""
+    username: pfe_app
+    # Intentionally empty, not a placeholder string — secrets.yaml's
+    # `required` fails the render immediately if this isn't set via
+    # --set-string or mongodb.auth.existingSecret. See backend.secrets
+    # above for why a plausible-looking default was rejected as a design.
+    password: ""
+    database: pfe
+
+  persistence:
+    enabled: true
+    storageClassName: "" # "" = cluster default StorageClass; set explicitly if the cluster needs one (see KUBERNETES.md)
+    size: 10Gi
+    accessMode: ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  terminationGracePeriodSeconds: 30
+
+  podSecurityContext:
+    runAsNonRoot: true
+    # Matches the official mongo image's own "mongodb" user (see its
+    # Dockerfile upstream) — not an arbitrary choice.
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    # mongod writes its own lock/journal files under /data/db (the PVC
+    # mount) but also needs a writable /tmp for internal use — kept
+    # writable rather than risk a subtle startup failure on the official
+    # image, which isn't built expecting a read-only rootfs.
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+
+# ---------------------------------------------------------------------------
+# MinIO
+# ---------------------------------------------------------------------------
+minio:
+  image:
+    repository: minio/minio
+    # Matches deploy/docker-compose.yml's own pin exactly (see that file's
+    # comment on why a specific RELEASE tag, not a channel alias).
+    tag: RELEASE.2025-04-08T15-41-24Z
+    pullPolicy: IfNotPresent
+  apiPort: 9000
+  consolePort: 9001
+  # MinIO's web console is an admin UI, not something the app itself
+  # needs — off by default per "Do not expose the MinIO console publicly
+  # by default" (and it isn't exposed via Ingress even when this is true;
+  # this only controls whether the ClusterIP Service for it is created at
+  # all, for port-forward-only access during troubleshooting).
+  consoleServiceEnabled: false
+
+  auth:
+    existingSecret: ""
+    # Both intentionally empty — see mongodb.auth.password's comment above
+    # for why (secrets.yaml's `required` enforces this at render time).
+    accessKey: ""
+    secretKey: ""
+
+  bucket: pfe-files
+
+  persistence:
+    enabled: true
+    storageClassName: ""
+    size: 20Gi
+    accessMode: ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  terminationGracePeriodSeconds: 30
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+
+  # Bucket-creation Job — see job-minio-init.yaml. Uses the official mc
+  # image, the same tool and command form deploy/docker-compose.yml's own
+  # minio-init service already uses (`mc mb --ignore-existing`), just
+  # ported from a Compose one-shot service to a Kubernetes Job.
+  init:
+    image:
+      repository: minio/mc
+      tag: RELEASE.2025-04-08T15-39-49Z
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# Ingress
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  # "nginx" (ingress-nginx) or "traefik" (K3s's bundled default) —
+  # ingress.yaml renders different annotations for each because the two
+  # controllers spell WebSocket/timeout/body-size configuration
+  # differently. See KUBERNETES.md "Ingress" for the exact annotation
+  # differences and how to pick.
+  className: nginx
+  host: ooredoo.example.com
+  # Real domain intentionally not filled in yet — see KUBERNETES.md "TLS
+  # preparation" and the task constraint this was built under ("do not
+  # configure the final public domain or production TLS certificate yet").
+  bodySize: 120m
+  proxyReadTimeoutSeconds: 3600 # matches nginx.conf's own /ws-notifications proxy_read_timeout
+  proxyConnectTimeoutSeconds: 60
+  tls:
+    enabled: false
+    secretName: ooredoo-tls
+    # true = annotate for cert-manager to mint the Secret above
+    # automatically; false = you provide `secretName` yourself (e.g.
+    # `kubectl create secret tls`) — see KUBERNETES.md "TLS preparation".
+    certManager: false
+    clusterIssuer: letsencrypt-staging
+
+# ---------------------------------------------------------------------------
+# NetworkPolicies
+# ---------------------------------------------------------------------------
+networkPolicy:
+  # Off by default because it depends on the cluster's CNI actually
+  # enforcing NetworkPolicy (Calico, Cilium, or K3s with the default
+  # Flannel replaced — plain Flannel does NOT enforce these; see
+  # KUBERNETES.md "NetworkPolicy requirements"). Enabling this on a CNI
+  # that ignores NetworkPolicy silently grants zero real isolation while
+  # looking like it does, which is worse than being visibly off by
+  # default.
+  enabled: false
+  defaultDeny: true
+  # Namespace label the Ingress controller's own namespace carries, used
+  # to scope the "ingress may reach frontend/backend" allow-rule instead
+  # of allowing all namespaces. Adjust to match your real cluster (e.g.
+  # ingress-nginx's namespace usually carries
+  # kubernetes.io/metadata.name=ingress-nginx already, which is the
+  # default assumed here).
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudgets — see frontend.podDisruptionBudget / backend.
+# podDisruptionBudget above (off by default; staging default is 1 replica,
+# where a PDB with minAvailable:1 would simply block all voluntary
+# disruption, which isn't useful until replicas > 1).
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Logging (see OBSERVABILITY_BACKUP.md "Logging fields" for the full field
+# list and "Sensitive-data protections" for what is never logged).
+# ---------------------------------------------------------------------------
+logging:
+  # Sets LOGGING_JSON_ENABLED (backend) / LOG_JSON (OCR) — switches both
+  # services from human-readable console output to structured JSON, which
+  # is what makes Loki queries/labels useful. Left true here (the
+  # staging-safe default) rather than off, specifically so staging
+  # exercises the exact log shape production will have — the same
+  # reasoning as backend.springProfile always being "prod" (see that
+  # value's own comment).
+  json: true
+  # INFO everywhere by default — see OBSERVABILITY_BACKUP.md "Log levels"
+  # for the staging vs. production recommendation (they're intentionally
+  # the same at this level; the real difference is per-package overrides
+  # already baked into application-{dev,prod}.properties, not something
+  # this chart re-implements).
+  level: INFO
+  correlationId:
+    # RequestCorrelationFilter (backend) and RequestIdMiddleware (OCR)
+    # are always active — this only controls whether nginx.conf's
+    # $request_id is what seeds it at the edge; both services already
+    # generate their own ID if none arrives. No functional effect today
+    # (nginx.conf isn't templated by this chart, being baked into the
+    # frontend image — see KUBERNETES.md's Service-naming rationale for
+    # why), kept as a documented toggle for when/if that changes.
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Monitoring (Prometheus Operator CRDs — ServiceMonitor, PrometheusRule).
+# Off by default: rendering a ServiceMonitor/PrometheusRule on a cluster
+# without the Prometheus Operator installed would make `kubectl apply`
+# (or a real install) fail outright on an unknown CRD, not degrade
+# gracefully — see OBSERVABILITY_BACKUP.md "External monitoring
+# prerequisites" for the kube-prometheus-stack install command this
+# assumes once enabled.
+# ---------------------------------------------------------------------------
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    # Must match the Prometheus Operator's own `serviceMonitorSelector`
+    # (kube-prometheus-stack's default release label) or Prometheus will
+    # never pick these up even though they exist — see
+    # OBSERVABILITY_BACKUP.md "ServiceMonitor behavior".
+    additionalLabels:
+      release: prometheus
+    interval: 30s
+    scrapeTimeout: 10s
+  prometheusRules:
+    enabled: false
+    additionalLabels:
+      release: prometheus
+    # Alert thresholds — see OBSERVABILITY_BACKUP.md "Alert rules" for the
+    # reasoning behind each `for:` duration (chosen to avoid paging on
+    # transient blips, per the task's own "do not page on every temporary
+    # failure").
+    backend:
+      errorRateThreshold: 0.05 # 5% 5xx over 5m -> warning
+      latencyP95Seconds: 2
+    ocr:
+      failureRateThreshold: 0.2 # 20% failures over 10m -> warning (CPU OCR is slower/flakier by nature)
+    pvc:
+      usageWarningPercent: 80
+      usageCriticalPercent: 90
+  grafanaDashboards:
+    # Renders ConfigMaps with the `grafana_dashboard: "1"` label (the
+    # Grafana sidecar convention kube-prometheus-stack's Grafana ships
+    # with by default) rather than talking to Grafana's API directly —
+    # no Grafana credentials needed by this chart at all.
+    enabled: false
+    label: grafana_dashboard
+    labelValue: "1"
+
+# ---------------------------------------------------------------------------
+# Backup (MongoDB mongodump + MinIO mc mirror CronJobs). Off by default —
+# see OBSERVABILITY_BACKUP.md "Backup schedules"/"Backup destinations" for
+# the full design. No backup credentials are ever required when disabled
+# (the Secret template below is itself gated on backup.enabled).
+# ---------------------------------------------------------------------------
+backup:
+  enabled: false
+
+  # S3-compatible destination shared by both MongoDB and MinIO backup
+  # CronJobs (e.g. a bucket on the same MinIO instance's cloud-hosted
+  # equivalent, AWS S3, Backblaze B2, etc. — anything the `mc`/`aws` CLI
+  # can target). Deliberately NOT the in-cluster MinIO this app already
+  # uses for application files — see OBSERVABILITY_BACKUP.md "Do not
+  # store the only backup on the same PVC as the database" for why an
+  # external target is the default assumption, with the dedicated-PVC
+  # fallback below only for staging environments with no external
+  # storage available yet.
+  destination:
+    type: s3 # "s3" (external, preferred) or "pvc" (staging fallback only — see below)
+    s3:
+      endpoint: "" # e.g. https://s3.eu-west-1.amazonaws.com — required if type=s3
+      bucket: ""
+      region: eu-west-1
+      # Name of a pre-existing Secret with keys access-key/secret-key —
+      # never rendered by this chart, never committed. See
+      # OBSERVABILITY_BACKUP.md "Required secrets".
+      existingSecret: ""
+    pvc:
+      enabled: false
+      storageClassName: ""
+      size: 20Gi
+      accessMode: ReadWriteOnce
+
+  mongodb:
+    enabled: false
+    schedule: "0 2 * * *" # daily 02:00 — see OBSERVABILITY_BACKUP.md "RPO/RTO" for why daily meets the proposed 24h staging RPO
+    retentionDays: 7
+    image:
+      # Must match the server's own major version (mongodump/mongorestore
+      # compatibility) — see mongodb.image.tag above.
+      repository: mongo
+      tag: "7.0"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+    # concurrencyPolicy: Forbid (not just a "best practice" comment — see
+    # cronjob-mongodb-backup.yaml) is what actually prevents overlapping
+    # runs; startingDeadlineSeconds bounds how late a missed run can still
+    # start after a control-plane hiccup.
+    startingDeadlineSeconds: 300
+
+  minio:
+    enabled: false
+    schedule: "30 2 * * *" # 02:30 — offset from the Mongo backup so they don't compete for node bandwidth
+    retentionDays: 7
+    image:
+      repository: minio/mc
+      tag: RELEASE.2025-04-08T15-39-49Z
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    startingDeadlineSeconds: 300
+
+# ---------------------------------------------------------------------------
+# Common labels applied to every resource this chart renders.
+# ---------------------------------------------------------------------------
+commonLabels: {}

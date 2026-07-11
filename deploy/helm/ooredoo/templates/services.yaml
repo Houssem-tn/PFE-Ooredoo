@@ -1,0 +1,128 @@
+{{/*
+Every Service below uses a fixed, short, non-release-prefixed name
+(frontend/backend/ocr/mongodb/minio) — see _helpers.tpl's comment on
+ooredoo.labels for why: it lets nginx.conf's baked-in
+"proxy_pass http://backend:8080" and the backend's Compose-derived
+MINIO_URL/OCR_API_URL values resolve unchanged via Kubernetes' own
+same-namespace short-name DNS, with zero image rebuilds. All ClusterIP —
+only the Ingress (ingress.yaml) exposes anything externally, and it only
+ever points at the frontend Service.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "frontend" "context" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ooredoo.selectorLabels" (dict "name" "frontend" "context" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.frontend.service.port }}
+      targetPort: {{ .Values.frontend.containerPort }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.backend.service.port }}
+      targetPort: {{ .Values.backend.containerPort }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocr
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 4 }}
+spec:
+  # Not exposed via Ingress, no NodePort/LoadBalancer — only the backend
+  # ever calls this (OCR_API_URL), matching Compose's own "no host port
+  # mapping by default" for the ocr service.
+  type: ClusterIP
+  selector:
+    {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.ocr.service.port }}
+      targetPort: {{ .Values.ocr.containerPort }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  # Headless-style stable DNS isn't required here (single replica, no
+  # replica set — see KUBERNETES.md "Pod disruption and availability" for
+  # why this chart does not fake a multi-node Mongo replica set) — a
+  # normal ClusterIP Service is enough for the StatefulSet's one pod.
+  selector:
+    {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 4 }}
+  ports:
+    - name: mongodb
+      port: {{ .Values.mongodb.port }}
+      targetPort: {{ .Values.mongodb.port }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.minio.apiPort }}
+      targetPort: {{ .Values.minio.apiPort }}
+
+{{- if .Values.minio.consoleServiceEnabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-console
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 4 }}
+spec:
+  # ClusterIP only — never routed through Ingress (see values.yaml's
+  # consoleServiceEnabled comment). Reach it with:
+  #   kubectl port-forward -n <namespace> svc/minio-console 9001:9001
+  type: ClusterIP
+  selector:
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 4 }}
+  ports:
+    - name: console
+      port: {{ .Values.minio.consolePort }}
+      targetPort: {{ .Values.minio.consolePort }}
+{{- end }}

@@ -1,0 +1,25 @@
+apiVersion: v2
+name: ooredoo
+description: >
+  Ooredoo Field Service Management platform (frontend, backend, OCR,
+  MongoDB, MinIO) — one umbrella chart, environments differentiated by
+  values files (values-staging.yaml / values-production.yaml), not by
+  duplicated templates. See Pfe/KUBERNETES.md for the full rationale.
+type: application
+
+# Chart version (bump on template/structure changes) vs appVersion
+# (informational only here — real workload versions are pinned per
+# component via .Values.<component>.image.tag, since frontend/backend/OCR
+# are three independently versioned images, not one).
+version: 0.1.0
+appVersion: "1.0.0"
+
+keywords:
+  - ooredoo
+  - field-service-management
+  - spring-boot
+  - angular
+  - easyocr
+home: https://github.com/Houssem-tn/PFE-Ooredoo
+maintainers:
+  - name: Houssem-tn

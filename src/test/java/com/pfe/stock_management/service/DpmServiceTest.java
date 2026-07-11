@@ -3,6 +3,7 @@ package com.pfe.stock_management.service;
 import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.MainPackage.Service.NotificationEventService;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.dto.ConfirmDpmRequest;
 import com.pfe.stock_management.dto.DpmItemConfirmation;
 import com.pfe.stock_management.entity.DpmRequest;
@@ -50,6 +51,8 @@ class DpmServiceTest {
     private DpmAllocationService dpmAllocationService;
     @Mock
     private EquipmentInstanceService equipmentInstanceService;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     @AfterEach
     void clearSecurityContext() {
@@ -60,7 +63,7 @@ class DpmServiceTest {
         return new DpmService(
                 dpmRepository, equipmentRepository, userRepository, distributionRepository,
                 sttStockService, stockMovementService, notificationEventService,
-                dpmAllocationService, equipmentInstanceService
+                dpmAllocationService, equipmentInstanceService, businessMetrics
         );
     }
 

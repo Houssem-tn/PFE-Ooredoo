@@ -1,0 +1,39 @@
+{{/*
+Off by default — with the staging default of 1 replica, a PDB with
+minAvailable:1 would simply block all voluntary disruption (node drains,
+cluster upgrades) rather than provide any real availability guarantee.
+Enable alongside raising replicaCount > 1 (see values-production.yaml).
+Not applied to mongodb/minio (single-instance StatefulSets, no replica
+set — see statefulset-mongodb.yaml's comment) or ocr (stateless but
+generally single-replica; enable the same way as frontend/backend if you
+do scale it).
+*/}}
+{{- if and .Values.frontend.podDisruptionBudget.enabled (gt (.Values.frontend.replicaCount | int) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.frontend.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "frontend" "context" $) | nindent 6 }}
+---
+{{- end }}
+{{- if and .Values.backend.podDisruptionBudget.enabled (gt (.Values.backend.replicaCount | int) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.backend.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 6 }}
+{{- end }}

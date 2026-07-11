@@ -1,0 +1,80 @@
+{
+  "title": "Ooredoo - Platform Overview",
+  "uid": "ooredoo-platform-overview",
+  "schemaVersion": 39,
+  "tags": ["ooredoo"],
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Pod availability",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "kube_deployment_status_replicas_available{namespace=~\"$namespace\"}", "legendFormat": "{{deployment}}" },
+        { "expr": "kube_statefulset_status_replicas_ready{namespace=~\"$namespace\"}", "legendFormat": "{{statefulset}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Request rate (backend)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(http_server_requests_seconds_count{namespace=~\"$namespace\", job=\"backend\"}[5m])) by (status)", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "5xx error rate (backend)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(http_server_requests_seconds_count{namespace=~\"$namespace\", job=\"backend\", status=~\"5..\"}[5m])) / sum(rate(http_server_requests_seconds_count{namespace=~\"$namespace\", job=\"backend\"}[5m]))", "legendFormat": "5xx ratio" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "p95 latency (backend)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{namespace=~\"$namespace\", job=\"backend\"}[5m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "CPU usage by pod",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 6 },
+      "targets": [
+        { "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\"}[5m])) by (pod)", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Memory usage by pod",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 6 },
+      "targets": [
+        { "expr": "sum(container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\"}) by (pod)", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Pod restarts (1h)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\"}[1h])", "legendFormat": "{{pod}}/{{container}}" }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      { "name": "namespace", "type": "textbox", "current": { "text": "ooredoo-staging", "value": "ooredoo-staging" }, "label": "Namespace" }
+    ]
+  }
+}

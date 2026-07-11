@@ -4,6 +4,7 @@ import com.pfe.MainPackage.Entity.FileEntityType;
 import com.pfe.MainPackage.Entity.FileMetadata;
 import com.pfe.MainPackage.Entity.FileRole;
 import com.pfe.MainPackage.Repository.FileMetadataRepository;
+import com.pfe.metrics.BusinessMetrics;
 import io.minio.GetObjectArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.BucketExistsArgs;
@@ -42,6 +43,7 @@ public class FileStorageService {
 
     private final MinioClient minioClient;
     private final FileMetadataRepository fileMetadataRepository;
+    private final BusinessMetrics businessMetrics;
 
     @Value("${minio.bucket}")
     private String bucket;
@@ -49,9 +51,14 @@ public class FileStorageService {
     @Value("${app.storage.local-dir:${java.io.tmpdir}/pfe-files}")
     private String localStorageDir;
 
-    public FileStorageService(MinioClient minioClient, FileMetadataRepository fileMetadataRepository) {
+    public FileStorageService(
+            MinioClient minioClient,
+            FileMetadataRepository fileMetadataRepository,
+            BusinessMetrics businessMetrics
+    ) {
         this.minioClient = minioClient;
         this.fileMetadataRepository = fileMetadataRepository;
+        this.businessMetrics = businessMetrics;
     }
 
     public FileMetadata upload(
@@ -118,6 +125,7 @@ public class FileStorageService {
                     objectKey,
                     e
             );
+            businessMetrics.recordMinioUploadFailure();
 
             try {
                 storeLocally(file, objectKey);

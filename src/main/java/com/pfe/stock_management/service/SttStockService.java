@@ -9,6 +9,7 @@ import com.pfe.case_management.dto.UsedEquipmentRequestItem;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.dto.DeclareTechUsageRequest;
 import com.pfe.stock_management.dto.DeclareTechUsageResponse;
 import com.pfe.stock_management.dto.DistributableDpmDto;
@@ -83,6 +84,7 @@ public class SttStockService {
     private final EquipmentUsagePolicyService equipmentUsagePolicy;
     private final EquipmentInstanceService equipmentInstanceService;
     private final EquipmentRepository equipmentRepository;
+    private final BusinessMetrics businessMetrics;
 
     public void applyDpmConfirmation(DpmRequest dpm) {
         SttStock stock = sttStockRepository.findBySttId(dpm.getSttId())
@@ -185,6 +187,7 @@ public class SttStockService {
                         "Equipment not in your stock: " + itemReq.getEquipmentId());
             }
             if (si.getAvailableQuantity() < itemReq.getQuantity()) {
+                businessMetrics.recordStockInsufficient();
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "Insufficient stock for " + si.getEquipmentName()
                                 + ": available=" + si.getAvailableQuantity()

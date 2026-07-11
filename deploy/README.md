@@ -29,3 +29,14 @@ changes rarely.
 `ci-scripts/` is not a mirror of anything — it's backend-only tooling used
 directly by `integration.yml` (currently just `ws_stomp_probe.py`, a STOMP
 CONNECT probe for the WebSocket auth smoke tests; see its own docstring).
+
+`helm/ooredoo/` is the same kind of mirror as the Compose files above —
+the canonical copy lives at `Pfe/deploy/helm/ooredoo/` (see
+`Pfe/KUBERNETES.md`), duplicated here only so `.github/workflows/
+k8s-validate.yml` can check it out and lint/render it in CI. Re-sync with:
+
+```bash
+# from the Pfe/ repo root
+rm -rf APPSTOCK/PFE-Ooredoo/deploy/helm/ooredoo
+cp -r deploy/helm/ooredoo APPSTOCK/PFE-Ooredoo/deploy/helm/ooredoo
+```

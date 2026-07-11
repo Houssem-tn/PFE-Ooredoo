@@ -1,0 +1,294 @@
+name: Kubernetes manifests (validate only)
+
+# Static validation of the Helm chart under deploy/helm/ooredoo — lint,
+# render, schema-validate, and policy-check every commit that touches it.
+# Deliberately its own workflow, not a job inside ci.yml: this never
+# deploys anything (no cluster credentials exist for it to use), so it
+# has no business gating the backend's actual build/test/image pipeline.
+# See Pfe/KUBERNETES.md "CI preparation" and Pfe/OBSERVABILITY_BACKUP.md
+# "Static validation" for the full checklist this implements, and what's
+# intentionally NOT here yet (a real deploy job).
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/k8s-validate.yml"
+  pull_request:
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/k8s-validate.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CHART_DIR: deploy/helm/ooredoo
+  KUBECONFORM_VERSION: v0.6.7
+  KUBE_TARGET_VERSION: "1.31.0"
+  # CI-only dummy secrets purely so `helm template` has something to
+  # render for schema validation — see secrets.yaml's `required` comment.
+  # Never a real secret, never used for an actual install.
+  DUMMY_SECRETS: >-
+    --set-string backend.secrets.jwtSecret=ci-only-dummy-jwt-secret-not-real-0000000000
+    --set-string mongodb.auth.password=ci-only-dummy-mongo-password
+    --set-string minio.auth.accessKey=ci-only-dummy-minio-access
+    --set-string minio.auth.secretKey=ci-only-dummy-minio-secret
+
+jobs:
+  validate:
+    name: Helm lint, render, schema-validate, policy-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.16.4"
+
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -sSL -o kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/kubeconform
+
+      - name: helm lint (default values)
+        run: helm lint "${CHART_DIR}"
+
+      - name: helm lint (staging)
+        run: helm lint "${CHART_DIR}" -f "${CHART_DIR}/values-staging.yaml"
+
+      - name: helm lint (production)
+        run: helm lint "${CHART_DIR}" -f "${CHART_DIR}/values-production.yaml"
+
+      - name: helm template — staging (monitoring + backup disabled, the real defaults)
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            > rendered-staging.yaml
+
+      - name: helm template — production (monitoring + backup disabled, the real defaults)
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-prod \
+            -f "${CHART_DIR}/values-production.yaml" ${DUMMY_SECRETS} \
+            > rendered-production.yaml
+
+      # Exercises every conditional branch monitoring.enabled=false would
+      # otherwise never render at all: ServiceMonitor/PrometheusRule
+      # (Prometheus Operator CRDs) + Grafana dashboard ConfigMaps.
+      - name: helm template — monitoring enabled
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            --set monitoring.enabled=true \
+            --set monitoring.serviceMonitor.enabled=true \
+            --set monitoring.prometheusRules.enabled=true \
+            --set monitoring.grafanaDashboards.enabled=true \
+            > rendered-monitoring.yaml
+
+      # Backup enabled, external S3-compatible destination (the
+      # recommended/default destination.type) — exercises both CronJobs'
+      # "s3" code path.
+      - name: helm template — backup enabled (s3 destination)
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            --set backup.enabled=true \
+            --set backup.mongodb.enabled=true \
+            --set backup.minio.enabled=true \
+            --set backup.destination.type=s3 \
+            --set backup.destination.s3.endpoint=https://s3.example.com \
+            --set backup.destination.s3.bucket=ooredoo-backups \
+            --set backup.destination.s3.existingSecret=backup-s3-creds \
+            > rendered-backup-s3.yaml
+
+      # Backup enabled, PVC-fallback destination — exercises the other
+      # CronJob code path plus the conditional backup-store PVC template.
+      - name: helm template — backup enabled (pvc destination)
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            --set backup.enabled=true \
+            --set backup.mongodb.enabled=true \
+            --set backup.minio.enabled=true \
+            --set backup.destination.type=pvc \
+            --set backup.destination.pvc.enabled=true \
+            > rendered-backup-pvc.yaml
+
+      - name: Confirm no Prometheus CRDs render when monitoring is disabled
+        run: |
+          set -euo pipefail
+          for f in rendered-staging.yaml rendered-production.yaml rendered-backup-s3.yaml rendered-backup-pvc.yaml; do
+            if grep -q "kind: ServiceMonitor\|kind: PrometheusRule" "$f"; then
+              echo "::error::$f rendered a Prometheus Operator CRD even though monitoring is disabled by default — the chart must render cleanly without the CRDs installed"
+              exit 1
+            fi
+          done
+          echo "Confirmed: no ServiceMonitor/PrometheusRule in any monitoring-disabled render."
+
+      - name: Confirm no backup CronJobs render when backup is disabled
+        run: |
+          set -euo pipefail
+          for f in rendered-staging.yaml rendered-production.yaml rendered-monitoring.yaml; do
+            if grep -q "kind: CronJob" "$f"; then
+              echo "::error::$f rendered a CronJob even though backup is disabled by default"
+              exit 1
+            fi
+          done
+          echo "Confirmed: no backup CronJobs in any backup-disabled render."
+
+      # ServiceMonitor/PrometheusRule are monitoring.coreos.com/v1, not a
+      # built-in Kubernetes API — validated against the Prometheus
+      # Operator's real published CRD schemas via the CRDs-catalog project
+      # rather than skipped, so "PrometheusRule syntax" is genuinely
+      # checked, not just assumed valid.
+      - name: kubeconform — staging
+        run: kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" rendered-staging.yaml
+
+      - name: kubeconform — production
+        run: kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" rendered-production.yaml
+
+      - name: kubeconform — monitoring enabled (validates ServiceMonitor/PrometheusRule CRDs)
+        run: |
+          kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered-monitoring.yaml
+
+      - name: kubeconform — backup (s3)
+        run: kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" rendered-backup-s3.yaml
+
+      - name: kubeconform — backup (pvc)
+        run: kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" rendered-backup-pvc.yaml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install policy-check dependency (PyYAML)
+        run: pip install --quiet --disable-pip-version-check pyyaml
+
+      # forbidden :latest tags, missing resource requests/limits, missing
+      # probes (Jobs/CronJobs exempted), privileged containers, missing
+      # security contexts, hostNetwork/hostPath — see ci/policy-check.py.
+      - name: Policy check — staging
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-staging.yaml
+
+      - name: Policy check — production
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-production.yaml
+
+      - name: Policy check — monitoring enabled
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-monitoring.yaml
+
+      - name: Policy check — backup (s3)
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-backup-s3.yaml
+
+      - name: Policy check — backup (pvc)
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-backup-pvc.yaml
+
+      - name: Validate CronJob schedules and restart policies
+        run: |
+          set -euo pipefail
+          python3 - "rendered-backup-s3.yaml" "rendered-backup-pvc.yaml" <<'PYEOF'
+          import sys, yaml
+          for path in sys.argv[1:]:
+              for doc in yaml.safe_load_all(open(path, encoding="utf-8")):
+                  if not doc or doc.get("kind") != "CronJob":
+                      continue
+                  name = doc["metadata"]["name"]
+                  spec = doc["spec"]
+                  # 5-field cron schedule, minimal sanity check (real
+                  # semantic validation happens on the real Kubernetes API
+                  # server at apply time — this catches the "obviously
+                  # broken" class of mistake, e.g. a stray Helm templating
+                  # artifact left in the schedule string).
+                  fields = spec["schedule"].split()
+                  assert len(fields) == 5, f"{name}: schedule '{spec['schedule']}' does not have 5 fields"
+                  assert spec.get("concurrencyPolicy") == "Forbid", f"{name}: concurrencyPolicy must be Forbid (prevents overlapping backup runs)"
+                  restart_policy = spec["jobTemplate"]["spec"]["template"]["spec"]["restartPolicy"]
+                  assert restart_policy in ("OnFailure", "Never"), f"{name}: restartPolicy '{restart_policy}' invalid for a Job pod template"
+                  print(f"OK: {name} schedule='{spec['schedule']}' concurrencyPolicy=Forbid restartPolicy={restart_policy}")
+          PYEOF
+
+      - name: Confirm no restore Jobs/CronJobs are scheduled automatically
+        run: |
+          set -euo pipefail
+          # mongodb-restore.sh / minio-restore.sh / backup-verify.sh must
+          # only ever be invoked manually by an operator — fail CI if any
+          # rendered CronJob/Job references one, which would mean a
+          # restore got wired into automatic scheduling.
+          found=0
+          for f in rendered-backup-s3.yaml rendered-backup-pvc.yaml rendered-monitoring.yaml rendered-staging.yaml rendered-production.yaml; do
+            if grep -qE "mongodb-restore\.sh|minio-restore\.sh|backup-verify\.sh" "$f"; then
+              echo "::error::$f references a manual restore/verify script from a rendered workload — these must never be automated"
+              found=1
+            fi
+          done
+          if [ "$found" -eq 1 ]; then
+            exit 1
+          fi
+          echo "Confirmed: no rendered workload references the manual restore/verify scripts."
+
+      - name: Check for hardcoded credentials in rendered manifests
+        run: |
+          set -euo pipefail
+          # The only real secret-shaped strings allowed anywhere in a
+          # render are the CI-only dummy values this workflow itself
+          # passed in via --set-string (DUMMY_SECRETS above) — anything
+          # else matching a "real"-looking pattern would mean a value got
+          # hardcoded instead of sourced from a Secret.
+          for f in rendered-*.yaml; do
+            if grep -Ev "ci-only-dummy-|CHANGE_ME" "$f" | grep -qE "(password|secret|access[_-]?key)['\"]?\s*:\s*['\"][^$].{6,}"; then
+              echo "::warning::$f contains a value that looks credential-shaped outside the known CI dummies — review manually (this is a heuristic, not a hard failure)"
+            fi
+          done
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: shellcheck — all backup/init/restore scripts
+        run: shellcheck -s sh "${CHART_DIR}"/scripts/*.sh
+
+      - name: Validate Grafana dashboard JSON syntax
+        run: |
+          set -euo pipefail
+          for f in "${CHART_DIR}"/dashboards/*.json; do
+            python3 -c "import json,sys; json.load(open(sys.argv[1])); print('OK:', sys.argv[1])" "$f"
+          done
+
+      - name: Trivy config scan (staging)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: rendered-staging.yaml
+          severity: CRITICAL,HIGH
+          exit-code: "0" # advisory — see Pfe/OBSERVABILITY_BACKUP.md "Static validation" for the accepted findings this chart currently has and why (documented per-component readOnlyRootFilesystem exceptions)
+
+      - name: Trivy config scan (monitoring + backup enabled)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: rendered-backup-s3.yaml
+          severity: CRITICAL,HIGH
+          exit-code: "0" # advisory, same reasoning as above
+
+      - name: Upload rendered manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-k8s-manifests
+          path: |
+            rendered-staging.yaml
+            rendered-production.yaml
+            rendered-monitoring.yaml
+            rendered-backup-s3.yaml
+            rendered-backup-pvc.yaml
+          retention-days: 14

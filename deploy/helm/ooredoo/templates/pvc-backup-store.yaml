@@ -1,0 +1,25 @@
+{{/*
+Staging-only fallback destination (see values.yaml's backup.destination
+comment on why an external S3-compatible target is the default
+assumption) — a single PVC shared by both backup CronJobs, deliberately
+separate from mongodb-data/minio-data so a backup never lives on the
+same volume as what it's backing up, even in this fallback mode.
+*/}}
+{{- if and .Values.backup.enabled (eq .Values.backup.destination.type "pvc") (or .Values.backup.mongodb.enabled .Values.backup.minio.enabled) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-store
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.backup.destination.pvc.accessMode }}
+  {{- if .Values.backup.destination.pvc.storageClassName }}
+  storageClassName: {{ .Values.backup.destination.pvc.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.destination.pvc.size }}
+{{- end }}

@@ -9,6 +9,7 @@ import com.pfe.plainte_analytics.model.PlainteImportProcessingMode;
 import com.pfe.plainte_analytics.model.PlainteImportSharedResult;
 import com.pfe.plainte_analytics.model.PlainteImportSharedRow;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.metrics.BusinessMetrics;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
@@ -75,6 +76,7 @@ public class PlainteAnalyticsImportService {
     private final PlainteDistributionEligibilityService eligibilityService;
     private final PlainteAnalyticsBatchProcessingService batchProcessingService;
     private final PlainteDistributionProcessingService distributionProcessingService;
+    private final BusinessMetrics businessMetrics;
 
     public AdminPlainteAnalyticsPreviewResponse preview(MultipartFile file, String uploadedBy) {
         long totalStart = System.nanoTime();
@@ -127,55 +129,67 @@ public class PlainteAnalyticsImportService {
             PlainteImportProcessingMode mode
     ) {
         long totalStart = System.nanoTime();
-        PlainteImportSharedResult sharedResult = parseWorkbook(file, uploadedBy);
+        // Previously nothing here caught a failure partway through parsing/
+        // storing/distribution — any exception already propagated to the
+        // caller unchanged (that behavior is preserved: this try/finally
+        // only observes and re-throws, it never swallows anything), it
+        // just wasn't recorded as a metric. See businessMetrics.
+        try {
+            PlainteImportSharedResult sharedResult = parseWorkbook(file, uploadedBy);
 
-        PlainteAnalyticsBatchProcessingService.StoredAnalyticsBatch storedBatch = null;
-        if (mode.analyticsEnabled()) {
-            storedBatch = batchProcessingService.store(sharedResult, uploadedBy);
+            PlainteAnalyticsBatchProcessingService.StoredAnalyticsBatch storedBatch = null;
+            if (mode.analyticsEnabled()) {
+                storedBatch = batchProcessingService.store(sharedResult, uploadedBy);
+            }
+
+            var distributionSummary = mode.distributionEnabled()
+                    ? distributionProcessingService.process(sharedResult, uploadedBy)
+                    : null;
+
+            Instant uploadedAt = storedBatch != null && storedBatch.uploadedAt() != null
+                    ? storedBatch.uploadedAt()
+                    : Instant.now();
+
+            AdminPlainteAnalyticsImportResponse response = new AdminPlainteAnalyticsImportResponse(
+                    mode,
+                    storedBatch != null ? storedBatch.batchId() : null,
+                    sharedResult.sourceFileName(),
+                    sharedResult.totalRows(),
+                    sharedResult.processableRows(),
+                    storedBatch != null ? storedBatch.insertedRows() : 0,
+                    sharedResult.validNewRows(),
+                    sharedResult.invalidRows(),
+                    sharedResult.duplicateRows(),
+                    sharedResult.distinctStts(),
+                    sharedResult.distinctGovernorates(),
+                    sharedResult.enCoursRows(),
+                    sharedResult.effectueRows(),
+                    sharedResult.termineRows(),
+                    sharedResult.actionableRows(),
+                    distributionSummary,
+                    uploadedAt
+            );
+
+            log.info(
+                    "plainte_import_commit file={} uploadedBy={} mode={} batchId={} insertedRows={} processableRows={} actionableRows={} duplicateRows={} invalidRows={} totalMs={}",
+                    sharedResult.sourceFileName(),
+                    uploadedBy,
+                    mode,
+                    storedBatch != null ? storedBatch.batchId() : null,
+                    storedBatch != null ? storedBatch.insertedRows() : 0,
+                    sharedResult.processableRows(),
+                    sharedResult.actionableRows(),
+                    sharedResult.duplicateRows(),
+                    sharedResult.invalidRows(),
+                    elapsedMs(totalStart)
+            );
+            return response;
+        } catch (RuntimeException e) {
+            businessMetrics.recordExcelImportFailure("plainte");
+            throw e;
+        } finally {
+            businessMetrics.recordExcelImportDuration("plainte", System.nanoTime() - totalStart);
         }
-
-        var distributionSummary = mode.distributionEnabled()
-                ? distributionProcessingService.process(sharedResult, uploadedBy)
-                : null;
-
-        Instant uploadedAt = storedBatch != null && storedBatch.uploadedAt() != null
-                ? storedBatch.uploadedAt()
-                : Instant.now();
-
-        AdminPlainteAnalyticsImportResponse response = new AdminPlainteAnalyticsImportResponse(
-                mode,
-                storedBatch != null ? storedBatch.batchId() : null,
-                sharedResult.sourceFileName(),
-                sharedResult.totalRows(),
-                sharedResult.processableRows(),
-                storedBatch != null ? storedBatch.insertedRows() : 0,
-                sharedResult.validNewRows(),
-                sharedResult.invalidRows(),
-                sharedResult.duplicateRows(),
-                sharedResult.distinctStts(),
-                sharedResult.distinctGovernorates(),
-                sharedResult.enCoursRows(),
-                sharedResult.effectueRows(),
-                sharedResult.termineRows(),
-                sharedResult.actionableRows(),
-                distributionSummary,
-                uploadedAt
-        );
-
-        log.info(
-                "plainte_import_commit file={} uploadedBy={} mode={} batchId={} insertedRows={} processableRows={} actionableRows={} duplicateRows={} invalidRows={} totalMs={}",
-                sharedResult.sourceFileName(),
-                uploadedBy,
-                mode,
-                storedBatch != null ? storedBatch.batchId() : null,
-                storedBatch != null ? storedBatch.insertedRows() : 0,
-                sharedResult.processableRows(),
-                sharedResult.actionableRows(),
-                sharedResult.duplicateRows(),
-                sharedResult.invalidRows(),
-                elapsedMs(totalStart)
-        );
-        return response;
     }
 
     private PlainteImportSharedResult parseWorkbook(MultipartFile file, String uploadedBy) {

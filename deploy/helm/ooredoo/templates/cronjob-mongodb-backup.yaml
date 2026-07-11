@@ -1,0 +1,157 @@
+{{/*
+mongodump into a shared emptyDir (initContainer, mongo:7.0 — same major
+version as the server, since mongodump/mongorestore compatibility is
+version-sensitive), then a second container uploads it to the configured
+destination and prunes anything older than retentionDays. Two containers
+rather than one shell script juggling both tools, because no single
+official image ships both mongodump and an S3-capable client — see
+OBSERVABILITY_BACKUP.md "MongoDB backup strategy" for the full design
+and why this Job never writes to the mongodb-data PVC itself (a backup
+living on the same volume as what it's backing up isn't a backup).
+concurrencyPolicy: Forbid is what actually prevents overlapping runs
+(not just a convention) — a run that's still going when the next
+schedule fires is skipped, not queued. Script bodies live in scripts/
+(shellcheck-able as real files, no Helm templating inside them — every
+value comes in via env var instead) — see scripts/mongodb-dump.sh and
+scripts/mongodb-upload-{s3,pvc}.sh.
+*/}}
+{{- if and .Values.backup.enabled .Values.backup.mongodb.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mongodb-backup
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "mongodb-backup" "context" $) | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.mongodb.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ .Values.backup.mongodb.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "ooredoo.labels" . | nindent 12 }}
+            {{- include "ooredoo.selectorLabels" (dict "name" "mongodb-backup" "context" $) | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          {{- if .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml .Values.imagePullSecrets | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: mongodump
+              image: "{{ .Values.backup.mongodb.image.repository }}:{{ .Values.backup.mongodb.image.tag }}"
+              imagePullPolicy: {{ .Values.backup.mongodb.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: MONGODB_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.mongodb.auth.existingSecret | default "mongodb-secret" }}
+                      key: mongodb-username
+                - name: MONGODB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.mongodb.auth.existingSecret | default "mongodb-secret" }}
+                      key: mongodb-password
+                - name: MONGODB_PORT
+                  value: {{ .Values.mongodb.port | quote }}
+                - name: MONGODB_DATABASE
+                  value: {{ .Values.mongodb.auth.database | quote }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+{{ .Files.Get "scripts/mongodb-dump.sh" | indent 18 }}
+              resources:
+                {{- toYaml .Values.backup.mongodb.resources | nindent 16 }}
+              volumeMounts:
+                - name: backup-tmp
+                  mountPath: /backup
+          containers:
+            {{- if eq .Values.backup.destination.type "s3" }}
+            - name: upload
+              image: "{{ .Values.minio.init.image.repository }}:{{ .Values.minio.init.image.tag }}"
+              imagePullPolicy: {{ .Values.minio.init.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: DEST_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "backup.destination.s3.existingSecret is required when backup.mongodb.enabled and destination.type=s3" .Values.backup.destination.s3.existingSecret }}
+                      key: access-key
+                - name: DEST_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.destination.s3.existingSecret }}
+                      key: secret-key
+                - name: DEST_ENDPOINT
+                  value: {{ .Values.backup.destination.s3.endpoint | quote }}
+                - name: DEST_BUCKET
+                  value: {{ .Values.backup.destination.s3.bucket | quote }}
+                - name: RETENTION_DAYS
+                  value: {{ .Values.backup.mongodb.retentionDays | quote }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+{{ .Files.Get "scripts/mongodb-upload-s3.sh" | indent 18 }}
+              resources:
+                {{- toYaml .Values.backup.mongodb.resources | nindent 16 }}
+              volumeMounts:
+                - name: backup-tmp
+                  mountPath: /backup
+                  readOnly: true
+            {{- else }}
+            - name: upload
+              image: "{{ .Values.backup.mongodb.image.repository }}:{{ .Values.backup.mongodb.image.tag }}"
+              imagePullPolicy: {{ .Values.backup.mongodb.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: RETENTION_DAYS
+                  value: {{ .Values.backup.mongodb.retentionDays | quote }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+{{ .Files.Get "scripts/mongodb-upload-pvc.sh" | indent 18 }}
+              resources:
+                {{- toYaml .Values.backup.mongodb.resources | nindent 16 }}
+              volumeMounts:
+                - name: backup-tmp
+                  mountPath: /backup
+                  readOnly: true
+                - name: backup-store
+                  mountPath: /backup-store
+            {{- end }}
+          volumes:
+            - name: backup-tmp
+              emptyDir: {}
+            {{- if eq .Values.backup.destination.type "pvc" }}
+            - name: backup-store
+              persistentVolumeClaim:
+                claimName: backup-store
+            {{- end }}
+{{- end }}

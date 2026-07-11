@@ -1,0 +1,26 @@
+{{/*
+One ConfigMap per file under dashboards/*.json, each carrying the
+grafana_dashboard: "1" label — the sidecar convention
+kube-prometheus-stack's Grafana ships with by default (grafana/
+grafana's `sidecar.dashboards.enabled: true`), which watches ConfigMaps
+with this label across the cluster and auto-imports them. No Grafana
+API call, no Grafana credentials needed by this chart at all — see
+OBSERVABILITY_BACKUP.md "Dashboards".
+*/}}
+{{- if and .Values.monitoring.enabled .Values.monitoring.grafanaDashboards.enabled }}
+{{- range $path, $bytes := .Files.Glob "dashboards/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-{{ $name }}
+  namespace: {{ include "ooredoo.namespace" $ }}
+  labels:
+    {{- include "ooredoo.labels" $ | nindent 4 }}
+    {{ $.Values.monitoring.grafanaDashboards.label }}: {{ $.Values.monitoring.grafanaDashboards.labelValue | quote }}
+data:
+  {{ $name }}.json: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

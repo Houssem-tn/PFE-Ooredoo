@@ -9,6 +9,7 @@ import com.pfe.activation_analytics.model.ActivationImportProcessingMode;
 import com.pfe.activation_analytics.model.ActivationImportSharedResult;
 import com.pfe.activation_analytics.model.ActivationImportSharedRow;
 import com.pfe.case_management.enums.CaseType;
+import com.pfe.metrics.BusinessMetrics;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.EncryptedDocumentException;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
@@ -75,6 +76,7 @@ public class ActivationAnalyticsImportService {
     private final ActivationDistributionEligibilityService eligibilityService;
     private final ActivationAnalyticsBatchProcessingService batchProcessingService;
     private final ActivationDistributionProcessingService distributionProcessingService;
+    private final BusinessMetrics businessMetrics;
 
     public AdminActivationAnalyticsPreviewResponse preview(MultipartFile file, String uploadedBy) {
         long totalStart = System.nanoTime();
@@ -127,55 +129,65 @@ public class ActivationAnalyticsImportService {
             ActivationImportProcessingMode mode
     ) {
         long totalStart = System.nanoTime();
-        ActivationImportSharedResult sharedResult = parseWorkbook(file, uploadedBy);
+        // See PlainteAnalyticsImportService.importFile's identical wrap for
+        // why: observes and re-throws, never swallows — the exact same
+        // exceptions propagate as before this was added.
+        try {
+            ActivationImportSharedResult sharedResult = parseWorkbook(file, uploadedBy);
 
-        ActivationAnalyticsBatchProcessingService.StoredAnalyticsBatch storedBatch = null;
-        if (mode.analyticsEnabled()) {
-            storedBatch = batchProcessingService.store(sharedResult, uploadedBy);
+            ActivationAnalyticsBatchProcessingService.StoredAnalyticsBatch storedBatch = null;
+            if (mode.analyticsEnabled()) {
+                storedBatch = batchProcessingService.store(sharedResult, uploadedBy);
+            }
+
+            var distributionSummary = mode.distributionEnabled()
+                    ? distributionProcessingService.process(sharedResult, uploadedBy)
+                    : null;
+
+            Instant uploadedAt = storedBatch != null && storedBatch.uploadedAt() != null
+                    ? storedBatch.uploadedAt()
+                    : Instant.now();
+
+            AdminActivationAnalyticsImportResponse response = new AdminActivationAnalyticsImportResponse(
+                    mode,
+                    storedBatch != null ? storedBatch.batchId() : null,
+                    sharedResult.sourceFileName(),
+                    sharedResult.totalRows(),
+                    sharedResult.processableRows(),
+                    storedBatch != null ? storedBatch.insertedRows() : 0,
+                    sharedResult.validNewRows(),
+                    sharedResult.invalidRows(),
+                    sharedResult.duplicateRows(),
+                    sharedResult.distinctStts(),
+                    sharedResult.distinctGovernorates(),
+                    sharedResult.enCoursRows(),
+                    sharedResult.effectueRows(),
+                    sharedResult.termineRows(),
+                    sharedResult.actionableRows(),
+                    distributionSummary,
+                    uploadedAt
+            );
+
+            log.info(
+                    "activation_import_commit file={} uploadedBy={} mode={} batchId={} insertedRows={} processableRows={} actionableRows={} duplicateRows={} invalidRows={} totalMs={}",
+                    sharedResult.sourceFileName(),
+                    uploadedBy,
+                    mode,
+                    storedBatch != null ? storedBatch.batchId() : null,
+                    storedBatch != null ? storedBatch.insertedRows() : 0,
+                    sharedResult.processableRows(),
+                    sharedResult.actionableRows(),
+                    sharedResult.duplicateRows(),
+                    sharedResult.invalidRows(),
+                    elapsedMs(totalStart)
+            );
+            return response;
+        } catch (RuntimeException e) {
+            businessMetrics.recordExcelImportFailure("activation");
+            throw e;
+        } finally {
+            businessMetrics.recordExcelImportDuration("activation", System.nanoTime() - totalStart);
         }
-
-        var distributionSummary = mode.distributionEnabled()
-                ? distributionProcessingService.process(sharedResult, uploadedBy)
-                : null;
-
-        Instant uploadedAt = storedBatch != null && storedBatch.uploadedAt() != null
-                ? storedBatch.uploadedAt()
-                : Instant.now();
-
-        AdminActivationAnalyticsImportResponse response = new AdminActivationAnalyticsImportResponse(
-                mode,
-                storedBatch != null ? storedBatch.batchId() : null,
-                sharedResult.sourceFileName(),
-                sharedResult.totalRows(),
-                sharedResult.processableRows(),
-                storedBatch != null ? storedBatch.insertedRows() : 0,
-                sharedResult.validNewRows(),
-                sharedResult.invalidRows(),
-                sharedResult.duplicateRows(),
-                sharedResult.distinctStts(),
-                sharedResult.distinctGovernorates(),
-                sharedResult.enCoursRows(),
-                sharedResult.effectueRows(),
-                sharedResult.termineRows(),
-                sharedResult.actionableRows(),
-                distributionSummary,
-                uploadedAt
-        );
-
-        log.info(
-                "activation_import_commit file={} uploadedBy={} mode={} batchId={} insertedRows={} processableRows={} actionableRows={} duplicateRows={} invalidRows={} totalMs={}",
-                sharedResult.sourceFileName(),
-                uploadedBy,
-                mode,
-                storedBatch != null ? storedBatch.batchId() : null,
-                storedBatch != null ? storedBatch.insertedRows() : 0,
-                sharedResult.processableRows(),
-                sharedResult.actionableRows(),
-                sharedResult.duplicateRows(),
-                sharedResult.invalidRows(),
-                elapsedMs(totalStart)
-        );
-        return response;
     }
 
     private ActivationImportSharedResult parseWorkbook(MultipartFile file, String uploadedBy) {

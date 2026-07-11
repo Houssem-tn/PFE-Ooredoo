@@ -7,6 +7,7 @@ import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.entity.TechStock;
 import com.pfe.stock_management.model.TechStockItem;
 import com.pfe.MainPackage.Repository.UserRepository;
@@ -75,6 +76,8 @@ class SttStockServiceCaseUsageTest {
     private EquipmentInstanceService equipmentInstanceService;
     @Mock
     private EquipmentRepository equipmentRepository;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     @Test
     void syncCaseUsageForWorkSubmission_decrementsStockAndRecordsMovement() {
@@ -218,7 +221,8 @@ class SttStockServiceCaseUsageTest {
                 dpmAllocationService,
                 equipmentUsagePolicy,
                 equipmentInstanceService,
-                equipmentRepository
+                equipmentRepository,
+                businessMetrics
         );
     }
 

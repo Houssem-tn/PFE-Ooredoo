@@ -1,0 +1,293 @@
+{{/*
+Availability alerts use kube-state-metrics' kube_deployment_status_
+replicas_available / kube_statefulset_status_replicas_ready rather than
+each workload's own `up` metric — this works uniformly for all 5
+workloads (including mongodb/minio, which don't expose their own
+Prometheus endpoint / have a ServiceMonitor in this chart) since
+kube-state-metrics is a standard, always-bundled part of
+kube-prometheus-stack and directly reflects each workload's own
+readinessProbe (see the relevant deployment-*.yaml/statefulset-*.yaml
+probe definitions this depends on). Reliability/business alerts use the
+custom metrics from BusinessMetrics.java / app/metrics.py — see
+OBSERVABILITY_BACKUP.md "Alert rules" for the reasoning behind every
+`for:` duration below (chosen against the task's own "do not page on
+every temporary failure").
+*/}}
+{{- if and .Values.monitoring.enabled .Values.monitoring.prometheusRules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ooredoo-alerts
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRules.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: ooredoo.availability
+      rules:
+        - alert: BackendUnavailable
+          expr: kube_deployment_status_replicas_available{namespace="{{ include "ooredoo.namespace" . }}", deployment="backend"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backend has zero available replicas"
+            description: "No backend pod has been Ready for 5 minutes in {{ include "ooredoo.namespace" . }}."
+
+        - alert: FrontendUnavailable
+          expr: kube_deployment_status_replicas_available{namespace="{{ include "ooredoo.namespace" . }}", deployment="frontend"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Frontend has zero available replicas"
+            description: "No frontend pod has been Ready for 5 minutes in {{ include "ooredoo.namespace" . }}."
+
+        - alert: OcrUnavailable
+          expr: kube_deployment_status_replicas_available{namespace="{{ include "ooredoo.namespace" . }}", deployment="ocr"} == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OCR has zero available replicas"
+            description: "No OCR pod has been Ready for 10 minutes in {{ include "ooredoo.namespace" . }} — model load can legitimately take a couple of minutes, so this uses a longer window than backend/frontend."
+
+        - alert: MongoDBUnavailable
+          expr: kube_statefulset_status_replicas_ready{namespace="{{ include "ooredoo.namespace" . }}", statefulset="mongodb"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "MongoDB is not Ready"
+            description: "The mongodb StatefulSet has had zero ready replicas for 3 minutes in {{ include "ooredoo.namespace" . }} — backend readiness will also be failing."
+
+        - alert: MinIOUnavailable
+          expr: kube_statefulset_status_replicas_ready{namespace="{{ include "ooredoo.namespace" . }}", statefulset="minio"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "MinIO is not Ready"
+            description: "The minio StatefulSet has had zero ready replicas for 3 minutes in {{ include "ooredoo.namespace" . }} — uploads/downloads will be failing."
+
+    - name: ooredoo.reliability
+      rules:
+        - alert: BackendHighErrorRate
+          expr: |
+            sum(rate(http_server_requests_seconds_count{namespace="{{ include "ooredoo.namespace" . }}", job="backend", status=~"5.."}[5m]))
+            /
+            sum(rate(http_server_requests_seconds_count{namespace="{{ include "ooredoo.namespace" . }}", job="backend"}[5m]))
+            > {{ .Values.monitoring.prometheusRules.backend.errorRateThreshold }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend 5xx rate above {{ .Values.monitoring.prometheusRules.backend.errorRateThreshold | mul 100 }}%"
+            description: "Sustained 5xx rate over 5 minutes — check backend logs in Loki filtered by level=ERROR."
+
+        - alert: BackendHighLatency
+          expr: histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{namespace="{{ include "ooredoo.namespace" . }}", job="backend"}[5m])) by (le)) > {{ .Values.monitoring.prometheusRules.backend.latencyP95Seconds }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backend p95 latency above {{ .Values.monitoring.prometheusRules.backend.latencyP95Seconds }}s"
+            description: "p95 request latency has been elevated for 10 minutes."
+
+        - alert: OcrHighFailureRate
+          expr: |
+            sum(rate(ocr_requests_total{namespace="{{ include "ooredoo.namespace" . }}", status="failure"}[10m]))
+            /
+            sum(rate(ocr_requests_total{namespace="{{ include "ooredoo.namespace" . }}"}[10m]))
+            > {{ .Values.monitoring.prometheusRules.ocr.failureRateThreshold }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OCR failure rate above {{ .Values.monitoring.prometheusRules.ocr.failureRateThreshold | mul 100 }}%"
+            description: "Excludes invalid_input (bad uploads aren't an OCR-service problem) — only real extraction failures."
+
+        - alert: PodRepeatedRestarts
+          expr: increase(kube_pod_container_status_restarts_total{namespace="{{ include "ooredoo.namespace" . }}"}[1h]) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{`{{ $labels.pod }}`}} restarted more than 3 times in the last hour"
+            description: "Repeated restarts usually mean a crash loop, not a one-off — check `kubectl logs --previous`."
+
+        - alert: PodStuckNotReady
+          expr: kube_pod_status_ready{namespace="{{ include "ooredoo.namespace" . }}", condition="false"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{`{{ $labels.pod }}`}} has not become Ready in 15 minutes"
+
+        - alert: ContainerOOMKilled
+          expr: increase(kube_pod_container_status_restarts_total{namespace="{{ include "ooredoo.namespace" . }}"}[15m]) > 0 and kube_pod_container_status_last_terminated_reason{namespace="{{ include "ooredoo.namespace" . }}", reason="OOMKilled"} == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Container {{`{{ $labels.container }}`}} in pod {{`{{ $labels.pod }}`}} was OOMKilled"
+            description: "Resource limits may be too low — see values.yaml's <component>.resources.limits.memory."
+
+        - alert: PersistentVolumeNearlyFull
+          expr: |
+            100 * (1 - kubelet_volume_stats_available_bytes{namespace="{{ include "ooredoo.namespace" . }}"} / kubelet_volume_stats_capacity_bytes{namespace="{{ include "ooredoo.namespace" . }}"})
+            > {{ .Values.monitoring.prometheusRules.pvc.usageWarningPercent }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{`{{ $labels.persistentvolumeclaim }}`}} is above {{ .Values.monitoring.prometheusRules.pvc.usageWarningPercent }}% full"
+
+        - alert: PersistentVolumeCriticallyFull
+          expr: |
+            100 * (1 - kubelet_volume_stats_available_bytes{namespace="{{ include "ooredoo.namespace" . }}"} / kubelet_volume_stats_capacity_bytes{namespace="{{ include "ooredoo.namespace" . }}"})
+            > {{ .Values.monitoring.prometheusRules.pvc.usageCriticalPercent }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PVC {{`{{ $labels.persistentvolumeclaim }}`}} is above {{ .Values.monitoring.prometheusRules.pvc.usageCriticalPercent }}% full"
+            description: "mongodb-data/minio-data filling up will hard-stop writes soon — expand the PVC or free space."
+
+    - name: ooredoo.business
+      rules:
+        - alert: RisingSlaBreachRate
+          expr: increase(cases_sla_breached_total{namespace="{{ include "ooredoo.namespace" . }}"}[1h]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than 10 SLA breaches in the last hour"
+            description: "Could indicate a systemic assignment/routing problem rather than isolated late RDVs — check case_assignment_failures_total too."
+
+        - alert: RepeatedExcelImportFailures
+          expr: increase(excel_import_failures_total{namespace="{{ include "ooredoo.namespace" . }}"}[1h]) >= 3
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "3+ Excel/DMS import failures in the last hour"
+
+        - alert: StockOperationFailureSpike
+          expr: increase(stock_insufficient_total{namespace="{{ include "ooredoo.namespace" . }}"}[1h]) > 20
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Unusually high stock-insufficiency rejection rate"
+            description: "May indicate a real stock shortage (operational issue, not a bug) — cross-check with the Stock dashboard before treating as a system fault."
+
+        - alert: NotificationDeliveryFailures
+          expr: increase(notification_delivery_failures_total{namespace="{{ include "ooredoo.namespace" . }}"}[15m]) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "5+ notification delivery failures in 15 minutes"
+
+        - alert: MinioUploadFailureSpike
+          expr: increase(minio_upload_failures_total{namespace="{{ include "ooredoo.namespace" . }}"}[15m]) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "5+ file uploads fell back to local disk storage in 15 minutes"
+            description: "Each occurrence means MinIO itself rejected the write — check MinIOUnavailable/PVC alerts first."
+
+    - name: ooredoo.infrastructure
+      rules:
+        - alert: HighCpuUsage
+          expr: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="{{ include "ooredoo.namespace" . }}", container!=""}[5m])) by (pod)
+            / sum(kube_pod_container_resource_limits{namespace="{{ include "ooredoo.namespace" . }}", resource="cpu"}) by (pod)
+            > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{`{{ $labels.pod }}`}} above 90% of its CPU limit for 15 minutes"
+
+        - alert: HighMemoryUsage
+          expr: |
+            sum(container_memory_working_set_bytes{namespace="{{ include "ooredoo.namespace" . }}", container!=""}) by (pod)
+            / sum(kube_pod_container_resource_limits{namespace="{{ include "ooredoo.namespace" . }}", resource="memory"}) by (pod)
+            > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{`{{ $labels.pod }}`}} above 90% of its memory limit for 10 minutes"
+            description: "Precedes an OOMKill — see ContainerOOMKilled."
+
+        - alert: NodeDiskPressure
+          expr: kube_node_status_condition{condition="DiskPressure", status="true"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{`{{ $labels.node }}`}} reports DiskPressure"
+
+        {{- if .Values.ingress.tls.certManager }}
+        - alert: CertificateExpiringWarning
+          expr: certmanager_certificate_expiration_timestamp_seconds{namespace="{{ include "ooredoo.namespace" . }}"} - time() < 14 * 86400
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "TLS certificate {{`{{ $labels.name }}`}} expires in under 14 days"
+            description: "cert-manager should auto-renew before this fires under normal operation — a firing alert means renewal itself is failing, not just 'a cert is aging'."
+        {{- end }}
+
+    - name: ooredoo.backup
+      rules:
+        {{- if .Values.backup.mongodb.enabled }}
+        - alert: MongoDBBackupCronJobFailed
+          expr: kube_job_status_failed{namespace="{{ include "ooredoo.namespace" . }}", job_name=~"mongodb-backup-.*"} > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "MongoDB backup Job failed"
+            description: "kubectl logs -n {{ include "ooredoo.namespace" . }} -l app.kubernetes.io/name=mongodb-backup --tail=100"
+
+        - alert: MongoDBBackupMissed
+          # Complements the Job-status alert above per the task's own "avoid
+          # relying only on CronJob pod status" — this fires purely on
+          # elapsed time since kube_cronjob_status_last_successful_time,
+          # independent of how the backup script itself reported (exit
+          # code, or a genuinely stuck/never-scheduled CronJob).
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="{{ include "ooredoo.namespace" . }}", cronjob="mongodb-backup"} > 90000
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful MongoDB backup in over 25 hours"
+        {{- end }}
+
+        {{- if .Values.backup.minio.enabled }}
+        - alert: MinIOBackupCronJobFailed
+          expr: kube_job_status_failed{namespace="{{ include "ooredoo.namespace" . }}", job_name=~"minio-backup-.*"} > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "MinIO backup Job failed"
+            description: "kubectl logs -n {{ include "ooredoo.namespace" . }} -l app.kubernetes.io/name=minio-backup --tail=100"
+
+        - alert: MinIOBackupMissed
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="{{ include "ooredoo.namespace" . }}", cronjob="minio-backup"} > 90000
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful MinIO backup in over 25 hours"
+        {{- end }}
+{{- end }}

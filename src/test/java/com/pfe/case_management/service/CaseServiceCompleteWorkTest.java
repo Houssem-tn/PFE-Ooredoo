@@ -13,6 +13,7 @@ import com.pfe.case_management.enums.ExecutionMode;
 import com.pfe.case_management.enums.ExecutorRole;
 import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.material_return.MaterialReturnService;
 import com.pfe.stock_management.service.EquipmentUsagePolicyService;
 import com.pfe.stock_management.service.SttStockService;
@@ -58,6 +59,8 @@ class CaseServiceCompleteWorkTest {
     private MaterialReturnService materialReturnService;
     @Mock
     private EquipmentUsagePolicyService equipmentUsagePolicy;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     @AfterEach
     void clearSecurityContext() {
@@ -114,7 +117,8 @@ class CaseServiceCompleteWorkTest {
                 casePdfExportService,
                 sttStockService,
                 materialReturnService,
-                equipmentUsagePolicy
+                equipmentUsagePolicy,
+                businessMetrics
         );
 
         CompleteWorkRequest request = new CompleteWorkRequest(

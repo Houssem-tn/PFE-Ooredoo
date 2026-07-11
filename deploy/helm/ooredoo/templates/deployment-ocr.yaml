@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.ocr.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ooredoo.labels" . | nindent 8 }}
+        {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 8 }}
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.ocr.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.ocr.podSecurityContext | nindent 8 }}
+      containers:
+        - name: ocr
+          image: "{{ .Values.ocr.image.repository }}:{{ .Values.ocr.image.tag }}"
+          imagePullPolicy: {{ .Values.ocr.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.ocr.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ocr.containerPort }}
+          env:
+            # --- Observability (see app/logging_config.py / OBSERVABILITY_BACKUP.md "Logging fields") ---
+            - name: LOG_JSON
+              value: {{ .Values.logging.json | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+            - name: APP_ENV
+              value: {{ .Values.backend.springProfile | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # Model initialization (two EasyOCR Reader instances, loaded at
+          # Python import time — see EacyOCR/app/ocr_engine.py) can take
+          # well over a minute cold; the startupProbe absorbs that instead
+          # of racing it against liveness/readiness.
+          startupProbe:
+            httpGet:
+              path: {{ .Values.ocr.probes.path }}
+              port: {{ .Values.ocr.probes.port }}
+            failureThreshold: {{ .Values.ocr.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.ocr.probes.startup.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.ocr.probes.path }}
+              port: {{ .Values.ocr.probes.port }}
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.ocr.probes.path }}
+              port: {{ .Values.ocr.probes.port }}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.ocr.resources | nindent 12 }}
+          volumeMounts:
+            {{- range .Values.ocr.emptyDirs }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+            {{- end }}
+      volumes:
+        {{- range .Values.ocr.emptyDirs }}
+        - name: {{ .name }}
+          emptyDir: {}
+        {{- end }}

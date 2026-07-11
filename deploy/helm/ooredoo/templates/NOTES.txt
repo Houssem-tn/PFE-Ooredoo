@@ -1,0 +1,23 @@
+Ooredoo Field Service Management — release "{{ .Release.Name }}" in namespace "{{ include "ooredoo.namespace" . }}"
+
+Check rollout status:
+  kubectl rollout status deployment/frontend -n {{ include "ooredoo.namespace" . }}
+  kubectl rollout status deployment/backend  -n {{ include "ooredoo.namespace" . }}
+  kubectl rollout status deployment/ocr      -n {{ include "ooredoo.namespace" . }}
+  kubectl rollout status statefulset/mongodb -n {{ include "ooredoo.namespace" . }}
+  kubectl rollout status statefulset/minio   -n {{ include "ooredoo.namespace" . }}
+
+Check the MinIO bucket-init Job:
+  kubectl logs job/minio-init -n {{ include "ooredoo.namespace" . }}
+
+{{- if .Values.ingress.enabled }}
+
+Application URL (once DNS points {{ .Values.ingress.host }} at your ingress controller):
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+
+Ingress is disabled — reach the frontend with:
+  kubectl port-forward -n {{ include "ooredoo.namespace" . }} svc/frontend 8080:{{ .Values.frontend.service.port }}
+{{- end }}
+
+See Pfe/KUBERNETES.md for troubleshooting, upgrade, and rollback commands.

@@ -1,0 +1,149 @@
+{{/*
+Off by default — see values.yaml's networkPolicy.enabled comment on why
+(requires a CNI that actually enforces NetworkPolicy; a silently-ignored
+policy is worse than an honestly-absent one). When enabled: default-deny
+on Ingress only (egress is left open — DNS, GHCR pulls, external SMTP for
+mail, etc. all need outbound access, and the task only specifies inbound
+isolation rules per component) plus one explicit allow rule per required
+path. See KUBERNETES.md "NetworkPolicy requirements".
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- if .Values.networkPolicy.defaultDeny }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-ingress
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "frontend" "context" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+      ports:
+        - port: {{ .Values.frontend.containerPort }}
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-ingress
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Frontend's nginx proxies /api and the WebSocket endpoints here (see
+    # nginx.conf) — this is the traffic that matters in practice.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ooredoo.selectorLabels" (dict "name" "frontend" "context" $) | nindent 14 }}
+      ports:
+        - port: {{ .Values.backend.containerPort }}
+    # Also allowed directly from the ingress controller's namespace, as
+    # requested — not currently exercised by this chart's own Ingress
+    # (ingress.yaml only ever routes to the frontend Service), kept for
+    # parity with the task spec and for any future direct-API Ingress
+    # rule without needing a NetworkPolicy change too.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+      ports:
+        - port: {{ .Values.backend.containerPort }}
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mongodb-ingress
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 14 }}
+      ports:
+        - port: {{ .Values.mongodb.port }}
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio-ingress
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "ooredoo.selectorLabels" (dict "name" "minio-init" "context" $) | nindent 14 }}
+      ports:
+        - port: {{ .Values.minio.apiPort }}
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ocr-ingress
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "ocr" "context" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ooredoo.selectorLabels" (dict "name" "backend" "context" $) | nindent 14 }}
+      ports:
+        - port: {{ .Values.ocr.containerPort }}
+{{- end }}

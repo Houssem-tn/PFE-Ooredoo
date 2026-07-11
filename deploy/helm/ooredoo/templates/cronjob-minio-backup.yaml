@@ -1,0 +1,116 @@
+{{/*
+Single mc container: mirrors the application's real bucket into a
+timestamped prefix on the backup destination, then prunes anything
+older than retentionDays. Mirroring into a fresh, timestamped prefix
+each run (rather than one continuously-overwritten mirror) is the
+"appropriate for versioning" behavior the task asked for even when the
+destination itself has no native object versioning enabled — each run
+is its own point-in-time snapshot, not just "whatever the source looked
+like at the last sync." Retention (`mc find --older-than`) matches
+objects by their actual mtime, so it correctly prunes old snapshots
+regardless of folder naming, no date-parsing needed. Never treats the
+source minio-data PVC as its own backup — see OBSERVABILITY_BACKUP.md
+"MinIO backup strategy". Script bodies live in scripts/ (shellcheck-able
+as real files, no Helm templating inside them) — see
+scripts/minio-backup-{s3,pvc}.sh.
+*/}}
+{{- if and .Values.backup.enabled .Values.backup.minio.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: minio-backup
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio-backup" "context" $) | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.minio.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ .Values.backup.minio.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "ooredoo.labels" . | nindent 12 }}
+            {{- include "ooredoo.selectorLabels" (dict "name" "minio-backup" "context" $) | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          {{- if .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml .Values.imagePullSecrets | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: mc-backup
+              image: "{{ .Values.backup.minio.image.repository }}:{{ .Values.backup.minio.image.tag }}"
+              imagePullPolicy: {{ .Values.backup.minio.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: SRC_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.minio.auth.existingSecret | default "minio-secret" }}
+                      key: minio-access-key
+                - name: SRC_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.minio.auth.existingSecret | default "minio-secret" }}
+                      key: minio-secret-key
+                - name: MINIO_PORT
+                  value: {{ .Values.minio.apiPort | quote }}
+                - name: MINIO_BUCKET
+                  value: {{ .Values.minio.bucket | quote }}
+                - name: RETENTION_DAYS
+                  value: {{ .Values.backup.minio.retentionDays | quote }}
+                {{- if eq .Values.backup.destination.type "s3" }}
+                - name: DEST_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ required "backup.destination.s3.existingSecret is required when backup.minio.enabled and destination.type=s3" .Values.backup.destination.s3.existingSecret }}
+                      key: access-key
+                - name: DEST_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.destination.s3.existingSecret }}
+                      key: secret-key
+                - name: DEST_ENDPOINT
+                  value: {{ .Values.backup.destination.s3.endpoint | quote }}
+                - name: DEST_BUCKET
+                  value: {{ .Values.backup.destination.s3.bucket | quote }}
+                {{- end }}
+              command: ["/bin/sh", "-c"]
+              args:
+                {{- if eq .Values.backup.destination.type "s3" }}
+                - |
+{{ .Files.Get "scripts/minio-backup-s3.sh" | indent 18 }}
+                {{- else }}
+                - |
+{{ .Files.Get "scripts/minio-backup-pvc.sh" | indent 18 }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.backup.minio.resources | nindent 16 }}
+              {{- if eq .Values.backup.destination.type "pvc" }}
+              volumeMounts:
+                - name: backup-store
+                  mountPath: /backup-store
+              {{- end }}
+          {{- if eq .Values.backup.destination.type "pvc" }}
+          volumes:
+            - name: backup-store
+              persistentVolumeClaim:
+                claimName: backup-store
+          {{- end }}
+{{- end }}

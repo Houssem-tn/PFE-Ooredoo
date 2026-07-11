@@ -20,6 +20,7 @@ import com.pfe.case_management.model.RdvInfo;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.case_management.model.ZmValidation;
 import com.pfe.case_management.repository.PlainteRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.plainte_analytics.model.PlainteImportProcessingMode;
 import com.pfe.plainte_analytics.service.PlainteAnalyticsImportService;
 import lombok.RequiredArgsConstructor;
@@ -61,6 +62,7 @@ public class PlainteService {
     private final NotificationEventService notificationEventService;
     private final PlainteMapper plainteMapper;
     private final PlainteAnalyticsImportService plainteAnalyticsImportService;
+    private final BusinessMetrics businessMetrics;
 
     public List<PlainteDTO> listComplaints() {
         return caseService.getAllCasesByType(CaseType.PLAINTE).stream()
@@ -196,6 +198,7 @@ public class PlainteService {
         }
 
         CaseEntity saved = plainteRepository.save(caseEntity);
+        businessMetrics.recordCaseCreated("PLT");
         if (ownerZm != null) {
             notificationEventService.onCaseAssignedToZm(saved, importedBy);
         }
@@ -359,6 +362,7 @@ public class PlainteService {
             if (Boolean.TRUE.equals(zmReply)) {
                 resolution.setValidationStatus(ResolutionValidationStatus.APPROVED);
                 caseEntity.setStatus(CaseStatus.CLOSED);
+                businessMetrics.recordCaseClosed("PLT");
             } else if (Boolean.FALSE.equals(zmReply)) {
                 resolution.setValidationStatus(ResolutionValidationStatus.RETURNED_TO_STT);
                 caseEntity.setStatus(CaseStatus.RETURNED_TO_STT);

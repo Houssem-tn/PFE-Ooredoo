@@ -10,6 +10,7 @@ import com.pfe.Notification.NotificationPayloadFactory;
 import com.pfe.Notification.WebSocketNotificationSender;
 import com.pfe.case_management.dto.BulkCaseAssignmentSummary;
 import com.pfe.case_management.entity.CaseEntity;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
@@ -31,17 +32,20 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     private final NotificationDestinationResolver destinationResolver;
     private final NotificationService notificationService;
     private final NotificationRepository notificationRepository;
+    private final BusinessMetrics businessMetrics;
 
     public NotificationEventServiceImpl(WebSocketNotificationSender sender,
                                         NotificationPayloadFactory payloadFactory,
                                         NotificationDestinationResolver destinationResolver,
                                         NotificationService notificationService,
-                                        NotificationRepository notificationRepository) {
+                                        NotificationRepository notificationRepository,
+                                        BusinessMetrics businessMetrics) {
         this.sender = sender;
         this.payloadFactory = payloadFactory;
         this.destinationResolver = destinationResolver;
         this.notificationService = notificationService;
         this.notificationRepository = notificationRepository;
+        this.businessMetrics = businessMetrics;
     }
 
     @Override
@@ -309,12 +313,26 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     private void sendToRecipient(String email, NotificationMessageDto payload) {
         log.info("[Notification] sendToRecipient start email={} eventType={} entityId={}",
                 email, payload != null ? payload.getEventType() : null, payload != null ? payload.getEntityId() : null);
-        Notification saved = notificationService.createForRecipient(email, payload);
-        if (saved != null) {
-            sender.sendToUser(email, saved);
-            log.info("[Notification] sendToRecipient delivered email={} notificationId={}", email, saved.getId());
-        } else {
-            log.warn("[Notification] sendToRecipient skipped email={} because notification was not created", email);
+        // Catches (rather than propagating, as before) so one recipient's
+        // failure — a bad Mongo write or a WebSocket send exception —
+        // can't abort delivery to the rest of a multi-recipient batch (the
+        // caller loops over several emails per event; an uncaught
+        // exception here previously stopped that loop entirely). Recorded
+        // as a metric specifically because a failure this deep was
+        // otherwise invisible — the caller (e.g. onCaseAssignedToZm) never
+        // surfaces it to anyone.
+        try {
+            Notification saved = notificationService.createForRecipient(email, payload);
+            if (saved != null) {
+                sender.sendToUser(email, saved);
+                log.info("[Notification] sendToRecipient delivered email={} notificationId={}", email, saved.getId());
+            } else {
+                log.warn("[Notification] sendToRecipient skipped email={} because notification was not created", email);
+            }
+        } catch (Exception e) {
+            businessMetrics.recordNotificationDeliveryFailure("websocket");
+            log.warn("[Notification] sendToRecipient failed email={} eventType={}: {}",
+                    email, payload != null ? payload.getEventType() : null, e.getMessage());
         }
     }
 

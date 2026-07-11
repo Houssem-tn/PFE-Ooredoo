@@ -1,0 +1,81 @@
+{
+  "title": "Ooredoo - Backend / JVM",
+  "uid": "ooredoo-backend-jvm",
+  "schemaVersion": 39,
+  "tags": ["ooredoo"],
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Heap usage",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(jvm_memory_used_bytes{namespace=~\"$namespace\", job=\"backend\", area=\"heap\"}) by (id)", "legendFormat": "{{id}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "GC pause time (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(jvm_gc_pause_seconds_sum{namespace=~\"$namespace\", job=\"backend\"}[5m])) by (action)", "legendFormat": "{{action}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Live thread count",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "targets": [
+        { "expr": "jvm_threads_live_threads{namespace=~\"$namespace\", job=\"backend\"}", "legendFormat": "live" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Request duration (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(http_server_requests_seconds_bucket{namespace=~\"$namespace\", job=\"backend\"}[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{namespace=~\"$namespace\", job=\"backend\"}[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{namespace=~\"$namespace\", job=\"backend\"}[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "OCR call duration (backend -> OCR)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(ocr_request_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le, outcome))", "legendFormat": "p95 {{outcome}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "WebSocket active sessions",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "websocket_active_sessions{namespace=~\"$namespace\"}", "legendFormat": "active" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Mongo-dependent readiness (via /actuator/health/readiness)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "kube_pod_status_ready{namespace=~\"$namespace\", condition=\"true\"} * on(pod) group_left kube_pod_labels{namespace=~\"$namespace\", label_app_kubernetes_io_name=\"backend\"}", "legendFormat": "{{pod}}" }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      { "name": "namespace", "type": "textbox", "current": { "text": "ooredoo-staging", "value": "ooredoo-staging" }, "label": "Namespace" }
+    ]
+  }
+}

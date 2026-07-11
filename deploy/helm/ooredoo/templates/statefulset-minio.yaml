@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 4 }}
+spec:
+  serviceName: minio
+  # Single-node MinIO, not distributed/erasure-coded mode — matches
+  # deploy/docker-compose.yml's own single-container MinIO exactly (same
+  # `server /data` command, no distributed peer list). A StatefulSet
+  # rather than a plain Deployment purely for the stable PVC binding
+  # across rescheduling, same reasoning as mongodb — see
+  # statefulset-mongodb.yaml's comment.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ooredoo.labels" . | nindent 8 }}
+        {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.minio.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.minio.podSecurityContext | nindent 8 }}
+      containers:
+        - name: minio
+          image: "{{ .Values.minio.image.repository }}:{{ .Values.minio.image.tag }}"
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.minio.securityContext | nindent 12 }}
+          # Matches deploy/docker-compose.yml's own minio command exactly.
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":{{ .Values.minio.consolePort }}"
+          ports:
+            - name: api
+              containerPort: {{ .Values.minio.apiPort }}
+            - name: console
+              containerPort: {{ .Values.minio.consolePort }}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.auth.existingSecret | default "minio-secret" }}
+                  key: minio-access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.auth.existingSecret | default "minio-secret" }}
+                  key: minio-secret-key
+          readinessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: {{ .Values.minio.apiPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: {{ .Values.minio.apiPort }}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      {{- if not .Values.minio.persistence.enabled }}
+      volumes:
+        - name: minio-data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.minio.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: minio-data
+        labels:
+          {{- include "ooredoo.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.minio.persistence.accessMode }}
+        {{- if .Values.minio.persistence.storageClassName }}
+        storageClassName: {{ .Values.minio.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size }}
+  {{- end }}

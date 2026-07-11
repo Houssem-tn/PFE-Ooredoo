@@ -1,0 +1,83 @@
+{
+  "title": "Ooredoo - Business Operations",
+  "uid": "ooredoo-business-operations",
+  "schemaVersion": 39,
+  "tags": ["ooredoo"],
+  "timezone": "browser",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cases created / closed (rate, by module)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(cases_created_total{namespace=~\"$namespace\"}[1h])) by (module)", "legendFormat": "created {{module}}" },
+        { "expr": "sum(rate(cases_closed_total{namespace=~\"$namespace\"}[1h])) by (module)", "legendFormat": "closed {{module}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "SLA breaches (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(cases_sla_breached_total{namespace=~\"$namespace\"}[1h]))", "legendFormat": "breaches/hr" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Case assignment failures (by module)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 7 },
+      "targets": [
+        { "expr": "sum(rate(case_assignment_failures_total{namespace=~\"$namespace\"}[1h])) by (module)", "legendFormat": "{{module}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Stock operations: insufficient / DPM confirmed / returns",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 7 },
+      "targets": [
+        { "expr": "sum(rate(stock_insufficient_total{namespace=~\"$namespace\"}[1h]))", "legendFormat": "insufficient" },
+        { "expr": "sum(rate(dpm_requests_confirmed_total{namespace=~\"$namespace\"}[1h])) by (status)", "legendFormat": "dpm {{status}}" },
+        { "expr": "sum(rate(material_returns_created_total{namespace=~\"$namespace\"}[1h]))", "legendFormat": "returns created" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Excel/DMS import success vs failure",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 7 },
+      "targets": [
+        { "expr": "sum(rate(excel_import_failures_total{namespace=~\"$namespace\"}[1h])) by (type)", "legendFormat": "failures {{type}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(excel_import_duration_seconds_bucket{namespace=~\"$namespace\"}[1h])) by (le, type))", "legendFormat": "p95 duration {{type}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "OCR requests (backend view)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "expr": "sum(rate(ocr_request_failures_total{namespace=~\"$namespace\"}[1h]))", "legendFormat": "failures/hr" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Notification delivery failures",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "expr": "sum(rate(notification_delivery_failures_total{namespace=~\"$namespace\"}[1h])) by (channel)", "legendFormat": "{{channel}}" }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      { "name": "namespace", "type": "textbox", "current": { "text": "ooredoo-staging", "value": "ooredoo-staging" }, "label": "Namespace" }
+    ]
+  }
+}

@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 4 }}
+spec:
+  serviceName: mongodb
+  # Single replica, real replication not implemented — see
+  # KUBERNETES.md "Pod disruption and availability" for why this is a
+  # StatefulSet at all if replicas stay at 1 (stable network identity +
+  # stable PVC binding across rescheduling, which a Deployment doesn't
+  # give you, even with just one pod) rather than a promise of HA.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ooredoo.labels" . | nindent 8 }}
+        {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.mongodb.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.mongodb.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mongodb
+          image: "{{ .Values.mongodb.image.repository }}:{{ .Values.mongodb.image.tag }}"
+          imagePullPolicy: {{ .Values.mongodb.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.mongodb.securityContext | nindent 12 }}
+          ports:
+            - name: mongodb
+              containerPort: {{ .Values.mongodb.port }}
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongodb.auth.existingSecret | default "mongodb-secret" }}
+                  key: mongodb-username
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongodb.auth.existingSecret | default "mongodb-secret" }}
+                  key: mongodb-password
+            - name: MONGO_INITDB_DATABASE
+              value: {{ .Values.mongodb.auth.database | quote }}
+          readinessProbe:
+            exec:
+              # Matches deploy/docker-compose.yml's own healthcheck exactly
+              # (same auth'd `db.adminCommand('ping')` — proves the server
+              # is not just listening but actually accepting authenticated
+              # connections).
+              command:
+                - mongosh
+                - --username
+                - "$(MONGO_INITDB_ROOT_USERNAME)"
+                - --password
+                - "$(MONGO_INITDB_ROOT_PASSWORD)"
+                - --authenticationDatabase
+                - admin
+                - --quiet
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - mongosh
+                - --username
+                - "$(MONGO_INITDB_ROOT_USERNAME)"
+                - --password
+                - "$(MONGO_INITDB_ROOT_PASSWORD)"
+                - --authenticationDatabase
+                - admin
+                - --quiet
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.mongodb.resources | nindent 12 }}
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db
+      {{- if not .Values.mongodb.persistence.enabled }}
+      volumes:
+        - name: mongodb-data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.mongodb.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-data
+        labels:
+          {{- include "ooredoo.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.mongodb.persistence.accessMode }}
+        {{- if .Values.mongodb.persistence.storageClassName }}
+        storageClassName: {{ .Values.mongodb.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.mongodb.persistence.size }}
+  {{- end }}

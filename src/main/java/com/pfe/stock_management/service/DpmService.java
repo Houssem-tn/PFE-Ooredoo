@@ -23,6 +23,7 @@ import com.pfe.stock_management.model.DpmTimelineEvent;
 import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.EquipmentRepository;
 import com.pfe.stock_management.repository.SttDistributionRepository;
+import com.pfe.metrics.BusinessMetrics;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -51,6 +52,7 @@ public class DpmService {
     private final NotificationEventService notificationEventService;
     private final DpmAllocationService dpmAllocationService;
     private final EquipmentInstanceService equipmentInstanceService;
+    private final BusinessMetrics businessMetrics;
 
     // ── Active statuses the STT should see in their inbox ────────────────────
     private static final Set<DpmStatus> STT_ACTIVE_STATUSES = Set.of(
@@ -301,6 +303,7 @@ public class DpmService {
         addTimelineEvent(dpm, "DPM_CONFIRMED", eventDesc, callerEmail, "ROLE_STT");
 
         DpmRequest saved = dpmRepository.save(dpm);
+        businessMetrics.recordDpmConfirmed(saved.getStatus() != null ? saved.getStatus().name() : "unknown");
 
         sttStockService.applyDpmConfirmation(saved);
 

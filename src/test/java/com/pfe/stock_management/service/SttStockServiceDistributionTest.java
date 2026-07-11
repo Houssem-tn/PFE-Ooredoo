@@ -6,6 +6,7 @@ import com.pfe.MainPackage.Entity.UserRole;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.dto.DistributeToTechRequest;
 import com.pfe.stock_management.dto.DistributionItemRequest;
 import com.pfe.stock_management.entity.SttDistribution;
@@ -72,6 +73,8 @@ class SttStockServiceDistributionTest {
     private EquipmentInstanceService equipmentInstanceService;
     @Mock
     private EquipmentRepository equipmentRepository;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     @AfterEach
     void clearSecurityContext() {
@@ -84,7 +87,7 @@ class SttStockServiceDistributionTest {
                 userRepository, caseRepository, stockMovementService, notificationEventService,
                 techStockUsageRepository, mongoTemplate, caseStockConsumptionService,
                 stockAlertEvaluationService, stockUsagePermissionService, dpmAllocationService,
-                equipmentUsagePolicy, equipmentInstanceService, equipmentRepository
+                equipmentUsagePolicy, equipmentInstanceService, equipmentRepository, businessMetrics
         );
     }
 

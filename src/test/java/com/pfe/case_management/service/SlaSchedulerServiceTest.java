@@ -7,6 +7,8 @@ import com.pfe.case_management.enums.CaseType;
 import com.pfe.case_management.enums.SlaStatus;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -48,7 +50,7 @@ class SlaSchedulerServiceTest {
 
     @BeforeEach
     void setUp() {
-        slaTrackingService = new SlaTrackingService();
+        slaTrackingService = new SlaTrackingService(new BusinessMetrics(new SimpleMeterRegistry()));
         ReflectionTestUtils.setField(slaTrackingService, "rdvWindow", Duration.ofHours(6));
         ReflectionTestUtils.setField(slaTrackingService, "warningThreshold", 0.5);
 

@@ -5,6 +5,7 @@ import com.pfe.case_management.enums.CaseStatus;
 import com.pfe.case_management.enums.ExecutionMode;
 import com.pfe.case_management.enums.SlaStatus;
 import com.pfe.case_management.model.SlaTrackingInfo;
+import com.pfe.metrics.BusinessMetrics;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -22,11 +23,17 @@ public class SlaTrackingService {
             SlaStatus.COMPLETED_LATE
     );
 
+    private final BusinessMetrics businessMetrics;
+
     @Value("${app.sla.rdv-window:6h}")
     private Duration rdvWindow;
 
     @Value("${app.sla.warning-threshold:0.5}")
     private double warningThreshold;
+
+    public SlaTrackingService(BusinessMetrics businessMetrics) {
+        this.businessMetrics = businessMetrics;
+    }
 
     public void startRdvSla(CaseEntity caseEntity, Instant startAt) {
         if (caseEntity == null) {
@@ -92,6 +99,7 @@ public class SlaTrackingService {
 
         if (next == SlaStatus.BREACHED && info.getBreachedAt() == null) {
             info.setBreachedAt(referenceNow);
+            businessMetrics.recordSlaBreach();
         }
 
         return initialized || previous != next;
@@ -138,8 +146,12 @@ public class SlaTrackingService {
             return;
         }
 
+        boolean wasAlreadyBreached = info.getBreachedAt() != null;
         info.setStatus(SlaStatus.BREACHED);
-        info.setBreachedAt(info.getBreachedAt() != null ? info.getBreachedAt() : effectiveBreachTime);
+        info.setBreachedAt(wasAlreadyBreached ? info.getBreachedAt() : effectiveBreachTime);
+        if (!wasAlreadyBreached) {
+            businessMetrics.recordSlaBreach();
+        }
         updateProgressAndRemaining(info, effectiveBreachTime);
     }
 

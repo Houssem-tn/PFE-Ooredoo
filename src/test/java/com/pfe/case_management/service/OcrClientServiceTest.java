@@ -1,6 +1,7 @@
 package com.pfe.case_management.service;
 
 import com.pfe.case_management.dto.OcrResponse;
+import com.pfe.metrics.BusinessMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -30,12 +31,14 @@ class OcrClientServiceTest {
 
     @Mock
     private RestTemplate restTemplate;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     private OcrClientService service;
 
     @BeforeEach
     void setUp() {
-        service = new OcrClientService();
+        service = new OcrClientService(businessMetrics);
         ReflectionTestUtils.setField(service, "restTemplate", restTemplate);
         ReflectionTestUtils.setField(service, "ocrApiUrl", "http://ocr.invalid/extract");
     }

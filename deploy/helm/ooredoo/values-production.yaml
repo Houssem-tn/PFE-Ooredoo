@@ -1,0 +1,122 @@
+# =============================================================================
+# Production overlay. Placeholder domain/TLS only — per this task's explicit
+# constraint ("do not configure the final public domain or production TLS
+# certificate yet"), fill in the real values (host, clusterIssuer, replica
+# counts, resource sizing observed from real staging usage) before this is
+# ever actually installed. Nothing here has been applied to a real cluster.
+#
+#   helm upgrade --install ooredoo . -n ooredoo-prod --create-namespace \
+#     -f values.yaml -f values-production.yaml
+# =============================================================================
+
+namespace:
+  name: ooredoo-prod
+
+ingress:
+  host: ooredoo.example.com # REPLACE with the real domain before installing
+  tls:
+    enabled: true
+    certManager: true
+    clusterIssuer: letsencrypt-prod # see KUBERNETES.md "TLS preparation"
+
+backend:
+  replicaCount: 2
+  corsAllowedOrigins: "https://ooredoo.example.com"
+  frontendUrl: "https://ooredoo.example.com"
+  mail:
+    enabled: false # flip once real SMTP credentials are provisioned (see KUBERNETES.md "Secrets")
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+frontend:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+ocr:
+  replicaCount: 1 # raise only after confirming real per-pod memory usage in staging (kubectl top pod) — see values.yaml's ocr.resources comment
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+mongodb:
+  persistence:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+minio:
+  persistence:
+    size: 50Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+networkPolicy:
+  enabled: true
+
+# Still off by default — enabling requires the Prometheus Operator CRDs
+# to already exist on the target cluster (see values.yaml's
+# monitoring.enabled comment). Flip once kube-prometheus-stack is
+# actually installed there; this overlay only pre-declares the intent
+# via the alert thresholds below, distinct from turning scraping on.
+monitoring:
+  enabled: false
+  prometheusRules:
+    # Slightly stricter than staging's implicit default (values.yaml) —
+    # production traffic patterns justify a tighter latency bar.
+    backend:
+      errorRateThreshold: 0.02
+      latencyP95Seconds: 1.5
+
+# Production retention target: 7 daily, 4 weekly, 3 monthly (per task
+# spec) — NOT what's actually implemented below. cronjob-mongodb-backup.
+# yaml / cronjob-minio-backup.yaml's cleanup step only supports a flat
+# "keep backups newer than N days" rolling window (retentionDays), the
+# same mechanism staging uses just with a longer window. A real
+# daily/weekly/monthly grandfather-father-son rotation needs either
+# separate weekly/monthly CronJobs with their own prefixes, or a backup
+# tool that natively tags generations — deliberately not built here
+# rather than approximated badly; see OBSERVABILITY_BACKUP.md "Backup
+# retention" for this exact gap, called out rather than glossed over.
+# 35 days is a defensible interim number (covers the daily tier plus
+# some of the weekly tier's intent) until real tiering is implemented.
+backup:
+  enabled: false # flip once backup.destination (external S3-compatible target) is actually configured
+  mongodb:
+    enabled: false
+    schedule: "0 2 * * *"
+    retentionDays: 35
+  minio:
+    enabled: false
+    schedule: "30 2 * * *"
+    retentionDays: 35

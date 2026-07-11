@@ -65,13 +65,45 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Actuator: container/orchestrator health checks. Exposure is
-             locked down to health only (see application.properties /
-             management.endpoints.web.exposure.include) — never widen this
-             without also reviewing what each endpoint leaks. -->
+        <!-- Actuator: container/orchestrator health checks, plus (as of the
+             observability phase) the Prometheus scrape endpoint. Exposure is
+             locked down to health + prometheus + info only (see
+             application.properties / management.endpoints.web.exposure.include)
+             — never widen this without also reviewing what each endpoint leaks
+             (env/beans/configprops/heapdump/logfile/mappings must never be
+             exposed — see OBSERVABILITY_BACKUP.md "Backend metrics"). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Micrometer's Prometheus registry — spring-boot-starter-actuator
+             alone only wires Micrometer's core API, not an exporter; this is
+             what actually makes /actuator/prometheus exist. Version is
+             managed by the spring-boot-starter-parent BOM. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!-- Structured JSON logging (logback-spring.xml) for centralized
+             log collection (Loki) — see OBSERVABILITY_BACKUP.md "Logging
+             fields". -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>8.1</version>
+        </dependency>
+
+        <!-- logback-spring.xml uses a Janino <if> conditional to switch
+             between the JSON and plain-text appender based on the
+             LOGGING_JSON_ENABLED property — Janino is logback's own
+             documented mechanism for conditional configuration blocks, not
+             a general scripting/expression-language dependency. -->
+        <dependency>
+            <groupId>org.codehaus.janino</groupId>
+            <artifactId>janino</artifactId>
+            <version>3.1.12</version>
         </dependency>
 
         <!-- Security -->

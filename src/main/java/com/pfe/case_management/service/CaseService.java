@@ -46,6 +46,7 @@ import com.pfe.case_management.model.ZmValidation;
 import com.pfe.case_management.dto.DeclareClientRecoveryRequest;
 import com.pfe.case_management.model.RecoveredEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import com.pfe.stock_management.material_return.MaterialReturnService;
 import com.pfe.stock_management.service.EquipmentUsagePolicyService;
@@ -197,6 +198,7 @@ public class CaseService {
     private final SttStockService sttStockService;
     private final MaterialReturnService materialReturnService;
     private final EquipmentUsagePolicyService equipmentUsagePolicy;
+    private final BusinessMetrics businessMetrics;
 
     public CaseEntity createCase(CreateCaseRequest request) {
         ensureCurrentUserHasRole("ROLE_ADMIN");
@@ -269,6 +271,7 @@ public class CaseService {
         );
 
         CaseEntity saved = repository.save(entity);
+        businessMetrics.recordCaseCreated(saved.getType() != null ? saved.getType().name() : "unknown");
         notificationEventService.onCaseAssignedToZm(saved, getCurrentUsername());
         return saved;
     }
@@ -575,6 +578,7 @@ public class CaseService {
             try {
                 CaseEntity complaint = buildFieldImportComplaintEntity(row, connectedZm, batchId, sourceFileName, now, module);
                 repository.save(complaint);
+                businessMetrics.recordCaseCreated(module != null ? module.name() : "unknown");
                 created++;
             } catch (Exception ex) {
                 log.warn("{} import: failed to create complaint case crmCase={}: {}", module, trimmedCrm, ex.getMessage());
@@ -677,6 +681,7 @@ public class CaseService {
                         now
                 );
                 repository.save(activation);
+                businessMetrics.recordCaseCreated("ACT");
                 created++;
             } catch (Exception ex) {
                 log.warn("ACT import: failed to create activation case crmCase={}: {}", trimmedCrm, ex.getMessage());
@@ -1550,6 +1555,7 @@ public class CaseService {
         );
 
         CaseEntity saved = repository.save(c);
+        businessMetrics.recordCaseClosed(saved.getType() != null ? saved.getType().name() : "unknown");
         enrichWorkProofReadValues(saved);
         return sanitizeCaseForCurrentViewer(saved);
     }

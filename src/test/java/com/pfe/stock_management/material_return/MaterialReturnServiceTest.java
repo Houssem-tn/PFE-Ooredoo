@@ -6,6 +6,7 @@ import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.MainPackage.Service.NotificationEventService;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.case_management.service.CaseTimelineService;
+import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.model.SttStockItem;
 import com.pfe.stock_management.repository.DpmRepository;
@@ -53,6 +54,8 @@ class MaterialReturnServiceTest {
     private NotificationEventService notificationEventService;
     @Mock
     private EquipmentInstanceService equipmentInstanceService;
+    @Mock
+    private BusinessMetrics businessMetrics;
 
     @AfterEach
     void clearSecurityContext() {
@@ -63,7 +66,7 @@ class MaterialReturnServiceTest {
         return new MaterialReturnService(
                 returnRepository, sttStockRepository, equipmentRepository, userRepository,
                 dpmRepository, caseRepository, caseTimelineService, stockMovementService,
-                notificationEventService, equipmentInstanceService
+                notificationEventService, equipmentInstanceService, businessMetrics
         );
     }
 

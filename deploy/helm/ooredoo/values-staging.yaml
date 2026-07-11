@@ -1,0 +1,59 @@
+# =============================================================================
+# Staging overlay. Apply on top of values.yaml (values.yaml already IS the
+# staging-safe baseline, so this file is intentionally small — it only
+# states what's genuinely staging-specific):
+#
+#   helm upgrade --install ooredoo . -n ooredoo-staging --create-namespace \
+#     -f values.yaml -f values-staging.yaml
+# =============================================================================
+
+namespace:
+  name: ooredoo-staging
+
+ingress:
+  host: ooredoo-staging.example.com
+  tls:
+    enabled: false
+
+# One replica everywhere is acceptable for staging (per task spec) — this
+# key exists mainly so the production overlay's diff is obvious, not
+# because it differs from values.yaml's own default.
+backend:
+  replicaCount: 1
+  corsAllowedOrigins: "https://ooredoo-staging.example.com"
+  frontendUrl: "https://ooredoo-staging.example.com"
+  mail:
+    enabled: false
+
+frontend:
+  replicaCount: 1
+ocr:
+  replicaCount: 1
+
+networkPolicy:
+  enabled: false
+
+# Off by default even in staging — see values.yaml's monitoring.enabled
+# comment (requires the Prometheus Operator CRDs to already exist on the
+# cluster; rendering these against a cluster without them breaks `helm
+# install` outright, not gracefully). Flip to true once kube-prometheus-
+# stack is installed in this cluster — see OBSERVABILITY_BACKUP.md
+# "External monitoring prerequisites".
+monitoring:
+  enabled: false
+
+# Staging retention: 7 daily backups (per task spec) — a flat rolling
+# window, not the tiered daily/weekly/monthly scheme production uses
+# (see values-production.yaml's own comment on why that's a documented
+# gap, not implemented, at the flat-retention level this chart's cleanup
+# script actually supports).
+backup:
+  enabled: false # flip to true once backup.destination is actually configured (see values.yaml + OBSERVABILITY_BACKUP.md "Required secrets")
+  mongodb:
+    enabled: false
+    schedule: "0 2 * * *"
+    retentionDays: 7
+  minio:
+    enabled: false
+    schedule: "30 2 * * *"
+    retentionDays: 7

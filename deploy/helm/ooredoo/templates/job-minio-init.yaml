@@ -1,0 +1,72 @@
+{{/*
+Kubernetes port of deploy/docker-compose.yml's own minio-init one-shot
+service — same tool (mc), same idempotent command
+(`mc mb --ignore-existing`), just wrapped in a wait-for-readiness loop
+since a Job has no `depends_on: condition: service_healthy` equivalent.
+Rendered as a Helm hook (post-install,post-upgrade) so it runs
+automatically and predictably after every install/upgrade, not as an
+always-present workload.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  namespace: {{ include "ooredoo.namespace" . }}
+  labels:
+    {{- include "ooredoo.labels" . | nindent 4 }}
+    {{- include "ooredoo.selectorLabels" (dict "name" "minio-init" "context" $) | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    # Always run again on upgrade — the command itself is idempotent
+    # (--ignore-existing), so re-running is always safe and cheap.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "ooredoo.labels" . | nindent 8 }}
+        {{- include "ooredoo.selectorLabels" (dict "name" "minio-init" "context" $) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio-init
+          image: "{{ .Values.minio.init.image.repository }}:{{ .Values.minio.init.image.tag }}"
+          imagePullPolicy: {{ .Values.minio.init.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.auth.existingSecret | default "minio-secret" }}
+                  key: minio-access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.auth.existingSecret | default "minio-secret" }}
+                  key: minio-secret-key
+            - name: MINIO_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+            - name: MINIO_PORT
+              value: {{ .Values.minio.apiPort | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+{{ .Files.Get "scripts/minio-init.sh" | indent 14 }}
+          resources:
+            {{- toYaml .Values.minio.init.resources | nindent 12 }}
