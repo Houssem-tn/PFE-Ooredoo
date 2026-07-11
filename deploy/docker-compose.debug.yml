@@ -1,0 +1,27 @@
+# Optional override: exposes internal service ports on the host for local
+# troubleshooting (MongoDB Compass/mongosh, MinIO console, hitting the
+# backend API directly without going through the frontend's nginx proxy).
+# Not merged in by default — these ports are NOT publicly exposed unless
+# you explicitly opt in:
+#
+#   docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.debug.yml up -d
+#
+# Every port below is bound to 127.0.0.1 only — reachable from this
+# machine, not from the LAN — even in debug mode.
+services:
+  mongodb:
+    ports:
+      - "127.0.0.1:27017:27017"
+
+  minio:
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # Web console
+
+  backend:
+    ports:
+      - "127.0.0.1:8080:8080"   # Direct API/Swagger UI access, bypassing nginx
+
+  ocr:
+    ports:
+      - "127.0.0.1:8000:8000"

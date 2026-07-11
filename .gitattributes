@@ -1,2 +1,7 @@
 /mvnw text eol=lf
 *.cmd text eol=crlf
+# All shell scripts run on Linux CI runners (GitHub Actions) — must stay
+# LF regardless of a contributor's local core.autocrlf setting, or the
+# runner sees "$'\r': command not found" / bad-interpreter failures.
+*.sh text eol=lf
+*.ps1 text eol=crlf

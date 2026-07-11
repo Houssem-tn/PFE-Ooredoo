@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusion filter.
+
+  Every entry here MUST have a comment explaining why it is a legitimate
+  false positive, not a real defect being hidden. Do not add an entry just
+  to make the scan pass — fix the underlying code instead unless the finding
+  is genuinely a false positive for this codebase's actual usage pattern.
+-->
+<FindBugsFilter>
+
+    <!--
+    Justification: EI_EXPOSE_REP / EI_EXPOSE_REP2 fire on essentially every
+    Lombok-generated getter/setter/builder/constructor that stores or
+    returns a direct reference to a field (List, Map, nested object, etc.).
+    A first real run of `mvnw spotbugs:spotbugs` on this codebase produced
+    816 total findings, of which 797 (516 + 281 — 97.7%) were exactly this
+    one pattern, spread across virtually every DTO, entity, model and
+    request/response class project-wide (verified via
+    `grep -c "type='EI_EXPOSE_REP" target/spotbugsXml.xml`, not assumed).
+
+    This project has no cross-thread caching of these objects and no trust
+    boundary where an external caller mutating a returned collection would
+    matter (values flow request -> service -> repository within a single
+    request thread, same as any typical layered Spring Boot app). Excluding
+    it globally is a deliberate, reviewed decision — not a blanket "hide
+    everything" filter — so the remaining ~19 SpotBugs findings (null
+    dereferences, ignored return values, swallowed exceptions, dead code,
+    format-string issues) stay visible and are not drowned out by noise.
+
+    If a future class genuinely needs defensive copying (e.g. it caches a
+    value across requests, or crosses a real trust boundary), fix that
+    specific class instead of relying on this exclusion.
+    -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!--
+    Justification: this xref table entry is part of a hand-rolled, byte-exact
+    PDF writer (CasePdfExportService renders PDFs manually, no external PDF
+    library). The PDF spec requires a literal LF (0x0A) here — using %n would
+    emit CRLF on Windows and corrupt the generated PDF's cross-reference
+    table (each xref line must be exactly 20 bytes). This is not a portability
+    bug to fix; \n is the only correct choice for this specific call site.
+    -->
+    <Match>
+        <Class name="com.pfe.case_management.service.CasePdfExportService"/>
+        <Method name="renderPdf"/>
+        <Bug pattern="VA_FORMAT_STRING_USES_NEWLINE"/>
+    </Match>
+
+    <!--
+    Justification: JwtService is a Spring-managed singleton bean (@Service),
+    never instantiated directly by untrusted/attacker-controlled code, and
+    does not override finalize(). The constructor validates its secret via
+    Keys.hmacShaKeyFor(), which can throw for a malformed/too-short secret —
+    that is deliberate fail-fast behavior at application startup, not a
+    finalizer-attack surface (there is no attacker path that can catch a
+    partially-constructed instance of a DI-managed singleton).
+    -->
+    <Match>
+        <Class name="com.pfe.Security.JwtService"/>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+
+    <!--
+    Justification: both toBooleanFlag() methods are a deliberate tri-state
+    parser (true / false / "unknown" for a blank or unrecognized Excel cell
+    value) — this is a domain requirement of the PLT/RES import pipeline,
+    not an accidental Boolean/boolean mix-up. Every call site was checked and
+    already null-safe (`== null`, `Boolean.FALSE.equals(...)`, or
+    `x == null || x` patterns) — see PlainteService lines ~310-320 and
+    PlainteDistributionProcessingService's equivalent usage. Changing the
+    return type to primitive boolean would silently collapse the "unknown"
+    state into "false", changing import behavior — out of scope for a
+    static-analysis cleanup.
+    -->
+    <Match>
+        <Or>
+            <Class name="com.pfe.case_management.service.PlainteService"/>
+            <Class name="com.pfe.plainte_analytics.service.PlainteDistributionProcessingService"/>
+        </Or>
+        <Method name="toBooleanFlag"/>
+        <Bug pattern="NP_BOOLEAN_RETURN_NULL"/>
+    </Match>
+
+</FindBugsFilter>

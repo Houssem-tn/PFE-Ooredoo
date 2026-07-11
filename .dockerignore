@@ -1,0 +1,59 @@
+# Git metadata
+.git
+.gitignore
+.gitattributes
+.gitleaks.toml
+
+# IDE / editor
+.idea
+.vscode
+*.iml
+
+# Build output (rebuilt inside the image; never copy a host-built jar in)
+target/
+build_run.log
+
+# Local Maven cache should never leak into the build context
+.m2/
+
+# Test / quality reports
+reports/
+gitleaks-report.json
+checkstyle-result.xml
+spotbugsXml.xml
+dependency-check-report.*
+dependency-check-data/
+
+# Local logs / uploads / runtime files
+*.log
+logs/
+uploads/
+upload-tmp/
+files/
+*.tmp
+
+# Secrets / local env — the image must never embed real credentials
+.env
+.env.*
+!.env.example
+application-local.properties
+application-local.yml
+application-local.yaml
+application-secrets.properties
+application-secrets.yml
+*-credentials.properties
+*.pem
+*.key
+*.p12
+*.jks
+
+# Docs (not needed at build time, keeps context small)
+README.md
+CONTRIBUTING.md
+HELP.md
+SONAR.md
+DOCKER.md
+
+# Unrelated sibling projects if this context is ever built from a parent dir
+Pfe-Oreedoo-Front/
+EacyOCR/

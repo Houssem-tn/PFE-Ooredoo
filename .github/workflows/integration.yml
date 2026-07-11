@@ -1,0 +1,311 @@
+name: Integration (Docker Compose)
+
+# The only place all three services (backend/frontend/OCR) can be brought up
+# together, because Docker was unavailable during the original
+# containerization work — see DOCKER.md "Runtime verification disclosure".
+# This workflow is the first real runtime verification of that stack.
+#
+# Cross-repo constraint: backend, frontend, and OCR are three independently
+# hosted repositories (OCR currently has no GitHub remote at all yet — see
+# CI.md "Repository settings I must configure manually"). GitHub Actions can
+# only check out repos this workflow has read access to, so frontend/OCR are
+# checked out here using a fine-grained PAT (INTEGRATION_CHECKOUT_TOKEN).
+# Without that secret configured, this workflow reports itself as skipped —
+# it does not claim to have run.
+#
+# docker-compose.yml itself lives at the Pfe/ repo root, which is not
+# inside any of the three git repos — deploy/ in this repo is a manually
+# kept-in-sync mirror (see deploy/README.md). If it drifts, this workflow
+# tests stale config; that's a known, documented limitation, not silently
+# hidden.
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # `secrets.*` cannot be read directly in a job-level `if:` (GitHub Actions
+  # restricts that context there) — this preliminary job reads it inside a
+  # `run:` step instead (where secrets ARE available) and exposes the result
+  # as a plain step output, which `if:` on other jobs IS allowed to read via
+  # `needs.*.outputs.*`.
+  check-secret:
+    name: Check INTEGRATION_CHECKOUT_TOKEN
+    runs-on: ubuntu-latest
+    outputs:
+      has-token: ${{ steps.check.outputs.has-token }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.INTEGRATION_CHECKOUT_TOKEN }}
+        run: echo "has-token=$([ -n "$TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  compose-smoke-test:
+    name: Compose build, up, smoke tests
+    needs: [check-secret]
+    runs-on: ubuntu-latest
+    # Makes the "not configured" case a visible skip, not a silent no-op or
+    # a confusing failure deep in a checkout step.
+    if: needs.check-secret.outputs.has-token == 'true'
+    steps:
+      - name: Checkout backend (this repo) into the expected sibling layout
+        uses: actions/checkout@v4
+        with:
+          path: pfe/APPSTOCK/PFE-Ooredoo
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: Houssem-tn/Pfe-Oreedoo-Front
+          token: ${{ secrets.INTEGRATION_CHECKOUT_TOKEN }}
+          path: pfe/Pfe-Oreedoo-Front
+
+      - name: Checkout OCR (best-effort — may not have a remote yet)
+        id: ocr-checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: Houssem-tn/EacyOCR
+          token: ${{ secrets.INTEGRATION_CHECKOUT_TOKEN }}
+          path: pfe/EacyOCR
+
+      - name: Assemble Compose files at the expected pfe/ root
+        working-directory: pfe
+        run: |
+          cp APPSTOCK/PFE-Ooredoo/deploy/docker-compose.yml .
+          cp APPSTOCK/PFE-Ooredoo/deploy/docker-compose.debug.yml .
+          cp APPSTOCK/PFE-Ooredoo/deploy/.env.docker.example .env.docker.example
+
+      - name: Generate a CI-only .env.docker
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          cp .env.docker.example .env.docker
+          # Fixed, non-production, CI-only values — never real credentials
+          # (see CI.md "Secrets used by tests"). Generated fresh per run
+          # where it's cheap to (JWT secret); fixed strings elsewhere since
+          # nothing here needs to be secret, only "not the literal dev
+          # placeholder / not 'minioadmin'" to satisfy the app's own checks.
+          JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+          sed -i "s#^APP_JWT_SECRET=.*#APP_JWT_SECRET=${JWT_SECRET}#" .env.docker
+          sed -i "s#^MONGODB_PASSWORD=.*#MONGODB_PASSWORD=ci-mongo-pass-not-real-$(date +%s)#" .env.docker
+          sed -i "s#^MINIO_ACCESS_KEY=.*#MINIO_ACCESS_KEY=ci-minio-access-not-real#" .env.docker
+          sed -i "s#^MINIO_SECRET_KEY=.*#MINIO_SECRET_KEY=ci-minio-secret-not-real-$(date +%s)#" .env.docker
+
+      - name: docker compose config (validates syntax + interpolation)
+        working-directory: pfe
+        run: docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.debug.yml config
+
+      - name: docker compose build
+        working-directory: pfe
+        run: docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.debug.yml build
+
+      - name: docker compose up
+        working-directory: pfe
+        run: docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.debug.yml up -d
+
+      - name: Wait for healthy containers
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            unhealthy=$(docker compose --env-file .env.docker ps --format '{{.Name}} {{.Health}}' | grep -v 'healthy' | grep -v '^$' || true)
+            if [ -z "$unhealthy" ]; then
+              echo "All containers healthy."
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Containers did not become healthy in time:"
+              echo "$unhealthy"
+              docker compose --env-file .env.docker ps
+              docker compose --env-file .env.docker logs
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: docker compose ps
+        working-directory: pfe
+        run: docker compose --env-file .env.docker ps
+
+      - name: 'Smoke test: frontend health'
+        run: curl -fsS http://localhost/healthz
+
+      - name: 'Smoke test: Angular SPA fallback'
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS http://localhost/some/deep/client-route)
+          echo "$body" | grep -qi '<app-root' || { echo "::error::SPA fallback did not return index.html"; exit 1; }
+
+      - name: 'Smoke test: backend liveness'
+        run: curl -fsS http://localhost:8080/actuator/health/liveness | grep -q '"status":"UP"'
+
+      - name: 'Smoke test: backend readiness (includes Mongo)'
+        run: curl -fsS http://localhost:8080/actuator/health/readiness | grep -q '"status":"UP"'
+
+      - name: 'Smoke test: MinIO health'
+        run: curl -fsS http://localhost:9000/minio/health/live
+
+      - name: 'Smoke test: MinIO bucket exists + object round-trip'
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          source .env.docker
+          docker run --rm --network pfe_internal --entrypoint /bin/sh minio/mc:RELEASE.2025-04-08T15-39-49Z -c "
+            mc alias set local http://minio:9000 '$MINIO_ACCESS_KEY' '$MINIO_SECRET_KEY' &&
+            mc ls local/$MINIO_BUCKET >/dev/null &&
+            echo 'ci-smoke-test' > /tmp/probe.txt &&
+            mc cp /tmp/probe.txt local/$MINIO_BUCKET/ci-smoke-test.txt &&
+            mc cat local/$MINIO_BUCKET/ci-smoke-test.txt | grep -q ci-smoke-test &&
+            mc rm local/$MINIO_BUCKET/ci-smoke-test.txt
+          "
+
+      - name: 'Smoke test: frontend-to-backend proxy + auth endpoint behavior'
+        run: |
+          set -euo pipefail
+          # /api/v1/auth/** is permitAll (SecurityConfig) — a wrong-credentials
+          # login still proves the full nginx -> backend proxy chain works
+          # (a broken proxy would 502/504 here, not 401).
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"nonexistent@example.com","password":"wrong"}')
+          if [ "$status" != "401" ] && [ "$status" != "400" ]; then
+            echo "::error::Expected 401/400 from the proxied auth endpoint, got $status"
+            exit 1
+          fi
+          # A protected endpoint with no token must be rejected by the proxy
+          # chain too (proves the JWT filter is reachable through nginx).
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost/api/v1/users/me)
+          if [ "$status" != "401" ]; then
+            echo "::error::Expected 401 from an unauthenticated protected endpoint, got $status"
+            exit 1
+          fi
+
+      - name: 'Smoke test: WebSocket upgrade handshake (transport only)'
+        run: |
+          set -euo pipefail
+          # Verifies nginx forwards the Upgrade/Connection headers and the
+          # backend accepts the handshake (101). Does NOT test STOMP
+          # frames, authenticated notification delivery, or disabled-user
+          # rejection — see CI.md "Known limitations" for why that's out of
+          # scope here (needs seeded auth fixtures this pipeline doesn't
+          # have yet). "Container started" alone is never treated as proof
+          # this works — this step actually performs the HTTP Upgrade
+          # handshake.
+          response=$(curl -s -i -N \
+            -H "Connection: Upgrade" \
+            -H "Upgrade: websocket" \
+            -H "Sec-WebSocket-Version: 13" \
+            -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" \
+            http://localhost/ws-notifications --max-time 5 || true)
+          echo "$response" | head -5
+          echo "$response" | grep -q "101" || { echo "::error::WebSocket upgrade handshake did not return 101"; exit 1; }
+
+      - name: 'Smoke test: OCR health (only if the OCR profile could start)'
+        if: steps.ocr-checkout.outcome == 'success'
+        working-directory: pfe
+        run: |
+          docker compose --env-file .env.docker --profile ocr up -d --build ocr
+          for i in $(seq 1 30); do
+            status=$(docker compose --env-file .env.docker ps ocr --format '{{.Health}}' || echo "")
+            [ "$status" = "healthy" ] && break
+            [ "$i" -eq 30 ] && { echo "::error::OCR service did not become healthy"; exit 1; }
+            sleep 10
+          done
+          curl -fsS http://localhost:8000/ | grep -q '"status":"running"'
+
+      - name: 'Smoke test: representative file upload through the full proxy chain'
+        # Synthetic 10x10 image, not a real document — round-trips through
+        # nginx -> backend -> OCR (POST /api/v1/ocr/extract, files= field,
+        # permitAll — see OcrController.java). Only asserts HTTP 200 + a
+        # valid response shape, not extraction accuracy (that's the OCR
+        # repo's own test suite's job, already run in ocr-ci.yml).
+        if: steps.ocr-checkout.outcome == 'success'
+        run: |
+          set -euo pipefail
+          convert -size 10x10 xc:white /tmp/ci-smoke-test.jpg
+          status=$(curl -s -o /tmp/ocr-response.json -w '%{http_code}' \
+            -X POST http://localhost/api/v1/ocr/extract \
+            -F "files=@/tmp/ci-smoke-test.jpg;type=image/jpeg")
+          cat /tmp/ocr-response.json
+          if [ "$status" != "200" ]; then
+            echo "::error::Expected 200 from the OCR upload proxy chain, got $status"
+            exit 1
+          fi
+
+      - name: 'Smoke test: oversized upload is rejected (client_max_body_size)'
+        run: |
+          set -euo pipefail
+          dd if=/dev/zero of=/tmp/ci-oversized.bin bs=1M count=130 status=none
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://localhost/api/v1/ocr/extract \
+            -F "files=@/tmp/ci-oversized.bin;type=image/jpeg;filename=big.jpg")
+          if [ "$status" != "413" ]; then
+            echo "::error::Expected 413 for an oversized upload (nginx client_max_body_size 120m), got $status"
+            exit 1
+          fi
+
+      - name: 'Smoke test: container restart + MongoDB/MinIO persistence'
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          # Round-trip a probe document through the backend before restarting,
+          # confirm it's still there after — the whole point of the named
+          # volumes (mongodb_data/minio_data).
+          source .env.docker
+          docker compose exec -T mongodb mongosh \
+            --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
+            --eval "db.getSiblingDB('$MONGODB_DATABASE').ci_persistence_probe.insertOne({probe: 'ci', at: new Date()})"
+
+          docker compose restart mongodb backend
+          sleep 15
+          for i in $(seq 1 15); do
+            status=$(docker compose ps mongodb --format '{{.Health}}')
+            [ "$status" = "healthy" ] && break
+            if [ "$i" -eq 15 ]; then
+              echo "::error::mongodb did not become healthy again after restart"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          count=$(docker compose exec -T mongodb mongosh \
+            --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
+            --eval "db.getSiblingDB('$MONGODB_DATABASE').ci_persistence_probe.countDocuments({probe: 'ci'})")
+          echo "Persisted probe count after restart: $count"
+          [ "$count" -ge "1" ] || { echo "::error::MongoDB data did not survive a container restart"; exit 1; }
+
+      - name: Collect Compose logs (always, for debugging)
+        if: always()
+        working-directory: pfe
+        run: docker compose --env-file .env.docker logs --no-color > compose-logs.txt
+
+      - name: Upload Compose smoke-test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-compose-logs
+          path: pfe/compose-logs.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Tear down (isolated CI project only — deletes only this run's volumes)
+        if: always()
+        working-directory: pfe
+        run: docker compose --env-file .env.docker --profile ocr down -v
+
+  skipped-notice:
+    name: Integration tests skipped (no INTEGRATION_CHECKOUT_TOKEN)
+    needs: [check-secret]
+    runs-on: ubuntu-latest
+    if: needs.check-secret.outputs.has-token == 'false'
+    steps:
+      - run: |
+          echo "::warning::INTEGRATION_CHECKOUT_TOKEN is not configured — Docker Compose integration smoke tests did NOT run. This is reported as skipped, not as a pass. See CI.md 'Repository settings I must configure manually'."

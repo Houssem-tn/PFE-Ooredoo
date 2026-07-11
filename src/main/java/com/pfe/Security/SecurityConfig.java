@@ -50,6 +50,11 @@ public class SecurityConfig {
         http.formLogin(AbstractHttpConfigurer::disable);
 
         http.authorizeHttpRequests(auth -> auth
+                // Container/orchestrator health checks (no JWT available). Only
+                // /actuator/health* is ever mapped — management.endpoints.web
+                // .exposure.include=health keeps every other Actuator endpoint
+                // unmapped regardless of this permitAll.
+                .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                 .requestMatchers("/api/v1/auth/**", "/api/v1/public/**").permitAll()
                 .requestMatchers("/api/v1/tech-invitations/validate").permitAll()
                 .requestMatchers("/api/v1/files/*/view").permitAll()

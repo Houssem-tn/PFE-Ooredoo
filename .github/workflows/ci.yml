@@ -1,0 +1,423 @@
+name: Backend CI
+
+# Branch behavior (see CI.md at the repo root of Pfe/ for full rationale):
+#   feature/*, fix/*, PRs into develop  -> validation only (no image push)
+#   push to develop                     -> validation + image build + push (develop/sha tags)
+#   push to main                        -> validation + image build + push (latest/version/sha tags)
+# No job in this workflow deploys anything.
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch: {}
+  schedule:
+    # Weekly refresh: full-history secret scan + a fresh OWASP Dependency-Check
+    # run (NVD data changes daily; a weekly refresh catches newly-disclosed
+    # CVEs in dependencies that didn't change). Does not deploy or push images.
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  # main is never cancelled mid-run — a cancelled run could be killed
+  # partway through a registry push, leaving a half-pushed tag. Every other
+  # ref (feature/fix/develop/PRs) cancels its own previous in-progress run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  JAVA_VERSION: "17"
+  JAVA_DISTRIBUTION: "temurin"
+  IMAGE_NAME: ooredoo-backend
+  REGISTRY: ghcr.io
+
+jobs:
+  # ===========================================================================
+  env-validate:
+    name: Environment validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Required files exist
+        run: |
+          set -euo pipefail
+          for f in pom.xml mvnw mvnw.cmd Dockerfile .dockerignore \
+                   .mvn/wrapper/maven-wrapper.properties \
+                   src/main/resources/application.properties \
+                   src/main/resources/application-prod.properties; do
+            if [ ! -e "$f" ]; then
+              echo "::error::Required file missing: $f"
+              exit 1
+            fi
+          done
+
+      - name: Maven wrapper is executable and pinned
+        run: |
+          set -euo pipefail
+          if [ ! -x mvnw ]; then
+            echo "::error::mvnw is not executable"
+            exit 1
+          fi
+          if ! grep -q '^distributionSha256Sum=' .mvn/wrapper/maven-wrapper.properties; then
+            echo "::error::.mvn/wrapper/maven-wrapper.properties has no distributionSha256Sum — wrapper integrity cannot be verified"
+            exit 1
+          fi
+
+      - name: No .env files tracked
+        run: |
+          set -euo pipefail
+          tracked_env=$(git ls-files | grep -E '(^|/)\.env(\.[A-Za-z0-9_.-]+)?$' | grep -v '\.env\.example$' || true)
+          if [ -n "$tracked_env" ]; then
+            echo "::error::Tracked .env file(s) found (should be git-ignored):"
+            echo "$tracked_env"
+            exit 1
+          fi
+
+      - name: No unresolved merge-conflict markers
+        run: |
+          set -euo pipefail
+          hits=$(git grep -nE '^(<{7}|={7}|>{7})( |$)' -- . ':!*.md' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Unresolved merge-conflict markers found:"
+            echo "$hits"
+            exit 1
+          fi
+
+      - name: No obvious hardcoded production secrets in tracked files
+        run: |
+          set -euo pipefail
+          # Cheap belt-and-suspenders check distinct from the dedicated gitleaks
+          # job below — flags the specific known-historical patterns (Gmail App
+          # Password / literal JWT secrets) if they ever reappear in a tracked
+          # file, without trying to be a general-purpose secret scanner here.
+          hits=$(git grep -nEi "(app\.jwt\.secret|jwt[._-]?secret)\s*=\s*[^\\\$\s][A-Za-z0-9/+=_-]{15,}" -- '*.properties' '*.yml' '*.yaml' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Possible hardcoded JWT secret in a tracked config file:"
+            echo "$hits"
+            exit 1
+          fi
+
+  # ===========================================================================
+  validate:
+    name: Build, test, quality gates
+    needs: [env-validate]
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: ci_test_user
+          MONGO_INITDB_ROOT_PASSWORD: ci_test_password_not_real
+          MONGO_INITDB_DATABASE: pfe_test
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --username ci_test_user --password ci_test_password_not_real --authenticationDatabase admin --quiet --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    outputs:
+      jacoco-exists: ${{ steps.jacoco-check.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          # pom.xml hash only (not source) — deps rarely change with source edits,
+          # and Enforcer/Checkstyle/SpotBugs plugin jars themselves are pom-driven.
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      # No production values anywhere below — a dedicated, disposable
+      # database/user that only ever exists for the lifetime of this job
+      # (services: containers are not persisted between runs).
+      - name: Build, test, and report (Enforcer + Checkstyle + SpotBugs run via clean verify)
+        env:
+          SPRING_PROFILES_ACTIVE: test
+          MONGODB_URI: "mongodb://ci_test_user:ci_test_password_not_real@localhost:27017/pfe_test?authSource=admin"
+          APP_JWT_SECRET: "ci-test-only-jwt-secret-not-a-real-secret-0000000000"
+        run: ./mvnw --batch-mode --no-transfer-progress clean verify
+
+      - name: Checkstyle blocking gate
+        run: ./mvnw --batch-mode --no-transfer-progress checkstyle:check
+
+      - name: SpotBugs blocking gate
+        run: ./mvnw --batch-mode --no-transfer-progress spotbugs:check
+
+      - id: jacoco-check
+        name: Verify JaCoCo report was produced
+        run: |
+          if [ -f target/site/jacoco/jacoco.xml ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::target/site/jacoco/jacoco.xml was not produced — SonarQube coverage import will be skipped."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SonarQube analysis
+        # Only on develop/main pushes (not every PR — this SonarQube edition
+        # may not support PR decoration; see CI.md). Skips cleanly, without
+        # claiming success, when the secrets aren't configured.
+        if: |
+          always() && !cancelled() &&
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_BACKEND }}
+        run: |
+          if [ -z "${SONAR_HOST_URL:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then
+            echo "::warning::SONAR_HOST_URL / SONAR_TOKEN_BACKEND not configured — skipping SonarQube analysis (not reporting success)."
+            exit 0
+          fi
+          ./mvnw --batch-mode --no-transfer-progress \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.token="$SONAR_TOKEN" \
+            -Dsonar.qualitygate.wait=false
+
+      - name: Upload Surefire/Failsafe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload JaCoCo coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jacoco-report
+          path: target/site/jacoco/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload Checkstyle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-checkstyle-report
+          path: target/checkstyle-result.xml
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload SpotBugs report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-spotbugs-report
+          path: target/spotbugsXml.xml
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  dependency-check:
+    name: OWASP Dependency-Check
+    needs: [env-validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      - id: week
+        run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
+
+      # The local NVD mirror the plugin builds is large and slow to
+      # regenerate from scratch — cache it across runs, keyed weekly so it
+      # still refreshes regularly rather than growing stale forever.
+      - name: Cache Dependency-Check data
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: dep-check-data-${{ steps.week.outputs.week }}
+          restore-keys: |
+            dep-check-data-
+
+      - name: Run Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [ -z "${NVD_API_KEY:-}" ]; then
+            echo "::warning::NVD_API_KEY is not configured — Dependency-Check will run against whatever cached/public NVD data is available, which may be rate-limited, slow, or stale. This run is NOT a reliable vulnerability gate; treat it as informational only, not a passed security scan."
+          fi
+          ./mvnw --batch-mode --no-transfer-progress dependency-check:check || {
+            status=$?
+            if [ -z "${NVD_API_KEY:-}" ]; then
+              echo "::warning::Dependency-Check failed/could not complete without NVD_API_KEY — not blocking this run, but this is NOT a verified pass. Configure NVD_API_KEY to make this a real gate."
+              exit 0
+            fi
+            echo "::error::Dependency-Check failed with NVD_API_KEY configured — real High/Critical findings (CVSS >= 7, see pom.xml failBuildOnCVSS)."
+            exit $status
+          }
+
+      - name: Upload Dependency-Check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dependency-check-report
+          path: |
+            target/dependency-check-report.html
+            target/dependency-check-report.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  gitleaks:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history only on the scheduled weekly run — PR/push scans
+          # check just the changed commits (fast, and still catches any new
+          # secret entering the codebase, which is the actual blocking gate).
+          fetch-depth: ${{ github.event_name == 'schedule' && 0 || 2 }}
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+        # .gitleaksignore (repo root) narrowly allowlists two specific,
+        # already-rotated historical findings by exact commit+file+line
+        # fingerprint — see that file's own comments. Any new secret,
+        # anywhere, still fails this job.
+
+  # ===========================================================================
+  docker:
+    name: Docker build, scan, (push)
+    needs: [validate, dependency-check, gitleaks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Registry image references must be lowercase; github.repository_owner
+      # is not guaranteed to be (e.g. "Houssem-tn") — compute it explicitly
+      # rather than relying only on docker/metadata-action's own normalization.
+      - name: Compute lowercase image owner
+        run: echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Derive image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image (always — proves the Dockerfile builds even on PRs)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: cyclonedx-json
+          output-file: sbom-backend.cyclonedx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-sbom
+          path: sbom-backend.cyclonedx.json
+          retention-days: 30
+
+      - name: Trivy scan — fail on Critical
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Trivy scan — report High (non-blocking, SARIF upload)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-backend.sarif
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-backend.sarif
+        continue-on-error: true
+
+      # Push only on develop/main pushes and version tags — never on pull_request
+      # events (this job only runs from `push`/`schedule`/`workflow_dispatch`
+      # triggers anyway, but the branch/ref check below is a second, explicit
+      # gate so a future trigger change can't silently start pushing from PRs).
+      - name: Log in to ${{ env.REGISTRY }}
+        if: |
+          github.event_name != 'pull_request' &&
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: |
+          github.event_name != 'pull_request' &&
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend

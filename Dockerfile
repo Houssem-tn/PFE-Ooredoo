@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for the Spring Boot backend.
+#   1. build  — Maven wrapper, Java 17, compiles AND runs the full test
+#      suite (mvnw clean package does not skip tests; the build fails here,
+#      not in production, if a test regresses).
+#   2. layers — splits the repackaged fat jar into Spring Boot's standard
+#      layers (dependencies / spring-boot-loader / snapshot-dependencies /
+#      application) so that rebuilding the image after an app-only code
+#      change reuses the cached dependencies layer instead of re-pushing
+#      ~80MB of unchanged third-party jars.
+#   3. runtime — JRE-only, non-root, only the extracted layers copied in.
+#      No source, no Maven caches, no build tooling, no secrets.
+
+############################################
+# Stage 1: build + test
+############################################
+FROM eclipse-temurin:17-jdk-jammy AS build
+WORKDIR /build
+
+# Wrapper + POM first so `dependency:go-offline` is its own cached layer —
+# it only re-runs when pom.xml (or the wrapper) actually changes, not on
+# every source edit.
+COPY .mvn/ .mvn/
+COPY mvnw pom.xml ./
+RUN chmod +x mvnw && ./mvnw -q -B dependency:go-offline
+
+COPY src/ src/
+RUN ./mvnw -q -B clean package
+
+############################################
+# Stage 2: extract layered jar
+############################################
+FROM eclipse-temurin:17-jre-jammy AS layers
+WORKDIR /layers
+COPY --from=build /build/target/*.jar app.jar
+RUN java -Djarmode=tools -jar app.jar extract --layers --destination extracted
+
+############################################
+# Stage 3: runtime
+############################################
+FROM eclipse-temurin:17-jre-jammy AS runtime
+
+# curl is only present so the container HEALTHCHECK below has an HTTP
+# client; nothing else is installed and apt's own state is removed
+# immediately so it isn't left sitting in the image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fixed, non-root UID/GID (no login shell, no home directory needed).
+RUN groupadd --gid 1000 spring \
+    && useradd --uid 1000 --gid spring --shell /usr/sbin/nologin --no-create-home spring
+
+WORKDIR /app
+
+COPY --from=layers /layers/extracted/dependencies/ ./
+COPY --from=layers /layers/extracted/spring-boot-loader/ ./
+COPY --from=layers /layers/extracted/snapshot-dependencies/ ./
+COPY --from=layers /layers/extracted/application/ ./
+
+RUN chown -R spring:spring /app
+USER spring:spring
+
+# Documents the app's own default (application.properties: SERVER_PORT is
+# read at runtime via env var) — changing this alone does not change the
+# port the JVM listens on, only what's advertised to `docker inspect`.
+EXPOSE 8080
+
+# Picked up automatically by the `java` launcher without needing a shell
+# wrapper around ENTRYPOINT — lets operators pass extra JVM flags (e.g.
+# -Xmx512m) via `docker run -e JAVA_TOOL_OPTIONS=...` without touching the
+# image. Empty by default.
+ENV JAVA_TOOL_OPTIONS=""
+# Image-level default for standalone `docker run` (no orchestrator setting
+# it explicitly). docker-compose.yml overrides this per environment — see
+# DOCKER.md "Which Spring profile does Compose use, and why" for why the
+# default local Compose stack actually runs `dev`, not `prod`.
+ENV SPRING_PROFILES_ACTIVE=prod
+
+# Distinct from Compose-level health checks (which can probe from outside
+# the container): this is the container's own self-check, usable even when
+# run standalone with `docker run`. /actuator/health/readiness reflects
+# both "process started" and "MongoDB reachable" (see
+# management.endpoint.health.group.readiness.include in
+# application.properties) — a plain TCP-open check would miss a backend
+# that started but can't reach its database.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD curl -fs "http://localhost:${SERVER_PORT:-8080}/actuator/health/readiness" || exit 1
+
+# Exec form so SIGTERM (docker stop / compose down) reaches the JVM
+# directly as PID 1, enabling server.shutdown=graceful to actually drain
+# in-flight requests instead of being swallowed by a shell wrapper.
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]

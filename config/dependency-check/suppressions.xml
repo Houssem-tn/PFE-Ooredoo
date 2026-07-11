@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OWASP Dependency-Check suppressions.
+
+  Every <suppress> entry MUST have a <notes> justification explaining why
+  the specific CVE is a confirmed false positive or genuinely not
+  exploitable in this project's usage — never used to silence a real,
+  applicable vulnerability just to make the scan green.
+
+  Currently empty: no findings have been triaged yet (this file is created
+  ahead of the first real dependency-check run so the plugin config is
+  valid; populate it only after reviewing target/dependency-check-report.html).
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+    <!-- Example (kept commented as a template):
+
+    <suppress>
+        <notes>
+            Justification: CVE-2023-XXXXX applies to the Jackson XML data
+            format module, which this project never depends on or loads
+            (jackson-databind + jackson-datatype-jsr310 only, no XML
+            binding). Confirmed false positive for our usage.
+        </notes>
+        <packageUrl regex="true">^pkg:maven/com\.fasterxml\.jackson\.dataformat/jackson-dataformat-xml@.*$</packageUrl>
+        <cve>CVE-2023-XXXXX</cve>
+    </suppress>
+    -->
+
+</suppressions>

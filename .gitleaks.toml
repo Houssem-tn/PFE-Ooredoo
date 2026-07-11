@@ -1,0 +1,78 @@
+title = "PFE-Ooredoo backend secret scanning"
+
+# Extends Gitleaks' built-in default ruleset (generic API keys, AWS/GCP/Azure
+# keys, private keys (PEM), Slack/Stripe/etc. tokens, high-entropy generic
+# secrets, and — relevantly here — a generic JWT pattern and a generic
+# "password in URL / connection string" pattern). The custom rules below add
+# coverage for services this project actually uses that the default ruleset
+# doesn't specifically name.
+[extend]
+useDefault = true
+
+# ── Gmail App Password ──────────────────────────────────────────────────
+# 16 lowercase letters, conventionally shown as 4 groups of 4 separated by
+# spaces (e.g. "abcd efgh ijkl mnop") — this exact pattern leaked into
+# application.properties earlier in this project's history (already
+# rotated + externalized to MAIL_PASSWORD; see project git history).
+# Anchored to a password/pwd/pass config-key context so it doesn't match
+# arbitrary 4-word English phrases in comments (an early draft of this rule
+# without the context anchor flagged plain prose as a false positive).
+[[rules]]
+id = "gmail-app-password"
+description = "Gmail App Password (16-char grouped lowercase token) assigned to a password-like config key"
+regex = '''(?i)(password|pwd|pass)\s*[:=]\s*['"]?([a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4})['"]?'''
+secretGroup = 2
+tags = ["secret", "gmail", "smtp"]
+
+# ── MinIO credentials in a connection/config context ────────────────────
+[[rules]]
+id = "minio-credential-assignment"
+description = "MinIO access/secret key assigned directly in config"
+regex = '''(?i)minio[._-]?(?:access|secret)[._-]?key\s*[:=]\s*['"]?([A-Za-z0-9/+=_-]{8,})['"]?'''
+secretGroup = 1
+tags = ["secret", "minio"]
+
+# ── Application JWT signing secret assigned directly (not via ${ENV_VAR}) ─
+[[rules]]
+id = "app-jwt-secret-literal"
+description = "app.jwt.secret / JWT signing key assigned as a literal value instead of an env var placeholder"
+# RE2 (used by gitleaks) has no negative lookahead, so instead of excluding
+# "${...}" via (?!\$\{), the value group is required to start with a
+# non-'$' character — that alone excludes any ${ENV_VAR:...} placeholder.
+regex = '''(?i)(?:app\.jwt\.secret|jwt[._-]?secret)\s*=\s*['"]?([^$\s'"][A-Za-z0-9/+=_-]{15,})['"]?'''
+secretGroup = 1
+tags = ["secret", "jwt"]
+
+# ── MongoDB / generic connection string with an embedded password ───────
+[[rules]]
+id = "mongodb-uri-with-credentials"
+description = "MongoDB connection string with an embedded username:password"
+regex = '''mongodb(\+srv)?://[^:/\s"']+:[^@/\s"']+@[^\s"']+'''
+tags = ["secret", "mongodb", "connection-string"]
+
+# ── MapTiler API key (frontend concern, kept here too in case the backend
+#    ever proxies/serves a map config) ──────────────────────────────────
+[[rules]]
+id = "maptiler-api-key"
+description = "MapTiler API key embedded in a tile/style URL"
+regex = '''api\.maptiler\.com/[^\s"'?]+\?key=[A-Za-z0-9]{16,}'''
+tags = ["secret", "maptiler"]
+
+# ── Allowlist: known-safe placeholders / test-only values ───────────────
+# Never add a REAL secret here. Only fixed, intentionally-public
+# placeholders that are meant to be in the repo.
+[allowlist]
+regexes = [
+  # Dev-only JWT fallback baked into JwtService's @Value default — not a
+  # real secret, deliberately weak, documented as "never use outside dev".
+  '''dev-secret-change-me-dev-secret-change-me''',
+  # Fixed test-only JWT secret used by application-test.properties —
+  # public on purpose, never used outside the test profile.
+  '''test-only-jwt-secret-DO-NOT-USE-IN-PRODUCTION-0000000000''',
+  # Well-known MinIO local-dev default credentials (not a real secret).
+  '''minioadmin''',
+]
+paths = [
+  '''(.*?)(jpg|jpeg|png|gif|svg|ico|woff2?|ttf)$''',
+  '''(.*?)/target/(.*?)''',
+]

@@ -1,0 +1,21 @@
+# Optional override: proves docker-compose.yml's env-var wiring satisfies
+# ProductionSafetyEnvironmentPostProcessor (APPSTOCK/PFE-Ooredoo/src/main/java/
+# com/pfe/config/ProductionSafetyEnvironmentPostProcessor.java), which only
+# activates when SPRING_PROFILES_ACTIVE=prod. This is NOT a real production
+# deployment (still local Compose, same self-signed/no-TLS setup) — it
+# exists purely to verify the `prod` profile boots cleanly against Compose
+# service names, per DOCKER.md's "Which Spring profile does Compose use,
+# and why".
+#
+#   docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.prod-check.yml up -d
+#
+# By design, every value docker-compose.yml already passes to the backend
+# (MONGODB_URI via the mongodb service name, MINIO_URL via the minio
+# service name, OCR_API_URL via the ocr service name, non-localhost
+# APP_CORS_ALLOWED_ORIGINS/APP_FRONTEND_URL placeholders) already satisfies
+# the validator — SPRING_PROFILES_ACTIVE is the only thing this file
+# actually needs to override.
+services:
+  backend:
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
