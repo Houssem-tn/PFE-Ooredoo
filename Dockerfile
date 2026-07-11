@@ -43,8 +43,14 @@ FROM eclipse-temurin:17-jre-jammy AS runtime
 
 # curl is only present so the container HEALTHCHECK below has an HTTP
 # client; nothing else is installed and apt's own state is removed
-# immediately so it isn't left sitting in the image.
+# immediately so it isn't left sitting in the image. `apt-get upgrade`
+# pulls whatever security patches are current at build time for packages
+# already in the base image — the jammy tag is a moving tag, not rebuilt
+# every time an upstream package gets patched (confirmed in practice on
+# the sibling frontend image's Alpine base: a freshly-pulled image still
+# had an already-fixed OpenSSL CVE — see Pfe-Oreedoo-Front/Dockerfile).
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
