@@ -2,8 +2,6 @@ package com.pfe.MainPackage.Service;
 
 import com.pfe.MainPackage.Dto.*;
 import com.pfe.MainPackage.Entity.*;
-import com.pfe.MainPackage.Dto.*;
-import com.pfe.MainPackage.Entity.*;
 import com.pfe.MainPackage.Repository.UserRepository;
 import com.pfe.Security.JwtService;
 import com.pfe.MainPackage.mapper.UserMapper;

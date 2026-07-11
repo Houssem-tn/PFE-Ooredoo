@@ -13,6 +13,7 @@ import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.EquipmentInstance;
 import com.pfe.stock_management.entity.StockThreshold;
 import com.pfe.stock_management.entity.SttStock;
+import com.pfe.stock_management.dto.MaterialQuantityBreakdownDto;
 import com.pfe.stock_management.enums.DpmStatus;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import com.pfe.stock_management.material_return.MaterialReturnRepository;
@@ -26,6 +27,7 @@ import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.EquipmentInstanceRepository;
 import com.pfe.stock_management.repository.StockThresholdRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
+import com.pfe.stock_management.util.MaterialQuantityGrouping;
 import com.pfe.zm_dashboard.dto.ZmDashboardResponse;
 import com.pfe.zm_dashboard.dto.ZmDashboardResponse.ActionGroup;
 import com.pfe.zm_dashboard.dto.ZmDashboardResponse.ActionItems;
@@ -59,7 +61,6 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -282,10 +283,14 @@ public class ZmDashboardService {
 
     private List<ModuleStats> buildModuleStats(List<Document> byModuleStatus, Map<String, Long> moduleOverdue) {
         Map<String, Map<String, Long>> perModule = new LinkedHashMap<>();
-        for (String m : List.of("ACT", "PLT", "RES")) perModule.put(m, new LinkedHashMap<>());
+        for (String m : List.of("ACT", "PLT", "RES")) {
+            perModule.put(m, new LinkedHashMap<>());
+        }
         for (Document d : safe(byModuleStatus)) {
             Document id = (Document) d.get("_id");
-            if (id == null) continue;
+            if (id == null) {
+                continue;
+            }
             String module = id.getString("m");
             String status = id.getString("s");
             long count = num(d.get("count"));
@@ -331,36 +336,75 @@ public class ZmDashboardService {
 
         Map<String, Document> caseStatsById = new LinkedHashMap<>();
         for (Document d : safe(byStt)) {
-            if (d.get("_id") != null) caseStatsById.put(d.getString("_id"), d);
+            if (d.get("_id") != null) {
+                caseStatsById.put(d.getString("_id"), d);
+            }
         }
 
         // Material figures per STT from the STT stock ledger + returns submitted to this ZM.
-        Map<String, long[]> returnsByStt = new LinkedHashMap<>(); // [returnedQty, damagedMissingQty]
+        Map<String, Map<String, MaterialQuantityGrouping.MaterialAccumulator>> returnsByStt = new LinkedHashMap<>();
+        Map<String, Map<String, MaterialQuantityGrouping.MaterialAccumulator>> damagedMissingByStt = new LinkedHashMap<>();
         for (MaterialReturnRequest r : zmReturns) {
-            if (r.getSttId() == null) continue;
-            long[] agg = returnsByStt.computeIfAbsent(r.getSttId(), k -> new long[2]);
+            if (r.getSttId() == null) {
+                continue;
+            }
+            Map<String, MaterialQuantityGrouping.MaterialAccumulator> returnedAgg =
+                    returnsByStt.computeIfAbsent(r.getSttId(), k -> new LinkedHashMap<>());
+            Map<String, MaterialQuantityGrouping.MaterialAccumulator> damagedAgg =
+                    damagedMissingByStt.computeIfAbsent(r.getSttId(), k -> new LinkedHashMap<>());
             for (ReturnedItem item : safeItems(r)) {
-                agg[0] += item.getQuantity();
-                if (isDamagedOrMissing(r, item)) agg[1] += item.getQuantity();
+                MaterialQuantityGrouping.add(
+                        returnedAgg,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getQuantity());
+                if (isDamagedOrMissing(r, item)) {
+                    MaterialQuantityGrouping.add(
+                            damagedAgg,
+                            item.getEquipmentId(),
+                            item.getEquipmentName(),
+                            item.getUnit(),
+                            item.getQuantity());
+                }
             }
         }
 
         List<SttPerformance> result = new ArrayList<>();
         for (UserDTO stt : stts) {
             Document cs = caseStatsById.remove(stt.id());
-            result.add(buildSttRow(stt.id(), stt.fullName(), stt.email(), cs, returnsByStt.get(stt.id())));
+            result.add(buildSttRow(
+                    stt.id(),
+                    stt.fullName(),
+                    stt.email(),
+                    cs,
+                    MaterialQuantityGrouping.toBreakdownList(returnsByStt.get(stt.id())),
+                    MaterialQuantityGrouping.toBreakdownList(damagedMissingByStt.get(stt.id()))));
         }
         // Include STTs that have cases but are not in the (approved+enabled) team list — never drop numbers.
         for (Document cs : caseStatsById.values()) {
             String id = cs.getString("_id");
-            result.add(buildSttRow(id, cs.getString("sttName"), cs.getString("sttEmail"), cs, returnsByStt.get(id)));
+            result.add(buildSttRow(
+                    id,
+                    cs.getString("sttName"),
+                    cs.getString("sttEmail"),
+                    cs,
+                    MaterialQuantityGrouping.toBreakdownList(returnsByStt.get(id)),
+                    MaterialQuantityGrouping.toBreakdownList(damagedMissingByStt.get(id))));
         }
 
         result.sort(Comparator.comparingLong(SttPerformance::assigned).reversed());
         return result;
     }
 
-    private SttPerformance buildSttRow(String sttId, String name, String email, Document cs, long[] returns) {
+    private SttPerformance buildSttRow(
+            String sttId,
+            String name,
+            String email,
+            Document cs,
+            List<MaterialQuantityBreakdownDto> returnedBreakdown,
+            List<MaterialQuantityBreakdownDto> damagedMissingBreakdown
+    ) {
         long assigned = cs != null ? num(cs.get("total")) : 0;
         long completed = cs != null ? num(cs.get("completed")) : 0;
         long late = cs != null ? num(cs.get("late")) : 0;
@@ -373,30 +417,48 @@ public class ZmDashboardService {
         long resolvedForSla = onTime + completedLate;
         double slaRespectPercent = resolvedForSla > 0 ? round2((double) onTime * 100d / resolvedForSla) : 0d;
 
-        long[] ledger = sttMaterialLedger(sttId);
-        long returnedQty = returns != null ? returns[0] : 0;
-        long damagedMissing = returns != null ? returns[1] : 0;
+        MaterialLedger ledger = sttMaterialLedger(sttId);
+        long returnedQty = MaterialQuantityGrouping.totalQuantity(returnedBreakdown);
+        long damagedMissing = MaterialQuantityGrouping.totalQuantity(damagedMissingBreakdown);
 
         return new SttPerformance(
                 sttId, name, email,
                 assigned, completed, Math.max(0, assigned - completed), late,
                 avgResolutionMinutes, slaRespectPercent,
-                ledger[0], ledger[1], returnedQty, damagedMissing);
+                MaterialQuantityGrouping.totalQuantity(ledger.receivedBreakdown()), ledger.receivedBreakdown(),
+                MaterialQuantityGrouping.totalQuantity(ledger.distributedBreakdown()), ledger.distributedBreakdown(),
+                returnedQty, returnedBreakdown,
+                damagedMissing, damagedMissingBreakdown);
     }
 
-    /** [received, distributedToTechs] from the STT's stock ledger. */
-    private long[] sttMaterialLedger(String sttId) {
-        if (sttId == null) return new long[]{0, 0};
+    /** Received and distributed material grouped by equipment and unit from the STT stock ledger. */
+    private MaterialLedger sttMaterialLedger(String sttId) {
+        if (sttId == null) {
+            return MaterialLedger.empty();
+        }
         return sttStockRepository.findBySttId(sttId)
                 .map(stock -> {
-                    long received = 0, distributed = 0;
+                    Map<String, MaterialQuantityGrouping.MaterialAccumulator> received = new LinkedHashMap<>();
+                    Map<String, MaterialQuantityGrouping.MaterialAccumulator> distributed = new LinkedHashMap<>();
                     for (SttStockItem item : safeStockItems(stock)) {
-                        received += item.getTotalReceived();
-                        distributed += item.getTotalDistributedToTechs();
+                        MaterialQuantityGrouping.add(
+                                received,
+                                item.getEquipmentId(),
+                                item.getEquipmentName(),
+                                item.getUnit(),
+                                item.getTotalReceived());
+                        MaterialQuantityGrouping.add(
+                                distributed,
+                                item.getEquipmentId(),
+                                item.getEquipmentName(),
+                                item.getUnit(),
+                                item.getTotalDistributedToTechs());
                     }
-                    return new long[]{received, distributed};
+                    return new MaterialLedger(
+                            MaterialQuantityGrouping.toBreakdownList(received),
+                            MaterialQuantityGrouping.toBreakdownList(distributed));
                 })
-                .orElse(new long[]{0, 0});
+                .orElseGet(MaterialLedger::empty);
     }
 
     // ── Stock overview ────────────────────────────────────────────────────────────
@@ -408,32 +470,80 @@ public class ZmDashboardService {
         long dpmCreated = zmDpms.size();
         long dpmConfirmed = zmDpms.stream().filter(d -> DPM_CONFIRMED.contains(d.getStatus())).count();
 
-        long received = 0, distributed = 0;
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> received = new LinkedHashMap<>();
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> distributed = new LinkedHashMap<>();
         for (SttStock stock : teamStocks) {
             for (SttStockItem item : safeStockItems(stock)) {
-                received += item.getTotalReceived();
-                distributed += item.getTotalDistributedToTechs();
+                MaterialQuantityGrouping.add(
+                        received,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getTotalReceived());
+                MaterialQuantityGrouping.add(
+                        distributed,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getTotalDistributedToTechs());
             }
         }
 
-        long consumed = caseStockConsumptionRepository.findByZmIdOrderByConsumedAtDesc(zm.getId()).stream()
-                .flatMap(c -> safeConsumed(c).stream())
-                .mapToLong(ConsumedEquipmentItem::getQuantityUsed)
-                .sum();
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> consumed = new LinkedHashMap<>();
+        for (CaseStockConsumption consumption : caseStockConsumptionRepository.findByZmIdOrderByConsumedAtDesc(zm.getId())) {
+            for (ConsumedEquipmentItem item : safeConsumed(consumption)) {
+                MaterialQuantityGrouping.add(
+                        consumed,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getQuantityUsed());
+            }
+        }
 
-        long returned = 0, recoverable = 0;
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> returned = new LinkedHashMap<>();
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> recoverable = new LinkedHashMap<>();
         for (MaterialReturnRequest r : zmReturns) {
             for (ReturnedItem item : safeItems(r)) {
-                returned += item.getQuantity();
-                if (isRecoverable(r, item)) recoverable += item.getQuantity();
+                MaterialQuantityGrouping.add(
+                        returned,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getQuantity());
+                if (isRecoverable(r, item)) {
+                    MaterialQuantityGrouping.add(
+                            recoverable,
+                            item.getEquipmentId(),
+                            item.getEquipmentName(),
+                            item.getUnit(),
+                            item.getQuantity());
+                }
             }
         }
 
         long missingImeiSerial = trackedUnits.stream().filter(this::isMissingIdentifiers).count();
+        List<MaterialQuantityBreakdownDto> receivedBreakdown = MaterialQuantityGrouping.toBreakdownList(received);
+        List<MaterialQuantityBreakdownDto> distributedBreakdown = MaterialQuantityGrouping.toBreakdownList(distributed);
+        List<MaterialQuantityBreakdownDto> consumedBreakdown = MaterialQuantityGrouping.toBreakdownList(consumed);
+        List<MaterialQuantityBreakdownDto> returnedBreakdown = MaterialQuantityGrouping.toBreakdownList(returned);
+        List<MaterialQuantityBreakdownDto> recoverableBreakdown = MaterialQuantityGrouping.toBreakdownList(recoverable);
 
         return new StockOverview(
-                dpmCreated, dpmConfirmed, received, distributed, consumed,
-                returned, recoverable, trackedUnits.size(), missingImeiSerial);
+                dpmCreated,
+                dpmConfirmed,
+                MaterialQuantityGrouping.totalQuantity(receivedBreakdown),
+                receivedBreakdown,
+                MaterialQuantityGrouping.totalQuantity(distributedBreakdown),
+                distributedBreakdown,
+                MaterialQuantityGrouping.totalQuantity(consumedBreakdown),
+                consumedBreakdown,
+                MaterialQuantityGrouping.totalQuantity(returnedBreakdown),
+                returnedBreakdown,
+                MaterialQuantityGrouping.totalQuantity(recoverableBreakdown),
+                recoverableBreakdown,
+                trackedUnits.size(),
+                missingImeiSerial);
     }
 
     // ── Action items ──────────────────────────────────────────────────────────────
@@ -485,14 +595,20 @@ public class ZmDashboardService {
     private ActionGroup buildStockAnomalies(List<SttStock> teamStocks, AppUser zm) {
         List<StockThreshold> thresholds = stockThresholdRepository.findByZmIdAndEnabledTrue(zm.getId());
         Map<String, StockThreshold> byItem = new LinkedHashMap<>();
-        for (StockThreshold t : thresholds) if (t.getItemId() != null) byItem.put(t.getItemId(), t);
+        for (StockThreshold t : thresholds) {
+            if (t.getItemId() != null) {
+                byItem.put(t.getItemId(), t);
+            }
+        }
 
         List<ActionPreview> preview = new ArrayList<>();
         long count = 0;
         for (SttStock stock : teamStocks) {
             for (SttStockItem item : safeStockItems(stock)) {
                 StockThreshold t = byItem.get(item.getEquipmentId());
-                if (t != null && Boolean.FALSE.equals(t.getSttAlertsEnabled())) continue;
+                if (t != null && Boolean.FALSE.equals(t.getSttAlertsEnabled())) {
+                    continue;
+                }
                 double warningAt = t != null && t.getSttWarningThreshold() != null
                         ? t.getSttWarningThreshold()
                         : (t != null ? t.getWarningThreshold() : DEFAULT_WARNING_THRESHOLD);
@@ -621,13 +737,17 @@ public class ZmDashboardService {
 
     private static long countIn(Map<String, Long> counts, List<String> statuses) {
         long total = 0;
-        for (String s : statuses) total += counts.getOrDefault(s, 0L);
+        for (String s : statuses) {
+            total += counts.getOrDefault(s, 0L);
+        }
         return total;
     }
 
     private static long sum(Collection<Long> values) {
         long total = 0;
-        for (Long v : values) total += v != null ? v : 0;
+        for (Long v : values) {
+            total += v != null ? v : 0;
+        }
         return total;
     }
 
@@ -670,5 +790,14 @@ public class ZmDashboardService {
 
     private static List<ConsumedEquipmentItem> safeConsumed(CaseStockConsumption c) {
         return c.getConsumedItems() != null ? c.getConsumedItems() : List.of();
+    }
+
+    private record MaterialLedger(
+            List<MaterialQuantityBreakdownDto> receivedBreakdown,
+            List<MaterialQuantityBreakdownDto> distributedBreakdown
+    ) {
+        private static MaterialLedger empty() {
+            return new MaterialLedger(List.of(), List.of());
+        }
     }
 }

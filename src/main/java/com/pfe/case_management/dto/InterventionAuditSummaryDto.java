@@ -1,5 +1,9 @@
 package com.pfe.case_management.dto;
 
+import com.pfe.stock_management.dto.MaterialQuantityBreakdownDto;
+
+import java.util.List;
+
 /**
  * Top summary cards for the Interventions Auditing cockpit.
  *
@@ -9,6 +13,7 @@ package com.pfe.case_management.dto;
  * @param pendingValidation   interventions awaiting ZM validation
  * @param proofMissing        completed interventions with no photo proof
  * @param materialsConsumed   total quantity of material consumed across interventions
+ * @param materialsConsumedBreakdown grouped material totals by equipment type and unit
  */
 public record InterventionAuditSummaryDto(
         long totalInterventions,
@@ -16,6 +21,7 @@ public record InterventionAuditSummaryDto(
         long slaBreached,
         long pendingValidation,
         long proofMissing,
-        long materialsConsumed
+        long materialsConsumed,
+        List<MaterialQuantityBreakdownDto> materialsConsumedBreakdown
 ) {
 }

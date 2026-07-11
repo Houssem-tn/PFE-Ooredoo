@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -16,6 +17,7 @@ import java.io.IOException;
 import java.time.Instant;
 
 @Component
+@Slf4j
 public class JwtAuthFilter extends OncePerRequestFilter {
     private static final String BANNED_MESSAGE = "Unfortunately you are banned! Contact admin";
 
@@ -36,34 +38,36 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
 
-        System.out.println("=== JWT FILTER ===");
-        System.out.println("PATH = " + path);
-        System.out.println("AUTH HEADER = " + header);
+        // Never log the raw Authorization header or token: it is a bearer
+        // credential — logging it (even at DEBUG, even to local stdout)
+        // creates a credential-leak vector if logs are ever centralized,
+        // persisted, or read by another process/user. Only presence/absence
+        // and non-sensitive outcome metadata are logged, at DEBUG so it's
+        // silent by default in prod (logging.level.com.pfe=INFO there) and
+        // visible in dev (logging.level.com.pfe=DEBUG).
+        log.debug("JWT filter: path={}", path);
 
         if (header == null || !header.startsWith("Bearer ")) {
-            System.out.println("NO BEARER TOKEN");
+            log.debug("JWT filter: no bearer token for path={}", path);
             chain.doFilter(request, response);
             return;
         }
 
         String token = header.substring(7);
-        System.out.println("TOKEN FOUND");
 
         if (!jwtService.isValid(token)) {
-            System.out.println("TOKEN INVALID");
+            log.debug("JWT filter: invalid token for path={}", path);
             chain.doFilter(request, response);
             return;
         }
 
         String email = jwtService.extractSubject(token);
-        System.out.println("TOKEN SUBJECT = " + email);
 
         if (email != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             UserDetails userDetails = userDetailsService.loadUserByUsername(email);
-            System.out.println("USER LOADED = " + userDetails.getUsername());
-            System.out.println("AUTHORITIES = " + userDetails.getAuthorities());
 
             if (!userDetails.isEnabled()) {
+                log.debug("JWT filter: disabled/banned account attempted access, path={}", path);
                 SecurityContextHolder.clearContext();
                 writeUnauthorized(response, request.getRequestURI(), BANNED_MESSAGE);
                 return;
@@ -79,7 +83,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
             SecurityContextHolder.getContext().setAuthentication(auth);
 
-            System.out.println("AUTH SET IN CONTEXT");
+            log.debug("JWT filter: authenticated user={}, path={}", userDetails.getUsername(), path);
         }
 
         chain.doFilter(request, response);

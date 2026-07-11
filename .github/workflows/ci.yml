@@ -298,10 +298,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history only on the scheduled weekly run — PR/push scans
-          # check just the changed commits (fast, and still catches any new
-          # secret entering the codebase, which is the actual blocking gate).
-          fetch-depth: ${{ github.event_name == 'schedule' && 0 || 2 }}
+          # Full history, every trigger. A shallower fetch (e.g. depth: 2)
+          # broke in practice: gitleaks-action diffs
+          # <before-sha>^..<after-sha>, and a single push can easily contain
+          # more than one new commit (the CI + a follow-up security-fix
+          # commit both landed in one `git push` here) — depth: 2 wasn't
+          # enough to resolve <before-sha>'s own parent, and the job failed
+          # with "unknown revision" instead of actually scanning anything.
+          # These repos are small; full history costs a couple of seconds.
+          fetch-depth: 0
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2

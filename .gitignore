@@ -4,6 +4,16 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### Maven ###
+*.jar
+*.war
+*.ear
+*.class
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.flattened-pom.xml
+
 ### STS ###
 .apt_generated
 .classpath
@@ -19,6 +29,21 @@ target/
 *.iml
 *.ipr
 
+### Eclipse ###
+.metadata
+bin/
+tmp/
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.loadpath
+.recommenders
+.externalToolBuilders/
+.cproject
+.buildpath
+
 ### NetBeans ###
 /nbproject/private/
 /nbbuild/
@@ -31,6 +56,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Logs ###
+*.log
+logs/
+build_run.log
 
 ### Environment / secrets ###
 .env
@@ -46,3 +76,21 @@ application-secrets.yml
 *.key
 *.p12
 *.jks
+
+### Uploaded / runtime files ###
+/uploads/
+/upload-tmp/
+/files/
+*.tmp
+
+### OS files ###
+.DS_Store
+Thumbs.db
+desktop.ini
+
+### Quality / security scan reports ###
+# checkstyle-result.xml, spotbugsXml.xml, dependency-check-report.*, and
+# JaCoCo all already live under target/ (ignored above). These cover the
+# few tools that can write outside target/.
+gitleaks-report.json
+dependency-check-data/

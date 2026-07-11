@@ -48,7 +48,6 @@ import com.pfe.case_management.model.RecoveredEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import com.pfe.stock_management.material_return.MaterialReturnService;
-import com.pfe.stock_management.material_return.ReturnedItem;
 import com.pfe.stock_management.service.EquipmentUsagePolicyService;
 import com.pfe.stock_management.service.SttStockService;
 import com.pfe.support.TunisiaGovernorateSupport;
@@ -70,10 +69,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;

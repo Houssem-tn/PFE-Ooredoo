@@ -5,15 +5,31 @@ import com.pfe.MainPackage.Entity.AccountStatus;
 import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.MainPackage.Entity.UserRole;
 import com.pfe.MainPackage.Repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.context.annotation.Profile;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
+// Dev/test convenience only: never runs when app.jwt.secret's real
+// counterpart matters, i.e. never in production (see @Profile below).
+// Production must create its first admin through a real, audited flow.
 @Component
+@Profile("!prod")
 public class SeedAdminRunner implements CommandLineRunner {
+
+    private static final Logger log = LoggerFactory.getLogger(SeedAdminRunner.class);
 
     private final UserRepository repo;
     private final PasswordEncoder encoder;
+
+    @Value("${app.seed-admin.email:admin@local.tn}")
+    private String adminEmail;
+
+    @Value("${app.seed-admin.password:admin123}")
+    private String adminPassword;
 
     public SeedAdminRunner(UserRepository repo, PasswordEncoder encoder) {
         this.repo = repo;
@@ -22,27 +38,20 @@ public class SeedAdminRunner implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-
-        String adminEmail = "admin@local.tn";
-
-        // ✅ create admin only if not exists
         if (repo.existsByEmail(adminEmail)) return;
 
         AppUser admin = AppUser.builder()
                 .fullName("System Admin")
                 .email(adminEmail)
-                .password(encoder.encode("admin123"))
-
-                // ✅ IMPORTANT for new approval workflow
+                .password(encoder.encode(adminPassword))
                 .role(UserRole.ROLE_ADMIN)
                 .roleRequested(null)
                 .status(AccountStatus.APPROVED)
                 .enabled(true)
-
                 .build();
 
         repo.save(admin);
 
-        System.out.println("✅ Admin seeded: admin@local.tn / admin123");
+        log.info("Seeded default admin account ({}) for local development/testing.", adminEmail);
     }
 }

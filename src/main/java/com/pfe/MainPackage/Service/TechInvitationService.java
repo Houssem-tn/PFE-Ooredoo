@@ -2,9 +2,9 @@ package com.pfe.MainPackage.Service;
 
 import com.pfe.MainPackage.Dto.TechInvitationValidationResponse;
 import com.pfe.MainPackage.Entity.*;
-import com.pfe.MainPackage.Entity.*;
 import com.pfe.MainPackage.Repository.TechInvitationRepository;
 import com.pfe.MainPackage.Repository.UserRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -19,6 +19,9 @@ public class TechInvitationService {
     private final TechInvitationRepository repo;
     private final UserRepository userRepo;
     private final EmailService emailService;
+
+    @Value("${app.frontend-url}")
+    private String frontendUrl;
 
     public TechInvitationService(
             TechInvitationRepository repo,
@@ -81,7 +84,7 @@ public class TechInvitationService {
 
         repo.save(invitation);
 
-        String link = "http://localhost:4200/register-tech?token=" + token;
+        String link = frontendUrl + "/register-tech?token=" + token;
 
         emailService.send(
                 normalizedEmail,

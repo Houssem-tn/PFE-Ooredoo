@@ -21,6 +21,7 @@ import com.pfe.stock_management.model.PermissionItem;
 import com.pfe.stock_management.repository.StockThresholdRepository;
 import com.pfe.stock_management.repository.StockUsagePermissionRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -42,6 +43,7 @@ import java.util.stream.Collectors;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class StockUsagePermissionService {
 
     /**
@@ -87,6 +89,7 @@ public class StockUsagePermissionService {
         AppUser stt = resolveAssignedStt(tech);
 
         List<PermissionItem> requestedItems = mapRequestedItems(req.getRequestedItems());
+        double requestedCableMeters = requestedCableMeters(req.getRequestedCableMeters(), requestedItems);
 
         StockUsagePermissionRequest permission = StockUsagePermissionRequest.builder()
                 .caseId(caseEntity.getId())
@@ -101,7 +104,7 @@ public class StockUsagePermissionService {
                 .zmName(resolveZmName(stt))
                 .status("PENDING")
                 .reason(req.getReason())
-                .requestedCableMeters(req.getRequestedCableMeters())
+                .requestedCableMeters(requestedCableMeters)
                 .requestedItems(requestedItems)
                 .createdAt(Instant.now())
                 .build();
@@ -111,7 +114,7 @@ public class StockUsagePermissionService {
         // Timeline: append to case
         Map<String, Object> timelineData = new HashMap<>();
         timelineData.put("permissionId", permission.getId());
-        timelineData.put("requestedCableMeters", req.getRequestedCableMeters());
+        timelineData.put("requestedCableMeters", requestedCableMeters);
         timelineData.put("techName", tech.getFullName());
         caseTimelineService.append(caseEntity, CaseTimelineEventType.STOCK_USAGE_PERMISSION_REQUESTED,
                 "Over-limit stock usage requested",
@@ -163,7 +166,9 @@ public class StockUsagePermissionService {
         List<PermissionItem> approvedItems = resolveApprovedItems(
                 permission.getRequestedItems(), req.getApprovedItems());
 
-        double approvedCable = Math.min(req.getApprovedCableMeters(), permission.getRequestedCableMeters());
+        double approvedCable = hasDetailedMeterItems(permission.getRequestedItems())
+                ? Math.min(sumApprovedMeterQuantity(approvedItems), permission.getRequestedCableMeters())
+                : Math.min(req.getApprovedCableMeters(), permission.getRequestedCableMeters());
 
         String newStatus = determineStatus(permission, approvedCable, approvedItems);
 
@@ -206,6 +211,7 @@ public class StockUsagePermissionService {
                     .map(i -> Map.of(
                             "itemId", i.getItemId(),
                             "itemName", i.getItemName(),
+                            "unit", i.getUnit(),
                             "approvedQuantity", i.getApprovedQuantity()))
                     .collect(Collectors.toList()));
         }
@@ -286,11 +292,12 @@ public class StockUsagePermissionService {
 
         List<String> violationMessages = new ArrayList<>();
         double totalViolatingCableMeters = 0;
-        Map<String, Integer> itemViolations = new java.util.LinkedHashMap<>();
+        Map<String, Double> itemViolations = new java.util.LinkedHashMap<>();
         Map<String, String> itemViolationNames = new HashMap<>();
+        Map<String, Boolean> itemViolationMeters = new HashMap<>();
 
         for (UsedEquipmentRequestItem item : requestedItems) {
-            boolean isCable = "METERS".equalsIgnoreCase(item.unit());
+            boolean isCable = isMeterUnit(item.unit());
             double qty = item.quantity();
             Double limit = resolveItemLimit(zmId, item.equipmentId(), isCable);
 
@@ -300,11 +307,11 @@ public class StockUsagePermissionService {
                         ? item.equipmentName() : item.equipmentId();
                 violationMessages.add(name + " requested: " + fmtQty(qty, isCable) +
                         " " + unitLabel + ", allowed without permission: " + fmtQty(limit, isCable) + " " + unitLabel);
+                itemViolations.put(item.equipmentId(), qty);
+                itemViolationNames.put(item.equipmentId(), name);
+                itemViolationMeters.put(item.equipmentId(), isCable);
                 if (isCable) {
                     totalViolatingCableMeters += qty;
-                } else {
-                    itemViolations.put(item.equipmentId(), item.quantity());
-                    itemViolationNames.put(item.equipmentId(), name);
                 }
             }
         }
@@ -320,8 +327,12 @@ public class StockUsagePermissionService {
                         "Please request STT permission before finishing. " +
                         String.join("; ", violationMessages)));
 
+        boolean hasDetailedMeterApprovals = hasDetailedMeterItems(permission.getApprovedItems())
+                || hasDetailedMeterItems(permission.getRequestedItems());
+
         // Validate approved cable amount covers violating cable
-        if (totalViolatingCableMeters > 0
+        if (!hasDetailedMeterApprovals
+                && totalViolatingCableMeters > 0
                 && totalViolatingCableMeters > permission.getApprovedCableMeters()) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,
                     "Cable usage " + fmtQty(totalViolatingCableMeters, true) +
@@ -333,13 +344,19 @@ public class StockUsagePermissionService {
         if (!itemViolations.isEmpty() && permission.getApprovedItems() != null) {
             Map<String, Double> approvedMap = permission.getApprovedItems().stream()
                     .collect(Collectors.toMap(PermissionItem::getItemId, PermissionItem::getApprovedQuantity));
-            for (Map.Entry<String, Integer> entry : itemViolations.entrySet()) {
+            for (Map.Entry<String, Double> entry : itemViolations.entrySet()) {
+                boolean isMeterItem = itemViolationMeters.getOrDefault(entry.getKey(), false);
+                if (isMeterItem && !hasDetailedMeterApprovals) {
+                    continue;
+                }
                 double approved = approvedMap.getOrDefault(entry.getKey(), 0.0);
                 if (entry.getValue() > approved) {
                     throw new ResponseStatusException(HttpStatus.FORBIDDEN,
                             itemViolationNames.getOrDefault(entry.getKey(), entry.getKey()) +
-                            " quantity " + entry.getValue() +
-                            " exceeds the approved amount of " + (int) approved + " pcs.");
+                            " quantity " + fmtQty(entry.getValue(), isMeterItem) +
+                            " " + (isMeterItem ? "m" : "pcs") +
+                            " exceeds the approved amount of " +
+                            fmtQty(approved, isMeterItem) + " " + (isMeterItem ? "m" : "pcs") + ".");
                 }
             }
         }
@@ -366,6 +383,32 @@ public class StockUsagePermissionService {
     private String fmtQty(double qty, boolean isCable) {
         if (!isCable) return String.valueOf((int) qty);
         return qty == Math.floor(qty) ? String.valueOf((int) qty) : String.valueOf(qty);
+    }
+
+    private boolean isMeterUnit(String unit) {
+        return unit != null && "METERS".equalsIgnoreCase(unit.trim());
+    }
+
+    private boolean hasDetailedMeterItems(List<PermissionItem> items) {
+        return items != null && items.stream().anyMatch(item -> isMeterUnit(item.getUnit()));
+    }
+
+    private double sumApprovedMeterQuantity(List<PermissionItem> items) {
+        if (items == null) return 0;
+        return items.stream()
+                .filter(item -> isMeterUnit(item.getUnit()))
+                .mapToDouble(PermissionItem::getApprovedQuantity)
+                .sum();
+    }
+
+    private double requestedCableMeters(double legacyRequestedCableMeters, List<PermissionItem> requestedItems) {
+        if (hasDetailedMeterItems(requestedItems)) {
+            return requestedItems.stream()
+                    .filter(item -> isMeterUnit(item.getUnit()))
+                    .mapToDouble(PermissionItem::getRequestedQuantity)
+                    .sum();
+        }
+        return legacyRequestedCableMeters;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -504,33 +547,36 @@ public class StockUsagePermissionService {
                 wsNotificationSender.sendToUser(recipientEmail, saved);
             }
         } catch (Exception e) {
-            // Non-critical — log and continue
+            log.warn("Failed to send stock permission alert to {} (eventType={})", recipientEmail, eventType, e);
         }
     }
 
     private String formatRequest(CreatePermissionRequest req) {
         StringBuilder sb = new StringBuilder();
-        if (req.getRequestedCableMeters() > 0) {
-            sb.append(req.getRequestedCableMeters()).append("m cable");
-        }
         if (req.getRequestedItems() != null && !req.getRequestedItems().isEmpty()) {
-            if (sb.length() > 0) sb.append(" and ");
             sb.append(req.getRequestedItems().stream()
-                    .map(i -> (int) i.getRequestedQuantity() + "x " + i.getItemName())
+                    .map(i -> formatItemQuantity(i.getRequestedQuantity(), i.getUnit()) + " " + i.getItemName())
                     .collect(Collectors.joining(", ")));
+        } else if (req.getRequestedCableMeters() > 0) {
+            sb.append(fmtQty(req.getRequestedCableMeters(), true)).append("m cable");
         }
         return sb.toString();
     }
 
     private String formatApproval(double approvedCable, List<PermissionItem> items) {
         StringBuilder sb = new StringBuilder();
-        if (approvedCable > 0) sb.append(approvedCable).append("m cable");
         if (items != null && !items.isEmpty()) {
-            if (sb.length() > 0) sb.append(", ");
             sb.append(items.stream()
-                    .map(i -> (int) i.getApprovedQuantity() + "x " + i.getItemName())
+                    .map(i -> formatItemQuantity(i.getApprovedQuantity(), i.getUnit()) + " " + i.getItemName())
                     .collect(Collectors.joining(", ")));
+        } else if (approvedCable > 0) {
+            sb.append(fmtQty(approvedCable, true)).append("m cable");
         }
         return sb.toString();
+    }
+
+    private String formatItemQuantity(double quantity, String unit) {
+        boolean meter = isMeterUnit(unit);
+        return fmtQty(quantity, meter) + (meter ? " m" : " pcs");
     }
 }

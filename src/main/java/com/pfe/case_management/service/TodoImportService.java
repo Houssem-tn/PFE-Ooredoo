@@ -19,7 +19,6 @@ import com.pfe.case_management.dto.ZmTodoAnalyticsInvalidReasonResponse;
 import com.pfe.case_management.dto.BulkPltImportResult;
 import com.pfe.case_management.dto.PltCaseRow;
 import com.pfe.case_management.dto.ZmFieldWorkImportResponse;
-import com.pfe.case_management.dto.ZmTodoImportProcessResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsResponse;
 import com.pfe.case_management.dto.ZmTodoAnalyticsSttItemResponse;
 import com.pfe.support.TunisiaGovernorateSupport;
@@ -3384,27 +3383,6 @@ public class TodoImportService {
     private String normalizeGovernorateAlias(String value) {
         return TodoAnalyticsSupport.normalizeLookupValue(value);
     }
-
-    private String normalizeCoordinate(String rawValue) {
-        if (!hasText(rawValue)) {
-            return null;
-        }
-
-        String cleaned = rawValue.trim()
-                .replace("\u00B0", "")
-                .replace("°", "")
-                .replace(" ", "")
-                .replace(',', '.');
-
-        if (cleaned.endsWith("N") || cleaned.endsWith("n") || cleaned.endsWith("E") || cleaned.endsWith("e")) {
-            cleaned = cleaned.substring(0, cleaned.length() - 1);
-        } else if (cleaned.endsWith("S") || cleaned.endsWith("s") || cleaned.endsWith("W") || cleaned.endsWith("w")) {
-            cleaned = "-" + cleaned.substring(0, cleaned.length() - 1);
-        }
-
-        return hasText(cleaned) ? cleaned : null;
-    }
-
     private LocalDate parseImportedDate(String rawValue) {
         if (!hasText(rawValue)) {
             return null;

@@ -1,6 +1,5 @@
 package com.pfe.coverage.service;
 
-import com.pfe.coverage.dto.CoverageAnalyticsGeoJson;
 import com.pfe.coverage.dto.CoverageAnalyticsGeoJson.Feature;
 import com.pfe.coverage.dto.CoverageAnalyticsGeoJson.FeatureCollection;
 import com.pfe.coverage.dto.CoverageAnalyticsGeoJson.Properties;

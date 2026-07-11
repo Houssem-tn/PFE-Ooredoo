@@ -1,11 +1,7 @@
 package com.pfe.activation_analytics.controller;
 
-import com.pfe.activation_analytics.dto.AdminActivationAnalyticsChartsResponse;
-import com.pfe.activation_analytics.dto.AdminActivationAnalyticsDashboardResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsImportResponse;
 import com.pfe.activation_analytics.dto.AdminActivationAnalyticsPreviewResponse;
-import com.pfe.activation_analytics.dto.AdminActivationAnalyticsRowsPageResponse;
-import com.pfe.activation_analytics.dto.AdminActivationAnalyticsSummaryResponse;
 import com.pfe.activation_analytics.dto.SaveActivationAnalyticsStudyRequest;
 import com.pfe.activation_analytics.dto.SavedActivationAnalyticsStudyResponse;
 import com.pfe.activation_analytics.model.ActivationImportProcessingMode;

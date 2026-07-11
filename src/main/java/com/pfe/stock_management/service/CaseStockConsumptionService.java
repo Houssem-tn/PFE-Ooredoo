@@ -4,14 +4,17 @@ import com.pfe.MainPackage.Entity.AppUser;
 import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.dto.CaseConsumptionDto;
 import com.pfe.stock_management.dto.CaseConsumptionSummaryDto;
+import com.pfe.stock_management.dto.MaterialQuantityBreakdownDto;
 import com.pfe.stock_management.entity.CaseStockConsumption;
 import com.pfe.stock_management.model.ConsumedEquipmentItem;
 import com.pfe.stock_management.repository.CaseStockConsumptionRepository;
+import com.pfe.stock_management.util.MaterialQuantityGrouping;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -121,6 +124,7 @@ public class CaseStockConsumptionService {
         int cableTotalMeters = 0;
         int totalBoxesUsed = 0;
         int totalItemTypes = 0;
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> quantityBreakdown = new LinkedHashMap<>();
 
         Map<String, Long> techCounts = all.stream()
                 .filter(r -> r.getTechnicianId() != null)
@@ -131,6 +135,12 @@ public class CaseStockConsumptionService {
             totalItemTypes += r.getConsumedItems().size();
             for (ConsumedEquipmentItem item : r.getConsumedItems()) {
                 totalQuantityConsumed += item.getQuantityUsed();
+                MaterialQuantityGrouping.add(
+                        quantityBreakdown,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getQuantityUsed());
                 if ("METERS".equalsIgnoreCase(item.getUnit())) {
                     cableTotalMeters += item.getQuantityUsed();
                 } else {
@@ -159,12 +169,15 @@ public class CaseStockConsumptionService {
             }
         }
 
+        List<MaterialQuantityBreakdownDto> groupedBreakdown = MaterialQuantityGrouping.toBreakdownList(quantityBreakdown);
+
         return CaseConsumptionSummaryDto.builder()
                 .totalConsumptions(totalConsumptions)
                 .totalItemTypes(totalItemTypes)
                 .totalQuantityConsumed(totalQuantityConsumed)
                 .cableTotalMeters(cableTotalMeters)
                 .totalBoxesUsed(totalBoxesUsed)
+                .quantityBreakdown(groupedBreakdown)
                 .topTechnicianId(topTechId)
                 .topTechnicianName(topTechName)
                 .topTechnicianConsumptions(topTechConsumptions)

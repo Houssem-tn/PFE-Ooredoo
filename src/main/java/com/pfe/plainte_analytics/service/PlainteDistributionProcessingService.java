@@ -460,7 +460,7 @@ public class PlainteDistributionProcessingService {
         }
 
         PlainteDistributionRoutingService.RoutingDecision decision = routingService.resolveZmForGovernorate(governorate);
-        AppUser ownerZm = decision != null ? decision.zm() : null;
+        AppUser ownerZm = decision.zm();
         context.ownerZmByGovernorate().put(governorate, ownerZm);
         return ownerZm;
     }

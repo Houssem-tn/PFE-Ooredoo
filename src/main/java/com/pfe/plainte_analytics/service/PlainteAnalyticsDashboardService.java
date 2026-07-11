@@ -34,7 +34,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1211,35 +1210,6 @@ public class PlainteAnalyticsDashboardService {
                 .toList();
     }
 
-    private List<AdminPlainteAnalyticsPipelineStageResponse> buildPipelineStages(List<PlainteAnalyticsRowEntity> rows) {
-        return List.of(
-                new AdminPlainteAnalyticsPipelineStageResponse(
-                        "assignment",
-                        "Assignment delay",
-                        averageIntegers(rows.stream().map(PlainteAnalyticsRowEntity::getAssignmentBusinessDays).toList()),
-                        measuredCases(rows, PlainteAnalyticsRowEntity::getAssignmentBusinessDays)
-                ),
-                new AdminPlainteAnalyticsPipelineStageResponse(
-                        "rdv",
-                        "RDV delay",
-                        averageIntegers(rows.stream().map(PlainteAnalyticsRowEntity::getRdvBusinessDays).toList()),
-                        measuredCases(rows, PlainteAnalyticsRowEntity::getRdvBusinessDays)
-                ),
-                new AdminPlainteAnalyticsPipelineStageResponse(
-                        "execution",
-                        "Execution delay",
-                        averageIntegers(rows.stream().map(PlainteAnalyticsRowEntity::getExecutionBusinessDays).toList()),
-                        measuredCases(rows, PlainteAnalyticsRowEntity::getExecutionBusinessDays)
-                ),
-                new AdminPlainteAnalyticsPipelineStageResponse(
-                        "end_to_end",
-                        "End-to-end SLA",
-                        averageIntegers(rows.stream().map(PlainteAnalyticsRowEntity::getEndToEndBusinessDays).toList()),
-                        measuredCases(rows, PlainteAnalyticsRowEntity::getEndToEndBusinessDays)
-                )
-        );
-    }
-
     private List<AdminPlainteAnalyticsQualitySliceResponse> buildQualitySlices(
             List<PlainteAnalyticsRowEntity> rows,
             Function<PlainteAnalyticsRowEntity, String> labelExtractor,
@@ -1496,12 +1466,6 @@ public class PlainteAnalyticsDashboardService {
                 .count();
     }
 
-    private int measuredCases(List<PlainteAnalyticsRowEntity> rows, Function<PlainteAnalyticsRowEntity, Integer> extractor) {
-        return (int) rows.stream()
-                .map(extractor)
-                .filter(Objects::nonNull)
-                .count();
-    }
 
     private Double averageIntegers(List<Integer> values) {
         return PlainteAnalyticsSupport.average(values.stream()

@@ -46,10 +46,13 @@ public class NotificationEventServiceImpl implements NotificationEventService {
 
     @Override
     public void onUserRegistered(AppUser user) {
+        if (user == null) {
+            return;
+        }
+
         NotificationMessageDto payload = payloadFactory.buildNewPendingRegistration(user);
 
-        if (user != null
-                && user.getRoleRequested() == UserRole.ROLE_TECH
+        if (user.getRoleRequested() == UserRole.ROLE_TECH
                 && user.getAssignedZmEmail() != null
                 && !user.getAssignedZmEmail().isBlank()) {
 

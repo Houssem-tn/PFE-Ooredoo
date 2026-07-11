@@ -34,7 +34,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1211,35 +1210,6 @@ public class ActivationAnalyticsDashboardService {
                 .toList();
     }
 
-    private List<AdminActivationAnalyticsPipelineStageResponse> buildPipelineStages(List<ActivationAnalyticsRowEntity> rows) {
-        return List.of(
-                new AdminActivationAnalyticsPipelineStageResponse(
-                        "assignment",
-                        "Assignment delay",
-                        averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getAssignmentBusinessDays).toList()),
-                        measuredCases(rows, ActivationAnalyticsRowEntity::getAssignmentBusinessDays)
-                ),
-                new AdminActivationAnalyticsPipelineStageResponse(
-                        "rdv",
-                        "RDV delay",
-                        averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getRdvBusinessDays).toList()),
-                        measuredCases(rows, ActivationAnalyticsRowEntity::getRdvBusinessDays)
-                ),
-                new AdminActivationAnalyticsPipelineStageResponse(
-                        "execution",
-                        "Execution delay",
-                        averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getExecutionBusinessDays).toList()),
-                        measuredCases(rows, ActivationAnalyticsRowEntity::getExecutionBusinessDays)
-                ),
-                new AdminActivationAnalyticsPipelineStageResponse(
-                        "end_to_end",
-                        "End-to-end SLA",
-                        averageIntegers(rows.stream().map(ActivationAnalyticsRowEntity::getEndToEndBusinessDays).toList()),
-                        measuredCases(rows, ActivationAnalyticsRowEntity::getEndToEndBusinessDays)
-                )
-        );
-    }
-
     private List<AdminActivationAnalyticsQualitySliceResponse> buildQualitySlices(
             List<ActivationAnalyticsRowEntity> rows,
             Function<ActivationAnalyticsRowEntity, String> labelExtractor,
@@ -1493,13 +1463,6 @@ public class ActivationAnalyticsDashboardService {
                 .map(ActivationAnalyticsSupport::cleanString)
                 .filter(ActivationAnalyticsSupport::hasText)
                 .distinct()
-                .count();
-    }
-
-    private int measuredCases(List<ActivationAnalyticsRowEntity> rows, Function<ActivationAnalyticsRowEntity, Integer> extractor) {
-        return (int) rows.stream()
-                .map(extractor)
-                .filter(Objects::nonNull)
                 .count();
     }
 

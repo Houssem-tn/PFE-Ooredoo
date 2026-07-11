@@ -1,5 +1,6 @@
 package com.pfe.Security;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.simp.stomp.StompCommand;
@@ -11,6 +12,7 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
 
 @Component
+@Slf4j
 public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
 
     private final JwtService jwtService;
@@ -51,6 +53,13 @@ public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
 
             UserDetails userDetails = userDetailsService.loadUserByUsername(email);
 
+            // Consistency with JwtAuthFilter (REST): a disabled/banned account
+            // must not be able to open a WebSocket session either, even with
+            // an otherwise-valid JWT issued before the ban.
+            if (!userDetails.isEnabled()) {
+                throw new IllegalArgumentException("Account is disabled");
+            }
+
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
                             userDetails,
@@ -58,8 +67,7 @@ public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
                             userDetails.getAuthorities()
                     );
 
-            System.out.println("[WS CONNECT] email=" + email);
-            System.out.println("[WS CONNECT] authorities=" + userDetails.getAuthorities());
+            log.debug("WS CONNECT authenticated user={}", email);
 
             accessor.setUser(authentication);
         }

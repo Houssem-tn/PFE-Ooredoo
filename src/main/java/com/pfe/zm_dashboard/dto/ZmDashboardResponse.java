@@ -1,5 +1,7 @@
 package com.pfe.zm_dashboard.dto;
 
+import com.pfe.stock_management.dto.MaterialQuantityBreakdownDto;
+
 import java.time.Instant;
 import java.util.List;
 
@@ -69,9 +71,13 @@ public record ZmDashboardResponse(
             double avgResolutionMinutes,
             double slaRespectPercent,
             long materialReceived,
+            List<MaterialQuantityBreakdownDto> materialReceivedBreakdown,
             long materialDistributed,
+            List<MaterialQuantityBreakdownDto> materialDistributedBreakdown,
             long materialReturned,
-            long materialDamagedMissing
+            List<MaterialQuantityBreakdownDto> materialReturnedBreakdown,
+            long materialDamagedMissing,
+            List<MaterialQuantityBreakdownDto> materialDamagedMissingBreakdown
     ) {}
 
     /** "Needs your action" groups — a count plus a short preview list for deep-linking. */
@@ -95,10 +101,15 @@ public record ZmDashboardResponse(
             long dpmCreated,
             long dpmConfirmed,
             long materialReceivedByStt,
+            List<MaterialQuantityBreakdownDto> materialReceivedBySttBreakdown,
             long materialDistributed,
+            List<MaterialQuantityBreakdownDto> materialDistributedBreakdown,
             long materialConsumed,
+            List<MaterialQuantityBreakdownDto> materialConsumedBreakdown,
             long materialReturned,
+            List<MaterialQuantityBreakdownDto> materialReturnedBreakdown,
             long recoverable,
+            List<MaterialQuantityBreakdownDto> recoverableBreakdown,
             long trackedUnits,
             long missingImeiSerial
     ) {}

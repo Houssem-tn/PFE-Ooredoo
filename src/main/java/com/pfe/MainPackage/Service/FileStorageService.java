@@ -261,7 +261,10 @@ public class FileStorageService {
 
     private void storeLocally(MultipartFile file, String objectKey) throws IOException {
         Path targetPath = resolveLocalPath(objectKey);
-        Files.createDirectories(targetPath.getParent());
+        Path parent = targetPath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
 
         try (InputStream inputStream = file.getInputStream()) {
             Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);

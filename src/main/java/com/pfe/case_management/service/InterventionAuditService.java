@@ -14,18 +14,17 @@ import com.pfe.case_management.model.CaseTimelineEvent;
 import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.case_management.model.WorkInfo;
 import com.pfe.stock_management.entity.CaseStockConsumption;
+import com.pfe.stock_management.dto.MaterialQuantityBreakdownDto;
 import com.pfe.stock_management.entity.Equipment;
 import com.pfe.stock_management.material_return.MaterialReturnRepository;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import com.pfe.stock_management.model.ConsumedEquipmentItem;
 import com.pfe.stock_management.repository.CaseStockConsumptionRepository;
 import com.pfe.stock_management.repository.EquipmentRepository;
+import com.pfe.stock_management.util.MaterialQuantityGrouping;
 import lombok.RequiredArgsConstructor;
-import org.bson.Document;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.aggregation.Aggregation;
-import org.springframework.data.mongodb.core.aggregation.AggregationResults;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
@@ -37,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -143,20 +143,25 @@ public class InterventionAuditService {
                         Criteria.where("timeline.data.proofFileId").exists(false))),
                 CaseEntity.class, CASES_COLLECTION);
 
-        long materialsConsumed = totalConsumedQuantity();
+        Map<String, MaterialQuantityGrouping.MaterialAccumulator> materialsBreakdownMap = new LinkedHashMap<>();
+        for (CaseStockConsumption consumption : consumptionRepository.findAllByOrderByConsumedAtDesc()) {
+            if (consumption.getConsumedItems() == null) continue;
+            for (ConsumedEquipmentItem item : consumption.getConsumedItems()) {
+                MaterialQuantityGrouping.add(
+                        materialsBreakdownMap,
+                        item.getEquipmentId(),
+                        item.getEquipmentName(),
+                        item.getUnit(),
+                        item.getQuantityUsed());
+            }
+        }
+        List<MaterialQuantityBreakdownDto> materialsConsumedBreakdown =
+                MaterialQuantityGrouping.toBreakdownList(materialsBreakdownMap);
+        long materialsConsumed = MaterialQuantityGrouping.totalQuantity(materialsConsumedBreakdown);
 
         return new InterventionAuditSummaryDto(
-                total, completedToday, slaBreached, pendingValidation, proofMissing, materialsConsumed);
-    }
-
-    private long totalConsumedQuantity() {
-        Aggregation agg = Aggregation.newAggregation(
-                Aggregation.unwind("consumedItems"),
-                Aggregation.group().sum("consumedItems.quantityUsed").as("total"));
-        AggregationResults<Document> results =
-                mongoTemplate.aggregate(agg, CONSUMPTION_COLLECTION, Document.class);
-        Document doc = results.getUniqueMappedResult();
-        return doc != null && doc.get("total") != null ? ((Number) doc.get("total")).longValue() : 0L;
+                total, completedToday, slaBreached, pendingValidation, proofMissing,
+                materialsConsumed, materialsConsumedBreakdown);
     }
 
     // ── Criteria + sort ─────────────────────────────────────────────────────
