@@ -25,3 +25,7 @@ will silently test outdated Compose config. If this drifts often enough to
 be a real problem, replace this manual copy step with a small script or a
 pre-commit hook; it wasn't worth the added complexity for a file that
 changes rarely.
+
+`ci-scripts/` is not a mirror of anything — it's backend-only tooling used
+directly by `integration.yml` (currently just `ws_stomp_probe.py`, a STOMP
+CONNECT probe for the WebSocket auth smoke tests; see its own docstring).

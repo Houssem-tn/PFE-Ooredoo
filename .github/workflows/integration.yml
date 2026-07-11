@@ -64,17 +64,32 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Houssem-tn/Pfe-Oreedoo-Front
+          # frontend's default branch (main) has no Dockerfile at all — only
+          # `develop` does (confirmed live: GET /contents/Dockerfile?ref=main
+          # 404s, ?ref=develop doesn't). Pinning this explicitly instead of
+          # relying on the repo's default branch, which this workflow has no
+          # visibility into if it ever changes.
+          ref: develop
           token: ${{ secrets.INTEGRATION_CHECKOUT_TOKEN }}
           path: pfe/Pfe-Oreedoo-Front
+          # The PAT is only needed for this one clone operation; leaving it
+          # in the runner's local git credential store afterward would let
+          # any later step's `git` invocation reuse it unnecessarily.
+          persist-credentials: false
 
       - name: Checkout OCR (best-effort — may not have a remote yet)
         id: ocr-checkout
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          repository: Houssem-tn/EacyOCR
+          # Real repo is ooredoo-ocr (EacyOCR was the pre-migration name and
+          # no longer exists — confirmed via `gh repo view`, this previously
+          # 404'd silently every run because of continue-on-error above).
+          repository: Houssem-tn/ooredoo-ocr
+          ref: main
           token: ${{ secrets.INTEGRATION_CHECKOUT_TOKEN }}
           path: pfe/EacyOCR
+          persist-credentials: false
 
       - name: Assemble Compose files at the expected pfe/ root
         working-directory: pfe
@@ -98,6 +113,12 @@ jobs:
           sed -i "s#^MONGODB_PASSWORD=.*#MONGODB_PASSWORD=ci-mongo-pass-not-real-$(date +%s)#" .env.docker
           sed -i "s#^MINIO_ACCESS_KEY=.*#MINIO_ACCESS_KEY=ci-minio-access-not-real#" .env.docker
           sed -i "s#^MINIO_SECRET_KEY=.*#MINIO_SECRET_KEY=ci-minio-secret-not-real-$(date +%s)#" .env.docker
+          # Unique per-run project name so `docker compose ...` (which reads
+          # COMPOSE_PROJECT_NAME from this env file automatically) can never
+          # collide with a concurrent run's containers/networks/volumes on
+          # the same runner pool, and so the final `down -v` cleanup only
+          # ever touches this run's own resources.
+          sed -i "s#^COMPOSE_PROJECT_NAME=.*#COMPOSE_PROJECT_NAME=pfe-${{ github.run_id }}#" .env.docker
 
       - name: docker compose config (validates syntax + interpolation)
         working-directory: pfe
@@ -158,7 +179,11 @@ jobs:
         run: |
           set -euo pipefail
           source .env.docker
-          docker run --rm --network pfe_internal --entrypoint /bin/sh minio/mc:RELEASE.2025-04-08T15-39-49Z -c "
+          # Network name is derived from COMPOSE_PROJECT_NAME (unique per
+          # run, see the .env.docker generation step above), not hardcoded —
+          # a fixed "pfe_internal" would either miss this run's real network
+          # or, worse, collide with a concurrent run's.
+          docker run --rm --network "${COMPOSE_PROJECT_NAME}_internal" --entrypoint /bin/sh minio/mc:RELEASE.2025-04-08T15-39-49Z -c "
             mc alias set local http://minio:9000 '$MINIO_ACCESS_KEY' '$MINIO_SECRET_KEY' &&
             mc ls local/$MINIO_BUCKET >/dev/null &&
             echo 'ci-smoke-test' > /tmp/probe.txt &&
@@ -192,13 +217,12 @@ jobs:
         run: |
           set -euo pipefail
           # Verifies nginx forwards the Upgrade/Connection headers and the
-          # backend accepts the handshake (101). Does NOT test STOMP
-          # frames, authenticated notification delivery, or disabled-user
-          # rejection — see CI.md "Known limitations" for why that's out of
-          # scope here (needs seeded auth fixtures this pipeline doesn't
-          # have yet). "Container started" alone is never treated as proof
-          # this works — this step actually performs the HTTP Upgrade
-          # handshake.
+          # backend accepts the handshake (101) — a necessary precondition
+          # for the STOMP-level auth tests below, but not sufficient proof
+          # of anything auth-related on its own: WebSocketAuthChannelInterceptor
+          # only runs during STOMP CONNECT, after this handshake already
+          # succeeded. See the "Provision a WebSocket test user" and
+          # "STOMP CONNECT" steps below for the real auth behavior tests.
           response=$(curl -s -i -N \
             -H "Connection: Upgrade" \
             -H "Upgrade: websocket" \
@@ -207,6 +231,101 @@ jobs:
             http://localhost/ws-notifications --max-time 5 || true)
           echo "$response" | head -5
           echo "$response" | grep -q "101" || { echo "::error::WebSocket upgrade handshake did not return 101"; exit 1; }
+
+      - name: Install the STOMP probe's one dependency
+        run: pip install --quiet --disable-pip-version-check websockets==15.0.1
+
+      - name: Provision a WebSocket test user (register + admin-approve)
+        id: ws-user
+        run: |
+          set -euo pipefail
+          # SeedAdminRunner (active on every non-prod profile, which this
+          # Compose stack always runs) creates this account idempotently on
+          # backend startup — see config/SeedAdminRunner.java.
+          admin_token=$(curl -fsS -X POST http://localhost/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@local.tn","password":"admin123"}' | jq -r '.token')
+          [ -n "$admin_token" ] && [ "$admin_token" != "null" ] || { echo "::error::Could not obtain a seed-admin token"; exit 1; }
+          echo "::add-mask::$admin_token"
+
+          test_email="ci-ws-test-${{ github.run_id }}@example.test"
+          test_password="CiWsTest-$(openssl rand -hex 8)!"
+          echo "::add-mask::$test_password"
+
+          # Public registration always lands in PENDING/disabled (AuthService.register)
+          # — this is the real, unmodified approval flow, not a shortcut.
+          user_id=$(curl -fsS -X POST http://localhost/api/v1/auth/register \
+            -H 'Content-Type: application/json' \
+            -d "{\"fullName\":\"CI WS Test\",\"firstName\":\"CI\",\"lastName\":\"Test\",\"email\":\"${test_email}\",\"password\":\"${test_password}\",\"role\":\"ROLE_STT\"}" \
+            | jq -r '.id')
+          [ -n "$user_id" ] && [ "$user_id" != "null" ] || { echo "::error::Registration did not return a user id"; exit 1; }
+
+          curl -fsS -X POST "http://localhost/api/v1/approvals/${user_id}/approve" \
+            -H "Authorization: Bearer ${admin_token}" >/dev/null
+
+          test_token=$(curl -fsS -X POST http://localhost/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"${test_email}\",\"password\":\"${test_password}\"}" | jq -r '.token')
+          [ -n "$test_token" ] && [ "$test_token" != "null" ] || { echo "::error::Could not log in as the freshly-approved test user"; exit 1; }
+          echo "::add-mask::$test_token"
+
+          {
+            echo "admin-token=${admin_token}"
+            echo "test-user-id=${user_id}"
+            echo "test-token=${test_token}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Smoke test: STOMP CONNECT succeeds with a valid JWT'
+        working-directory: pfe
+        run: |
+          python3 APPSTOCK/PFE-Ooredoo/deploy/ci-scripts/ws_stomp_probe.py \
+            --url ws://localhost/ws-notifications \
+            --token '${{ steps.ws-user.outputs.test-token }}' \
+            --expect CONNECTED
+
+      - name: 'Smoke test: STOMP CONNECT rejected without an Authorization header'
+        working-directory: pfe
+        run: |
+          python3 APPSTOCK/PFE-Ooredoo/deploy/ci-scripts/ws_stomp_probe.py \
+            --url ws://localhost/ws-notifications \
+            --expect ERROR
+
+      - name: 'Smoke test: STOMP CONNECT rejected for a disabled user'
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          # Disables the same test user's account (WebSocketAuthChannelInterceptor
+          # re-checks UserDetails.isEnabled() from the DB on every CONNECT —
+          # it does not just trust the JWT signature — so the *same*,
+          # still cryptographically-valid token from the CONNECTED test
+          # above must now be rejected).
+          curl -fsS -X PUT "http://localhost/api/v1/users/${{ steps.ws-user.outputs.test-user-id }}" \
+            -H "Authorization: Bearer ${{ steps.ws-user.outputs.admin-token }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"enabled": false}' >/dev/null
+          python3 APPSTOCK/PFE-Ooredoo/deploy/ci-scripts/ws_stomp_probe.py \
+            --url ws://localhost/ws-notifications \
+            --token '${{ steps.ws-user.outputs.test-token }}' \
+            --expect ERROR
+
+      - name: 'Smoke test: SockJS fallback endpoint reachable'
+        run: |
+          set -euo pipefail
+          # WebSocketConfig.java also registers /ws-notifications-sockjs
+          # (.withSockJS()), proxied by nginx (see nginx.conf) — Spring's
+          # SockJS transport serves a JSON "greeting" at its own /info
+          # sub-path (e.g. {"entropy":...,"origins":["*:*"],"cookie_needed":
+          # false,"websocket":true}) confirming the endpoint is live and
+          # reachable through the full proxy chain, distinct from the plain
+          # /ws-notifications upgrade tested above.
+          status=$(curl -s -o /tmp/sockjs-info.json -w '%{http_code}' \
+            "http://localhost/ws-notifications-sockjs/info?t=$(date +%s%N)")
+          cat /tmp/sockjs-info.json
+          if [ "$status" != "200" ]; then
+            echo "::error::Expected 200 from the SockJS /info endpoint, got $status"
+            exit 1
+          fi
+          grep -q '"websocket"' /tmp/sockjs-info.json || { echo "::error::SockJS /info response missing expected 'websocket' field"; exit 1; }
 
       - name: 'Smoke test: OCR health (only if the OCR profile could start)'
         if: steps.ocr-checkout.outcome == 'success'
@@ -240,6 +359,19 @@ jobs:
             exit 1
           fi
 
+      - name: 'Smoke test: OCR temp files are cleaned up'
+        if: steps.ocr-checkout.outcome == 'success'
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          # OcrController.extractMultiple() writes File.createTempFile("ocr-", ...)
+          # then deletes it in a `finally` block regardless of outcome (see
+          # OcrController.java) — after the successful extract above, none
+          # should remain in the container's own tmpdir.
+          leftover=$(docker compose exec -T backend sh -c "find /tmp -maxdepth 1 -name 'ocr-*' | wc -l" | tr -d '\r')
+          echo "Leftover ocr-* temp files: $leftover"
+          [ "$leftover" -eq 0 ] || { echo "::error::$leftover OCR temp file(s) were not cleaned up"; exit 1; }
+
       - name: 'Smoke test: oversized upload is rejected (client_max_body_size)'
         run: |
           set -euo pipefail
@@ -252,35 +384,118 @@ jobs:
             exit 1
           fi
 
+      - name: 'Smoke test: backend-driven MinIO upload + retrieval (profile image)'
+        id: minio-upload-test
+        working-directory: pfe
+        run: |
+          set -euo pipefail
+          # The earlier "MinIO bucket exists + object round-trip" step talks
+          # to MinIO directly with `mc` — it proves MinIO itself works, not
+          # that the *backend* can drive it. POST /api/v1/users/{id}/profile-image
+          # (UserController -> UserService -> FileStorageService.upload) is a
+          # real backend-owned MinIO write path. It's worth noting
+          # FileStorageService silently falls back to local disk storage on
+          # *any* MinIO exception (see its catch-and-fall-back block) and
+          # still returns 200 either way — so a 200 response alone would not
+          # actually prove MinIO received the object. This step checks the
+          # persisted file_metadata.bucket value directly to rule that out.
+          source .env.docker
+          admin_token=$(curl -fsS -X POST http://localhost/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@local.tn","password":"admin123"}' | jq -r '.token')
+          echo "::add-mask::$admin_token"
+          admin_id=$(curl -fsS http://localhost/api/v1/users/me -H "Authorization: Bearer ${admin_token}" | jq -r '.id')
+          [ -n "$admin_id" ] && [ "$admin_id" != "null" ] || { echo "::error::Could not resolve the seed admin's own id"; exit 1; }
+
+          convert -size 10x10 xc:blue /tmp/ci-profile-test.jpg
+          file_id=$(curl -fsS -X POST "http://localhost/api/v1/users/${admin_id}/profile-image" \
+            -H "Authorization: Bearer ${admin_token}" \
+            -F "file=@/tmp/ci-profile-test.jpg;type=image/jpeg" | jq -r '.profileImageFileId')
+          [ -n "$file_id" ] && [ "$file_id" != "null" ] || { echo "::error::profile-image upload did not return a profileImageFileId"; exit 1; }
+
+          # mongosh's --eval printer may quote a bare string result
+          # ('pfe-files' vs pfe-files depending on version) — strip
+          # surrounding quotes/CR defensively rather than assume either way.
+          bucket=$(docker compose exec -T mongodb mongosh \
+            --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
+            --eval "db.getSiblingDB('$MONGODB_DATABASE').file_metadata.findOne({_id: '$file_id'}).bucket" \
+            | tr -d '\r' | sed "s/^'//; s/'\$//")
+          echo "Stored in bucket: $bucket"
+          [ "$bucket" = "$MINIO_BUCKET" ] || { echo "::error::Expected the object to land in MinIO bucket '$MINIO_BUCKET', but file_metadata.bucket was '$bucket' (LOCAL_FS means it silently fell back off MinIO)"; exit 1; }
+
+          # Retrieval: FileController's /view route is permitAll (SecurityConfig).
+          status=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost/api/v1/files/${file_id}/view")
+          [ "$status" = "200" ] || { echo "::error::Expected 200 retrieving the uploaded file, got $status"; exit 1; }
+          echo "file-id=${file_id}" >> "$GITHUB_OUTPUT"
+
+      - name: 'Smoke test: invalid file content is rejected'
+        run: |
+          set -euo pipefail
+          # FileStorageService.validateImage() rejects any non-"image/*"
+          # content type with a 400 (wrapped as ResponseStatusException by
+          # the catch block in upload()) — reuse the already-authenticated
+          # profile-image endpoint from the previous step with a plain-text
+          # payload instead of an image.
+          admin_token=$(curl -fsS -X POST http://localhost/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@local.tn","password":"admin123"}' | jq -r '.token')
+          echo "::add-mask::$admin_token"
+          admin_id=$(curl -fsS http://localhost/api/v1/users/me -H "Authorization: Bearer ${admin_token}" | jq -r '.id')
+          echo "not an image" > /tmp/ci-invalid.txt
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost/api/v1/users/${admin_id}/profile-image" \
+            -H "Authorization: Bearer ${admin_token}" \
+            -F "file=@/tmp/ci-invalid.txt;type=text/plain")
+          [ "$status" = "400" ] || { echo "::error::Expected 400 for a non-image upload, got $status"; exit 1; }
+
       - name: 'Smoke test: container restart + MongoDB/MinIO persistence'
         working-directory: pfe
         run: |
           set -euo pipefail
           # Round-trip a probe document through the backend before restarting,
           # confirm it's still there after — the whole point of the named
-          # volumes (mongodb_data/minio_data).
+          # volumes (mongodb_data/minio_data). The MinIO side reuses the
+          # object uploaded by the "backend-driven MinIO upload" step above
+          # (steps.minio-upload-test.outputs.file-id) rather than writing a
+          # fresh one here.
           source .env.docker
           docker compose exec -T mongodb mongosh \
             --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
             --eval "db.getSiblingDB('$MONGODB_DATABASE').ci_persistence_probe.insertOne({probe: 'ci', at: new Date()})"
 
-          docker compose restart mongodb backend
-          sleep 15
-          for i in $(seq 1 15); do
-            status=$(docker compose ps mongodb --format '{{.Health}}')
-            [ "$status" = "healthy" ] && break
-            if [ "$i" -eq 15 ]; then
-              echo "::error::mongodb did not become healthy again after restart"
-              exit 1
-            fi
-            sleep 5
-          done
+          # Restart every stateful/stateless service that has one: both data
+          # stores (mongodb, minio) and both app containers (backend,
+          # frontend) — not just mongodb, so this actually exercises the
+          # named volumes (mongodb_data, minio_data) end to end rather than
+          # only MongoDB's.
+          docker compose restart mongodb minio backend frontend
+
+          wait_for_healthy() {
+            local service="$1"
+            for i in $(seq 1 15); do
+              status=$(docker compose ps "$service" --format '{{.Health}}')
+              [ "$status" = "healthy" ] && return 0
+              if [ "$i" -eq 15 ]; then
+                echo "::error::$service did not become healthy again after restart"
+                docker compose logs "$service" --no-color | tail -50
+                exit 1
+              fi
+              sleep 5
+            done
+          }
+          wait_for_healthy mongodb
+          wait_for_healthy minio
+          wait_for_healthy backend
+          wait_for_healthy frontend
 
           count=$(docker compose exec -T mongodb mongosh \
             --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
             --eval "db.getSiblingDB('$MONGODB_DATABASE').ci_persistence_probe.countDocuments({probe: 'ci'})")
           echo "Persisted probe count after restart: $count"
           [ "$count" -ge "1" ] || { echo "::error::MongoDB data did not survive a container restart"; exit 1; }
+
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "http://localhost/api/v1/files/${{ steps.minio-upload-test.outputs.file-id }}/view")
+          [ "$status" = "200" ] || { echo "::error::MinIO-stored file did not survive a mongodb+minio+backend+frontend restart, got $status"; exit 1; }
 
       - name: Collect Compose logs (always, for debugging)
         if: always()
