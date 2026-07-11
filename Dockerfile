@@ -18,6 +18,22 @@
 FROM eclipse-temurin:17-jdk-jammy AS build
 WORKDIR /build
 
+# mvnw prefers wget over curl when both are present (see mvnw's own
+# download logic). The first real CI run hit "Failed to validate Maven
+# distribution SHA-256, your Maven distribution might be compromised" —
+# the distributionSha256Sum itself was independently verified correct
+# against Apache's own published .sha512 (see maven-wrapper.properties'
+# comment) and confirmed to match on a genuinely fresh, cache-cleared
+# local download — so the download itself differs specifically on this
+# base image, and the only variable that differs from local testing is
+# wget vs. curl. Forcing curl (removing wget, installing curl explicitly
+# rather than assuming jammy ships it) sidesteps whatever that difference
+# is with a downloader path that's actually been verified end-to-end.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && apt-get remove -y --purge wget \
+    && rm -rf /var/lib/apt/lists/*
+
 # Wrapper + POM first so `dependency:go-offline` is its own cached layer —
 # it only re-runs when pom.xml (or the wrapper) actually changes, not on
 # every source edit.
