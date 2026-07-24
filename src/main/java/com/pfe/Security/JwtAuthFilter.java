@@ -66,6 +66,19 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         if (email != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             UserDetails userDetails = userDetailsService.loadUserByUsername(email);
 
+            // Session invalidation: a token whose embedded version is behind the
+            // live account (e.g. after a password reset bumped tokenVersion) is
+            // rejected here, so every previously issued access token stops
+            // working the moment the password changes. Legacy tokens without the
+            // claim resolve to 0 and match legacy accounts (also 0).
+            if (userDetails instanceof AppUserDetails appUserDetails
+                    && jwtService.extractTokenVersion(token) != appUserDetails.getTokenVersion()) {
+                log.debug("JWT filter: stale token version rejected for path={}", path);
+                SecurityContextHolder.clearContext();
+                chain.doFilter(request, response);
+                return;
+            }
+
             if (!userDetails.isEnabled()) {
                 log.debug("JWT filter: disabled/banned account attempted access, path={}", path);
                 SecurityContextHolder.clearContext();

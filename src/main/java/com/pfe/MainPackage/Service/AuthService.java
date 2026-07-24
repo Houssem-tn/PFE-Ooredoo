@@ -124,7 +124,8 @@ public class AuthService {
         user.setLastLoginAt(Instant.now());
         AppUser savedUser = repo.save(user);
 
-        String token = jwtService.generateToken(savedUser.getEmail(), savedUser.getRole());
+        String token = jwtService.generateToken(
+                savedUser.getEmail(), savedUser.getRole(), savedUser.getTokenVersion());
         return new AuthResponse(token, "Bearer", savedUser.getRole(), userMapper.toDto(savedUser));
     }
 

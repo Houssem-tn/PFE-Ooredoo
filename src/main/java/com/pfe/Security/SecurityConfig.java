@@ -46,6 +46,11 @@ public class SecurityConfig {
         http.formLogin(AbstractHttpConfigurer::disable);
 
         http.authorizeHttpRequests(auth -> auth
+                // CORS preflight: browsers send OPTIONS without credentials.
+                // The CorsFilter (enabled by http.cors above) already handles
+                // and short-circuits preflight, but permit it explicitly so it
+                // can never fall through to .anyRequest().authenticated().
+                .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
                 // Container/orchestrator health checks (no JWT available). Only
                 // /actuator/health* is ever mapped — management.endpoints.web
                 // .exposure.include=health keeps every other Actuator endpoint

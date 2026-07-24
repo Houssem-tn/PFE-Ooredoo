@@ -53,6 +53,15 @@ public class WebSocketAuthChannelInterceptor implements ChannelInterceptor {
 
             UserDetails userDetails = userDetailsService.loadUserByUsername(email);
 
+            // Consistency with JwtAuthFilter (REST): a STOMP token whose version
+            // is behind the live account (e.g. after a password reset) must be
+            // rejected so an old WebSocket connection cannot be (re)established
+            // with a stale JWT.
+            if (userDetails instanceof AppUserDetails appUserDetails
+                    && jwtService.extractTokenVersion(token) != appUserDetails.getTokenVersion()) {
+                throw new IllegalArgumentException("Invalid JWT token");
+            }
+
             // Consistency with JwtAuthFilter (REST): a disabled/banned account
             // must not be able to open a WebSocket session either, even with
             // an otherwise-valid JWT issued before the ban.
