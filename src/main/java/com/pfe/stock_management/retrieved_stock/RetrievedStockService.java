@@ -183,6 +183,7 @@ public class RetrievedStockService {
                     .technicianEmail(declarer != null ? declarer.getEmail() : null)
                     .sttId(stt.getId())
                     .sttName(stt.getFullName())
+                    .sttEmail(stt.getEmail())
                     .zmId(zm.getId())
                     .zmName(zm.getFullName())
                     .zmEmail(zm.getEmail())
@@ -197,7 +198,7 @@ public class RetrievedStockService {
                     .disposition(disposition)
                     .condition(parseCondition(requestItem.condition()))
                     .dispositionNote(comment)
-                    .status(RetrievedStockItemStatus.PENDING_COLLECTION)
+                    .status(RetrievedStockItemStatus.PENDING_STT_COLLECTION)
                     .retrievedAt(now)
                     .declaredBy(actor)
                     .createdAt(now)
@@ -235,20 +236,52 @@ public class RetrievedStockService {
 
     // ── Reads ──────────────────────────────────────────────────────────────────
 
-    /** Technician's own pending-collection bucket ("Retrieved Stock awaiting ZM collection"). */
+    /** Both pending values (new + legacy) so historical documents keep surfacing correctly. */
+    @SuppressWarnings("deprecation")
+    private static final List<RetrievedStockItemStatus> PENDING_STATUSES = List.of(
+            RetrievedStockItemStatus.PENDING_STT_COLLECTION, RetrievedStockItemStatus.PENDING_COLLECTION);
+
+    /** Both collected values (new STT + legacy ZM) for STT Collected Stock / tracking. */
+    @SuppressWarnings("deprecation")
+    private static final List<RetrievedStockItemStatus> COLLECTED_STATUSES = List.of(
+            RetrievedStockItemStatus.COLLECTED_BY_STT, RetrievedStockItemStatus.COLLECTED);
+
+    /** Technician's own pending bucket ("Retrieved Stock — Pending STT Collection"). */
     public List<RetrievedStockItemDto> getMine(String technicianId) {
-        return repository.findByTechnicianIdAndStatusOrderByRetrievedAtDesc(
-                        technicianId, RetrievedStockItemStatus.PENDING_COLLECTION)
+        return repository.findByTechnicianIdAndStatusInOrderByRetrievedAtDesc(technicianId, PENDING_STATUSES)
                 .stream().map(this::toDto).collect(Collectors.toList());
     }
 
-    /** ZM's pending-collection queue, grouped by technician for the collection page. */
-    public List<TechnicianRetrievedStockGroupDto> getPendingForZmGroupedByTechnician(String zmId) {
-        List<RetrievedStockItem> pending = repository.findByZmIdAndStatusOrderByRetrievedAtDesc(
-                zmId, RetrievedStockItemStatus.PENDING_COLLECTION);
+    /** STT's pending-collection queue, grouped by technician for the STT collection page. */
+    public List<TechnicianRetrievedStockGroupDto> getPendingForSttGroupedByTechnician(String sttId) {
+        List<RetrievedStockItem> pending = repository.findBySttIdAndStatusInOrderByRetrievedAtDesc(sttId, PENDING_STATUSES);
+        return groupByTechnician(pending);
+    }
 
+    /** STT Collected Stock — items this STT physically collected, not yet returned. */
+    public List<RetrievedStockItemDto> getCollectedForStt(String sttId) {
+        return repository.findByCollectedBySttIdAndStatusInOrderByCollectedAtDesc(sttId, COLLECTED_STATUSES)
+                .stream().map(this::toDto).collect(Collectors.toList());
+    }
+
+    /** Collected items eligible to be added to a Material Return Request (collected, not yet in one). */
+    public List<RetrievedStockItemDto> getReturnEligibleForStt(String sttId) {
+        return repository.findByCollectedBySttIdAndStatusAndMaterialReturnRequestIdIsNullOrderByCollectedAtDesc(
+                        sttId, RetrievedStockItemStatus.COLLECTED_BY_STT)
+                .stream().map(this::toDto).collect(Collectors.toList());
+    }
+
+    // ── ZM / Admin read-only tracking ──────────────────────────────────────────
+
+    /** ZM read-only tracking: every retrieved item across this ZM's territory (no collect action). */
+    public List<RetrievedStockItemDto> getTrackingForZm(String zmId) {
+        return repository.findByZmIdOrderByRetrievedAtDesc(zmId)
+                .stream().map(this::toDto).collect(Collectors.toList());
+    }
+
+    private List<TechnicianRetrievedStockGroupDto> groupByTechnician(List<RetrievedStockItem> items) {
         Map<String, TechnicianRetrievedStockGroupDto> groups = new LinkedHashMap<>();
-        for (RetrievedStockItem item : pending) {
+        for (RetrievedStockItem item : items) {
             String techId = item.getTechnicianId() != null ? item.getTechnicianId() : "unknown";
             groups.computeIfAbsent(techId, id -> TechnicianRetrievedStockGroupDto.builder()
                     .technicianId(item.getTechnicianId())
@@ -261,13 +294,6 @@ public class RetrievedStockService {
         return groups.values().stream()
                 .sorted(Comparator.comparing(g -> g.getTechnicianName() != null ? g.getTechnicianName() : ""))
                 .collect(Collectors.toList());
-    }
-
-    /** ZM's own collected-stock bucket (post-collection resting/audit view). */
-    public List<RetrievedStockItemDto> getCollectedForZm(String zmId) {
-        return repository.findByCollectedByZmIdAndStatusOrderByCollectedAtDesc(
-                        zmId, RetrievedStockItemStatus.COLLECTED)
-                .stream().map(this::toDto).collect(Collectors.toList());
     }
 
     public List<RetrievedStockItemDto> getByCase(String caseId) {
@@ -301,17 +327,18 @@ public class RetrievedStockService {
         return toDto(repository.save(item));
     }
 
-    // ── ZM: confirm collection ────────────────────────────────────────────────
+    // ── STT: confirm collection (the correct owner of the physical collection step) ──
 
     /**
-     * The one atomic multi-select action: a ZM selects any number of {@code PENDING_COLLECTION}
-     * items (potentially from several technicians) and confirms physical collection in one call.
-     * Every item is validated (exists, still pending, in this ZM's scope) <b>before any is
-     * mutated</b> — a stale/foreign/already-collected id rejects the whole call rather than
-     * partially applying it, the same "validate the whole batch first" ordering
-     * {@code EquipmentInstanceService.syncCaseUsageInstances} already uses.
+     * The one atomic multi-select action: the responsible STT selects any number of pending items
+     * (potentially from several of their technicians) and confirms physical collection in one call.
+     * Every item is validated (exists, still pending, belongs to a technician under THIS STT)
+     * <b>before any is mutated</b> — a stale/foreign/already-collected id rejects the whole call
+     * rather than partially applying it (atomic all-or-nothing).
+     *
+     * <p>Collected items move to the STT's Collected Stock (never into distributable/usable STT stock).
      */
-    public ConfirmCollectionResponse confirmCollection(AppUser zm, ConfirmCollectionRequest request) {
+    public ConfirmCollectionResponse confirmCollectionByStt(AppUser stt, ConfirmCollectionRequest request) {
         if (request == null || request.itemIds() == null || request.itemIds().isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Select at least one item to confirm collection.");
         }
@@ -325,12 +352,13 @@ public class RetrievedStockService {
         if (toCollect.size() != ids.size()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "One or more selected items were not found.");
         }
+        // Validate the WHOLE batch first — one failure rejects everything (no partial collection).
         for (RetrievedStockItem item : toCollect) {
-            if (!zm.getId().equals(item.getZmId())) {
+            if (!stt.getId().equals(item.getSttId())) {
                 throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                        "Item " + item.getId() + " is not in your scope.");
+                        "Item " + item.getId() + " belongs to a technician outside your responsibility.");
             }
-            if (item.getStatus() != RetrievedStockItemStatus.PENDING_COLLECTION) {
+            if (!item.getStatus().isPendingCollection()) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Item " + item.getId() + " is no longer pending collection (already " + item.getStatus() + ").");
             }
@@ -338,15 +366,15 @@ public class RetrievedStockService {
 
         String batchId = "COL-" + UUID.randomUUID();
         Instant now = Instant.now();
-        String actor = zm.getEmail();
+        String actor = stt.getEmail();
         String note = request.note();
 
         List<String> instanceIds = new ArrayList<>();
         List<RetrievedStockItem> collected = new ArrayList<>();
         for (RetrievedStockItem item : toCollect) {
-            item.setStatus(RetrievedStockItemStatus.COLLECTED);
-            item.setCollectedByZmId(zm.getId());
-            item.setCollectedByZmName(zm.getFullName());
+            item.setStatus(RetrievedStockItemStatus.COLLECTED_BY_STT);
+            item.setCollectedBySttId(stt.getId());
+            item.setCollectedBySttName(stt.getFullName());
             item.setCollectedAt(now);
             item.setCollectionBatchId(batchId);
             item.setCollectionNote(note);
@@ -357,7 +385,7 @@ public class RetrievedStockService {
             }
         }
 
-        equipmentInstanceService.markCollectedByZm(instanceIds, zm.getId(), zm.getFullName(), actor);
+        equipmentInstanceService.markCollectedByStt(instanceIds, stt.getId(), stt.getFullName(), actor);
 
         for (RetrievedStockItem item : collected) {
             runSideEffect("record retrieved-stock collection movement", () ->
@@ -381,7 +409,7 @@ public class RetrievedStockService {
                     notificationEventService.onRetrievedStockCollected(technicianItems));
         }
 
-        log.info("retrieved_stock_collected zmId={} batchId={} itemCount={}", zm.getId(), batchId, collected.size());
+        log.info("retrieved_stock_collected sttId={} batchId={} itemCount={}", stt.getId(), batchId, collected.size());
 
         return ConfirmCollectionResponse.builder()
                 .collectedItems(collected.stream().map(this::toDto).collect(Collectors.toList()))
@@ -398,9 +426,9 @@ public class RetrievedStockService {
             caseTimelineService.append(
                     c,
                     CaseTimelineEventType.RETRIEVED_STOCK_COLLECTED,
-                    "Retrieved stock collected by ZM",
+                    "Retrieved stock collected by STT",
                     items.size() + " item(s) (" + totalUnits + " unit(s)) collected from the technician's "
-                            + "retrieved stock by " + safe(items.get(0).getCollectedByZmName()) + ".",
+                            + "retrieved stock by " + safe(items.get(0).getCollectedBySttName()) + ".",
                     actor,
                     c.getStatus(),
                     c.getStatus(),
@@ -514,10 +542,15 @@ public class RetrievedStockService {
                 .status(i.getStatus() != null ? i.getStatus().name() : null)
                 .retrievedAt(i.getRetrievedAt())
                 .declaredBy(i.getDeclaredBy())
+                .collectedBySttId(i.getCollectedBySttId())
+                .collectedBySttName(i.getCollectedBySttName())
                 .collectedByZmId(i.getCollectedByZmId())
                 .collectedByZmName(i.getCollectedByZmName())
                 .collectedAt(i.getCollectedAt())
                 .collectionNote(i.getCollectionNote())
+                .materialReturnRequestId(i.getMaterialReturnRequestId())
+                .addedToReturnAt(i.getAddedToReturnAt())
+                .returnedAt(i.getReturnedAt())
                 .createdAt(i.getCreatedAt())
                 .updatedAt(i.getUpdatedAt())
                 .build();

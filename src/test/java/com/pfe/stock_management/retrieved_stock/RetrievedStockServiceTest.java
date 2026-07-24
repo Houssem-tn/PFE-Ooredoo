@@ -118,7 +118,7 @@ class RetrievedStockServiceTest {
         assertThat(result).hasSize(1);
         RetrievedStockItem created = result.get(0);
         assertThat(created).isNotNull();
-        assertThat(created.getStatus()).isEqualTo(RetrievedStockItemStatus.PENDING_COLLECTION);
+        assertThat(created.getStatus()).isEqualTo(RetrievedStockItemStatus.PENDING_STT_COLLECTION);
         assertThat(created.getDisposition()).isEqualTo(RecoveryDisposition.RETRIEVED);
         assertThat(created.getTechnicianId()).isEqualTo("tech-1");
         assertThat(created.getZmId()).isEqualTo("zm-1");
@@ -208,49 +208,49 @@ class RetrievedStockServiceTest {
         assertThat(result.get(0).getInstanceId()).isEqualTo("inst-99");
     }
 
-    // ── confirmCollection ──────────────────────────────────────────────────────
+    // ── confirmCollectionByStt (the responsible STT collects, not the ZM) ────────
 
     private RetrievedStockItem pendingItem(String id, String caseId, String technicianId, String instanceId) {
         return RetrievedStockItem.builder()
                 .id(id).caseId(caseId).technicianId(technicianId).technicianEmail(technicianId + "@x.com")
-                .zmId("zm-1").instanceId(instanceId)
-                .status(RetrievedStockItemStatus.PENDING_COLLECTION)
+                .sttId("stt-1").zmId("zm-1").instanceId(instanceId)
+                .status(RetrievedStockItemStatus.PENDING_STT_COLLECTION)
                 .quantity(1)
                 .build();
     }
 
     @Test
-    void confirmCollection_marksItemsCollectedAndSendsOneNotificationPerTechnician() {
+    void confirmCollection_marksItemsCollectedBySttAndSendsOneNotificationPerTechnician() {
         RetrievedStockItem item1 = pendingItem("rsi-1", "case-1", "tech-1", "inst-1");
         RetrievedStockItem item2 = pendingItem("rsi-2", "case-1", "tech-1", null);
         when(repository.findAllById(List.of("rsi-1", "rsi-2"))).thenReturn(List.of(item1, item2));
         when(repository.save(any(RetrievedStockItem.class))).thenAnswer(inv -> inv.getArgument(0));
 
         ConfirmCollectionRequest request = new ConfirmCollectionRequest(List.of("rsi-1", "rsi-2"), "picked up");
-        ConfirmCollectionResponse response = newService().confirmCollection(zm(), request);
+        ConfirmCollectionResponse response = newService().confirmCollectionByStt(stt(), request);
 
         assertThat(response.getCollectedItems()).hasSize(2);
-        assertThat(item1.getStatus()).isEqualTo(RetrievedStockItemStatus.COLLECTED);
-        assertThat(item1.getCollectedByZmId()).isEqualTo("zm-1");
-        assertThat(item2.getStatus()).isEqualTo(RetrievedStockItemStatus.COLLECTED);
+        assertThat(item1.getStatus()).isEqualTo(RetrievedStockItemStatus.COLLECTED_BY_STT);
+        assertThat(item1.getCollectedBySttId()).isEqualTo("stt-1");
+        assertThat(item2.getStatus()).isEqualTo(RetrievedStockItemStatus.COLLECTED_BY_STT);
 
-        verify(equipmentInstanceService).markCollectedByZm(List.of("inst-1"), "zm-1", "ZM One", "zm@x.com");
-        verify(stockMovementService, times(2)).recordRetrievedStockCollected(any(), eq("zm@x.com"));
+        verify(equipmentInstanceService).markCollectedByStt(List.of("inst-1"), "stt-1", "STT One", "stt@x.com");
+        verify(stockMovementService, times(2)).recordRetrievedStockCollected(any(), eq("stt@x.com"));
         // Both items belong to the same technician -> exactly one aggregated notification.
         verify(notificationEventService, times(1)).onRetrievedStockCollected(anyList());
     }
 
     @Test
-    void confirmCollection_rejectsItemOutsideZmScope() {
+    void confirmCollection_rejectsItemOutsideSttScope() {
         RetrievedStockItem foreign = pendingItem("rsi-1", "case-1", "tech-1", null);
-        foreign.setZmId("zm-2");
+        foreign.setSttId("stt-2"); // belongs to a different STT
         when(repository.findAllById(List.of("rsi-1"))).thenReturn(List.of(foreign));
 
         ConfirmCollectionRequest request = new ConfirmCollectionRequest(List.of("rsi-1"), null);
 
-        assertThatThrownBy(() -> newService().confirmCollection(zm(), request))
+        assertThatThrownBy(() -> newService().confirmCollectionByStt(stt(), request))
                 .isInstanceOf(ResponseStatusException.class)
-                .hasMessageContaining("not in your scope");
+                .hasMessageContaining("outside your responsibility");
         verify(repository, never()).save(any());
     }
 
@@ -258,17 +258,17 @@ class RetrievedStockServiceTest {
     void confirmCollection_rejectsWholeBatchWhenOneItemAlreadyCollected() {
         RetrievedStockItem stillPending = pendingItem("rsi-1", "case-1", "tech-1", null);
         RetrievedStockItem alreadyCollected = pendingItem("rsi-2", "case-1", "tech-1", null);
-        alreadyCollected.setStatus(RetrievedStockItemStatus.COLLECTED);
+        alreadyCollected.setStatus(RetrievedStockItemStatus.COLLECTED_BY_STT);
         when(repository.findAllById(List.of("rsi-1", "rsi-2"))).thenReturn(List.of(stillPending, alreadyCollected));
 
         ConfirmCollectionRequest request = new ConfirmCollectionRequest(List.of("rsi-1", "rsi-2"), null);
 
-        assertThatThrownBy(() -> newService().confirmCollection(zm(), request))
+        assertThatThrownBy(() -> newService().confirmCollectionByStt(stt(), request))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("no longer pending collection");
         // Whole batch rejected before any mutation -> neither item saved.
         verify(repository, never()).save(any());
-        assertThat(stillPending.getStatus()).isEqualTo(RetrievedStockItemStatus.PENDING_COLLECTION);
+        assertThat(stillPending.getStatus()).isEqualTo(RetrievedStockItemStatus.PENDING_STT_COLLECTION);
     }
 
     @Test
@@ -277,8 +277,32 @@ class RetrievedStockServiceTest {
 
         ConfirmCollectionRequest request = new ConfirmCollectionRequest(List.of("missing"), null);
 
-        assertThatThrownBy(() -> newService().confirmCollection(zm(), request))
+        assertThatThrownBy(() -> newService().confirmCollectionByStt(stt(), request))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("were not found");
+    }
+
+    @Test
+    void getReturnEligibleForStt_returnsCollectedItemsThatAreStillSelectable() {
+        RetrievedStockItem eligible = RetrievedStockItem.builder()
+                .id("rsi-1")
+                .sttId("stt-1")
+                .collectedBySttId("stt-1")
+                .equipmentId("eq-1")
+                .equipmentName("Modem")
+                .unit("PCS")
+                .quantity(1)
+                .status(RetrievedStockItemStatus.COLLECTED_BY_STT)
+                .build();
+
+        when(repository.findByCollectedBySttIdAndStatusAndMaterialReturnRequestIdIsNullOrderByCollectedAtDesc(
+                "stt-1", RetrievedStockItemStatus.COLLECTED_BY_STT))
+                .thenReturn(List.of(eligible));
+
+        List<RetrievedStockItemDto> result = newService().getReturnEligibleForStt("stt-1");
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getId()).isEqualTo("rsi-1");
+        assertThat(result.get(0).getStatus()).isEqualTo(RetrievedStockItemStatus.COLLECTED_BY_STT.name());
     }
 }

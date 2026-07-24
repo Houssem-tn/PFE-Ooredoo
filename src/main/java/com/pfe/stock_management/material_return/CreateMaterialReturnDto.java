@@ -2,7 +2,6 @@ package com.pfe.stock_management.material_return;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 
@@ -36,9 +35,14 @@ public class CreateMaterialReturnDto {
     @NotNull(message = "Return destination is required")
     private ReturnDestination destination;
 
-    @NotEmpty(message = "At least one item is required")
     @Valid
     private List<ReturnedItemDto> items;
+
+    /**
+     * Existing STT Collected Stock records selected for a collected-item return. Used only when
+     * {@code returnSource == COLLECTED_ITEM_STOCK}.
+     */
+    private List<String> retrievedStockItemIds;
 
     private String comment;
 

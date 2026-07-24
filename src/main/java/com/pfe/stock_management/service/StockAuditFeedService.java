@@ -174,6 +174,17 @@ public class StockAuditFeedService {
                         .unit(it.getUnit())
                         .quantity(it.getQuantity())
                         .condition(it.getCondition() != null ? it.getCondition().name() : null)
+                        .serialNumber(it.getSerialNumber())
+                        .imei(it.getImei())
+                        .retrievedStockItemId(it.getRetrievedStockItemId())
+                        .technicianName(it.getOriginalTechnicianName())
+                        .originalCaseReference(it.getOriginalCaseReference())
+                        .originalCaseType(it.getOriginalCaseType())
+                        .originalCustomerName(it.getOriginalCustomerName())
+                        .originalRecoveryDate(it.getOriginalRecoveryDate())
+                        .sttCollectedAt(it.getSttCollectedAt())
+                        .currentReturnStatus(r.getStatus() != null ? r.getStatus().name() : null)
+                        .proofViewUrl(it.getProofViewUrl())
                         .build());
                 totalQty += it.getQuantity();
             }

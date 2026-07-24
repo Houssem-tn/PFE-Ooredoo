@@ -83,7 +83,7 @@ public class RetrievedStockItem {
 
     // ── Status / declare ──────────────────────────────────────────────────────
     @Builder.Default
-    private RetrievedStockItemStatus status = RetrievedStockItemStatus.PENDING_COLLECTION;
+    private RetrievedStockItemStatus status = RetrievedStockItemStatus.PENDING_STT_COLLECTION;
     private Instant retrievedAt;
     private String declaredBy;
 
@@ -98,6 +98,12 @@ public class RetrievedStockItem {
     private Instant collectedAt;
     private String collectionBatchId;
     private String collectionNote;
+
+    // ── Material Return integration ────────────────────────────────────────────
+    /** The active Material Return Request this collected item was added to, if any. */
+    private String materialReturnRequestId;
+    private Instant addedToReturnAt;
+    private Instant returnedAt;
 
     // ── Audit ─────────────────────────────────────────────────────────────────
     private Instant createdAt;

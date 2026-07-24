@@ -613,6 +613,117 @@ public class EquipmentInstanceService {
         }
     }
 
+    /**
+     * Correct collection step: the responsible STT physically collects retrieved tracked units from
+     * the technician. Transitions each pending unit (TECH → STT) into {@code COLLECTED_BY_STT}.
+     * Units not in the pending-collection state are skipped (idempotent / safe against double-collect).
+     */
+    public void markCollectedByStt(List<String> instanceIds, String sttId, String sttName, String actor) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (String id : dedupe(instanceIds)) {
+            EquipmentInstance inst = load(id);
+            if (inst.getStatus() != InstanceStatus.PENDING_ZM_COLLECTION) {
+                continue;
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("COLLECTED_BY_STT")
+                    .fromOwnerType(InstanceOwnerType.TECH)
+                    .fromOwnerId(inst.getCurrentOwnerId())
+                    .fromOwnerName(inst.getCurrentOwnerName())
+                    .toOwnerType(InstanceOwnerType.STT)
+                    .toOwnerId(sttId)
+                    .toOwnerName(sttName)
+                    .resultingStatus(InstanceStatus.COLLECTED_BY_STT)
+                    .caseId(inst.getCaseId())
+                    .caseReference(inst.getCaseReference())
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setStatus(InstanceStatus.COLLECTED_BY_STT);
+            inst.setCurrentOwnerType(InstanceOwnerType.STT);
+            inst.setCurrentOwnerId(sttId);
+            inst.setCurrentOwnerName(sttName);
+            instanceRepository.save(inst);
+        }
+    }
+
+    /**
+     * Associates tracked units with an active material return request so the exact physical unit
+     * stays traceable until the handover is completed or the request is released.
+     *
+     * <p>The unit keeps its current owner/status; this only reserves the link and appends an audit
+     * movement. Physical ownership changes only when the handover completes.
+     */
+    public void reserveForReturn(String returnId, String returnCode, List<String> instanceIds, String actor) {
+        if (returnId == null || instanceIds == null || instanceIds.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (String id : dedupe(instanceIds)) {
+            EquipmentInstance inst = load(id);
+            if (returnId.equals(inst.getReturnId())) {
+                continue;
+            }
+            if (inst.getMovements() == null) {
+                inst.setMovements(new ArrayList<>());
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("ASSIGNED_TO_RETURN_REQUEST")
+                    .fromOwnerType(inst.getCurrentOwnerType())
+                    .fromOwnerId(inst.getCurrentOwnerId())
+                    .fromOwnerName(inst.getCurrentOwnerName())
+                    .toOwnerType(InstanceOwnerType.RETURN)
+                    .toOwnerId(returnId)
+                    .toOwnerName(returnCode)
+                    .resultingStatus(inst.getStatus())
+                    .returnId(returnId)
+                    .returnCode(returnCode)
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setReturnId(returnId);
+            inst.setReturnCode(returnCode);
+            instanceRepository.save(inst);
+        }
+    }
+
+    /** Releases previously reserved tracked units when an active return request is rejected/cancelled. */
+    public void releaseReturnReservation(String returnId, String actor) {
+        if (returnId == null) {
+            return;
+        }
+        List<EquipmentInstance> instances = instanceRepository.findByReturnId(returnId);
+        if (instances.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (EquipmentInstance inst : instances) {
+            if (inst.getMovements() == null) {
+                inst.setMovements(new ArrayList<>());
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("RELEASED_FROM_RETURN_REQUEST")
+                    .fromOwnerType(InstanceOwnerType.RETURN)
+                    .fromOwnerId(returnId)
+                    .fromOwnerName(inst.getReturnCode())
+                    .toOwnerType(inst.getCurrentOwnerType())
+                    .toOwnerId(inst.getCurrentOwnerId())
+                    .toOwnerName(inst.getCurrentOwnerName())
+                    .resultingStatus(inst.getStatus())
+                    .returnId(returnId)
+                    .returnCode(inst.getReturnCode())
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setReturnId(null);
+            inst.setReturnCode(null);
+            instanceRepository.save(inst);
+        }
+    }
+
     /** On material-return handover/approval, flips the return's tracked units to RETURNED_TO_DEPOT. */
     public void markReturnedToDepot(String returnId, String actor) {
         if (returnId == null) {
@@ -710,6 +821,7 @@ public class EquipmentInstanceService {
     public List<EquipmentInstanceDto> listOwnedAvailable(InstanceOwnerType ownerType, String ownerId, String equipmentId) {
         InstanceStatus status = expectedStockStatus(ownerType);
         return instanceRepository.findByCurrentOwnerTypeAndCurrentOwnerIdAndStatus(ownerType, ownerId, status).stream()
+                .filter(i -> i.getReturnId() == null || i.getReturnId().isBlank())
                 .filter(i -> !notBlank(equipmentId) || equipmentId.equals(i.getEquipmentId()))
                 .map(EquipmentInstanceDto::from)
                 .collect(Collectors.toList());
@@ -766,6 +878,9 @@ public class EquipmentInstanceService {
         }
         if (inst.getStatus() != expectedStatus) {
             throw bad("Tracked unit " + unitLabel(inst) + " is not available (status " + inst.getStatus() + ").");
+        }
+        if (inst.getReturnId() != null && !inst.getReturnId().isBlank()) {
+            throw bad("Tracked unit " + unitLabel(inst) + " is already reserved in an active material return.");
         }
     }
 

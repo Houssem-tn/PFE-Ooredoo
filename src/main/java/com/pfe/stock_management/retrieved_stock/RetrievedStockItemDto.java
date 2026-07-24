@@ -49,10 +49,18 @@ public class RetrievedStockItemDto {
     private Instant retrievedAt;
     private String declaredBy;
 
+    // Correct collector (STT). Legacy ZM fields kept for historical documents.
+    private String collectedBySttId;
+    private String collectedBySttName;
     private String collectedByZmId;
     private String collectedByZmName;
     private Instant collectedAt;
     private String collectionNote;
+
+    // Material Return integration
+    private String materialReturnRequestId;
+    private Instant addedToReturnAt;
+    private Instant returnedAt;
 
     private Instant createdAt;
     private Instant updatedAt;

@@ -64,9 +64,9 @@ class CaseServiceLifecycleTest {
     @Mock
     private MongoTemplate mongoTemplate;
     @Mock
-    private EquipmentUsagePolicyService equipmentUsagePolicy;
-    @Mock
     private RetrievedStockService retrievedStockService;
+    @Mock
+    private EquipmentUsagePolicyService equipmentUsagePolicy;
     @Mock
     private BusinessMetrics businessMetrics;
 
@@ -342,6 +342,32 @@ class CaseServiceLifecycleTest {
         when(caseRepository.findById("case-1")).thenReturn(Optional.of(caseEntity));
 
         CaseEntity result = service.setRdv("case-1", new SetRdvRequest(
+                true, java.time.Instant.now(), null, null, null, false, null
+        ));
+
+        assertThat(result.getStatus()).isEqualTo(CaseStatus.RDV_SET);
+    }
+
+    @Test
+    void setRdv_shouldMoveComplaintToRdvSetWithoutDiagnosisStep() {
+        authenticateAs("tech@example.com", "ROLE_TECH");
+        CaseService service = newService();
+        stubSave();
+
+        CaseEntity caseEntity = CaseEntity.builder()
+                .id("plt-1")
+                .type(CaseType.PLAINTE)
+                .status(CaseStatus.ASSIGNED_TO_TECH)
+                .techId("tech-1")
+                .techEmail("tech@example.com")
+                .executorId("tech-1")
+                .executorRole(ExecutorRole.TECH)
+                .executionMode(ExecutionMode.TECH_EXECUTION)
+                .build();
+
+        when(caseRepository.findById("plt-1")).thenReturn(Optional.of(caseEntity));
+
+        CaseEntity result = service.setRdv("plt-1", new SetRdvRequest(
                 true, java.time.Instant.now(), null, null, null, false, null
         ));
 
