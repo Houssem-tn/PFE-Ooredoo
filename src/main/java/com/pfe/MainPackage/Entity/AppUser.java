@@ -56,6 +56,16 @@ public class AppUser {
     @Builder.Default
     private Map<String, List<String>> coverageByModule = new HashMap<>();
 
+    // STT-scoped, per-ZM coverage confirmation state. Keyed by ZM id → governorates
+    // that ZM has approved / declined for this STT. This replaces the old one-to-one
+    // assignedZm link: several ZMs (each owning the same governorate for a different
+    // module) can now decide independently, and one ZM's decision never touches another's.
+    @Builder.Default
+    private Map<String, List<String>> coverageApprovedByZm = new HashMap<>();
+
+    @Builder.Default
+    private Map<String, List<String>> coverageDeclinedByZm = new HashMap<>();
+
     @Builder.Default
     private AccountStatus status = AccountStatus.PENDING;
 

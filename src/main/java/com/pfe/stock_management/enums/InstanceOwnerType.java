@@ -14,5 +14,7 @@ public enum InstanceOwnerType {
     /** Back in the central depot / team stock. */
     DEPOT,
     /** In transit through the material-return workflow. */
-    RETURN
+    RETURN,
+    /** Held by a Zone Manager after collecting retrieved stock from a technician. */
+    ZM
 }

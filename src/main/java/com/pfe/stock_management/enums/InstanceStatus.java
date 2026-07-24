@@ -13,5 +13,14 @@ public enum InstanceStatus {
     /** Retrieved from the client during a RES résiliation, pending handover. */
     RECOVERED_FROM_CLIENT,
     /** Handed back to the ZM/depot through the material-return workflow. */
-    RETURNED_TO_DEPOT
+    RETURNED_TO_DEPOT,
+    /**
+     * Retrieved from a client during a PLT/RES intervention via the technician Retrieved-Stock
+     * workflow; still physically held by the TECH, pending STT collection.
+     * (Historically named for ZM collection; kept as the pending value for backward compatibility.)
+     */
+    PENDING_ZM_COLLECTION,
+    /** @deprecated Physically collected by a ZM (legacy flow). Kept for historical documents. */
+    @Deprecated
+    COLLECTED_BY_ZM
 }

@@ -7,5 +7,6 @@ public enum FileRole {
     BEFORE_IMAGE,
     AFTER_IMAGE,
     WORK_PROOF,
-    EQUIPMENT_IMAGE
+    EQUIPMENT_IMAGE,
+    RETRIEVAL_PROOF
 }

@@ -55,6 +55,7 @@ public class RetrievedStockItem {
     private String technicianEmail;
     private String sttId;
     private String sttName;
+    private String sttEmail;
     private String zmId;
     private String zmName;
     private String zmEmail;
@@ -86,9 +87,14 @@ public class RetrievedStockItem {
     private Instant retrievedAt;
     private String declaredBy;
 
-    // ── ZM collection ─────────────────────────────────────────────────────────
+    // ── STT collection (correct owner of the physical collection step) ─────────
+    private String collectedBySttId;
+    private String collectedBySttName;
+
+    // ── Legacy ZM collection fields — kept for historical documents only ───────
     private String collectedByZmId;
     private String collectedByZmName;
+
     private Instant collectedAt;
     private String collectionBatchId;
     private String collectionNote;

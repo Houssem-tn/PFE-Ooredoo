@@ -17,6 +17,7 @@ import com.pfe.stock_management.repository.EquipmentRepository;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -437,6 +438,122 @@ public class EquipmentInstanceService {
         inst.setReturnCode(ret != null ? ret.getReturnCode() : null);
 
         return instanceRepository.save(inst).getId();
+    }
+
+    // ── PLT/RES technician retrieval + ZM collection ─────────────────────────────
+
+    /**
+     * Records a tracked unit retrieved from the client during a PLT/RES intervention through the
+     * technician Retrieved-Stock workflow. Unlike {@link #recordClientRecovery} (the older RES-only
+     * path into {@code MaterialReturnRequest}), the resulting instance stays owned by the
+     * <b>technician</b> (status {@code PENDING_ZM_COLLECTION}) rather than jumping straight to a
+     * return-owned state — it only moves to the ZM once {@link #markCollectedByZm} is called.
+     * If a matching instance already exists for this equipment (same IMEI/Serial), it is
+     * transitioned in place; otherwise a new instance is created. Returns the instance id (to store
+     * on the {@code RetrievedStockItem}), or null when the equipment is not tracked / no identifier
+     * was supplied.
+     */
+    public String recordTechRetrieval(Equipment eq, CaseEntity caseEntity,
+                                      String imei, String serial,
+                                      com.pfe.stock_management.retrieved_stock.RetrievedStockItem item,
+                                      String actor) {
+        if (eq == null || !trackingMode(eq).isTracked()) {
+            return null;
+        }
+        String normImei = normalize(imei);
+        String normSerial = normalize(serial);
+        if (normImei == null && normSerial == null) {
+            return null; // nothing to track for this retrieved unit
+        }
+
+        EquipmentInstance inst = findExisting(eq.getId(), normImei, normSerial)
+                .orElseGet(() -> EquipmentInstance.builder()
+                        .equipmentId(eq.getId())
+                        .equipmentName(eq.getName())
+                        .articleCode(eq.getArticleCode())
+                        .trackingMode(trackingMode(eq))
+                        .imei(trimToNull(imei))
+                        .serialNumber(trimToNull(serial))
+                        .normalizedImei(normImei)
+                        .normalizedSerialNumber(normSerial)
+                        .movements(new ArrayList<>())
+                        .createdBy(actor)
+                        .build());
+
+        if (inst.getMovements() == null) {
+            inst.setMovements(new ArrayList<>());
+        }
+        inst.getMovements().add(InstanceMovementEvent.builder()
+                .type("RETRIEVED_BY_TECH")
+                .fromOwnerType(InstanceOwnerType.CLIENT)
+                .toOwnerType(InstanceOwnerType.TECH)
+                .toOwnerId(item != null ? item.getTechnicianId() : null)
+                .toOwnerName(item != null ? item.getTechnicianName() : null)
+                .resultingStatus(InstanceStatus.PENDING_ZM_COLLECTION)
+                .caseId(caseEntity != null ? caseEntity.getId() : null)
+                .caseReference(caseEntity != null ? caseEntity.getCrmCase() : null)
+                .note(item != null && item.getDisposition() != null ? item.getDisposition().name() : null)
+                .occurredAt(Instant.now())
+                .performedBy(actor)
+                .build());
+
+        inst.setStatus(InstanceStatus.PENDING_ZM_COLLECTION);
+        inst.setCurrentOwnerType(InstanceOwnerType.TECH);
+        inst.setCurrentOwnerId(item != null ? item.getTechnicianId() : null);
+        inst.setCurrentOwnerName(item != null ? item.getTechnicianName() : null);
+        if (inst.getOriginSttId() == null && item != null) {
+            inst.setOriginSttId(item.getSttId());
+        }
+        inst.setCaseId(caseEntity != null ? caseEntity.getId() : null);
+        inst.setCaseReference(caseEntity != null ? caseEntity.getCrmCase() : null);
+        inst.setRetrievedStockItemId(item != null ? item.getId() : null);
+
+        try {
+            return instanceRepository.save(inst).getId();
+        } catch (DuplicateKeyException dup) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    eq.getName() + ": tracked unit " + unitLabel(inst)
+                            + " already exists in stock (duplicate IMEI/Serial).");
+        }
+    }
+
+    /**
+     * ZM confirms physical collection: transitions every given instance from
+     * {@code PENDING_ZM_COLLECTION} (owner TECH) to {@code COLLECTED_BY_ZM} (owner ZM). Instances
+     * not currently in {@code PENDING_ZM_COLLECTION} are left untouched (defensive — the caller,
+     * {@code RetrievedStockService.confirmCollection}, has already validated the corresponding
+     * {@code RetrievedStockItem}s are all pending before calling this).
+     */
+    public void markCollectedByZm(List<String> instanceIds, String zmId, String zmName, String actor) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (String id : dedupe(instanceIds)) {
+            EquipmentInstance inst = load(id);
+            if (inst.getStatus() != InstanceStatus.PENDING_ZM_COLLECTION) {
+                continue;
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("COLLECTED_BY_ZM")
+                    .fromOwnerType(InstanceOwnerType.TECH)
+                    .fromOwnerId(inst.getCurrentOwnerId())
+                    .fromOwnerName(inst.getCurrentOwnerName())
+                    .toOwnerType(InstanceOwnerType.ZM)
+                    .toOwnerId(zmId)
+                    .toOwnerName(zmName)
+                    .resultingStatus(InstanceStatus.COLLECTED_BY_ZM)
+                    .caseId(inst.getCaseId())
+                    .caseReference(inst.getCaseReference())
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setStatus(InstanceStatus.COLLECTED_BY_ZM);
+            inst.setCurrentOwnerType(InstanceOwnerType.ZM);
+            inst.setCurrentOwnerId(zmId);
+            inst.setCurrentOwnerName(zmName);
+            instanceRepository.save(inst);
+        }
     }
 
     /** On material-return handover/approval, flips the return's tracked units to RETURNED_TO_DEPOT. */

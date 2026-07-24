@@ -22,4 +22,11 @@ public interface NotificationRepository extends MongoRepository<Notification, St
     /** Deduplication for role-based notifications. */
     boolean existsByTargetRoleAndEventTypeAndEntityIdAndReadFalse(
             String targetRole, String eventType, String entityId);
+
+    /**
+     * Active (unread) alerts for a recipient+entity, regardless of event type — used to
+     * resolve an open WARNING/CRITICAL stock alert once the stock recovers above threshold.
+     */
+    List<Notification> findByRecipientEmailAndEntityIdAndReadFalse(
+            String recipientEmail, String entityId);
 }

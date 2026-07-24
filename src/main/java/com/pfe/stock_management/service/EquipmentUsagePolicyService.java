@@ -135,13 +135,16 @@ public class EquipmentUsagePolicyService {
     }
 
     /**
-     * Enforces that a RES recovery declaration only references equipment that is allowed to be
-     * recovered from the client. Requires a RES case and at least one item.
+     * Enforces that a client-material recovery declaration only references equipment that is
+     * allowed to be recovered from the client. Available for both RES (résiliation — the only
+     * allowed operation there) and PLT (complaint — alongside optional consumption/swap). Requires
+     * an ACT case to always be rejected, and at least one item.
      */
     public void assertRecoverable(CaseEntity caseEntity, Collection<String> equipmentIds) {
-        if (resolveContext(caseEntity) != UsageContext.RES) {
+        UsageContext context = resolveContext(caseEntity);
+        if (context != UsageContext.RES && context != UsageContext.PLT) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Client material recovery is only available for résiliation (RES) cases.");
+                    "Client material recovery is only available for complaint (PLT) or résiliation (RES) cases.");
         }
 
         Set<String> ids = normalize(equipmentIds);

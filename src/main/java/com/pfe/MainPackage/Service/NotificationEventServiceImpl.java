@@ -14,6 +14,7 @@ import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -289,6 +290,37 @@ public class NotificationEventServiceImpl implements NotificationEventService {
         if (returnRequest == null || isBlank(returnRequest.getZmEmail())) return;
         NotificationMessageDto payload = payloadFactory.buildReturnClosedForZm(returnRequest);
         sendToRecipient(returnRequest.getZmEmail(), payload);
+    }
+
+    @Override
+    public void onRetrievedStockDeclared(CaseEntity caseEntity, List<RetrievedStockItem> items) {
+        if (items == null || items.isEmpty()) {
+            return;
+        }
+        // The responsible STT physically collects retrieved equipment, so the declaration alert
+        // goes to the STT (falling back to the ZM only for legacy items with no STT email).
+        String recipient = items.get(0).getSttEmail();
+        if (isBlank(recipient)) {
+            recipient = items.get(0).getZmEmail();
+        }
+        if (isBlank(recipient)) {
+            return;
+        }
+        NotificationMessageDto payload = payloadFactory.buildRetrievedStockDeclared(caseEntity, items);
+        sendToRecipient(recipient, payload);
+    }
+
+    @Override
+    public void onRetrievedStockCollected(List<RetrievedStockItem> collectedItems) {
+        if (collectedItems == null || collectedItems.isEmpty()) {
+            return;
+        }
+        String technicianEmail = collectedItems.get(0).getTechnicianEmail();
+        if (isBlank(technicianEmail)) {
+            return;
+        }
+        NotificationMessageDto payload = payloadFactory.buildRetrievedStockCollected(collectedItems);
+        sendToRecipient(technicianEmail, payload);
     }
 
     private void sendToRecipients(NotificationMessageDto payload, String... emails) {

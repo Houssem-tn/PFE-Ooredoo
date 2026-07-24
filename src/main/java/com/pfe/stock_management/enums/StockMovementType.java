@@ -16,5 +16,9 @@ public enum StockMovementType {
     RETURN_TO_REPAIR,
     RETURN_TO_RECONDITIONING,
     RETURN_TO_CENTRAL_WAREHOUSE,
-    RETURN_TO_SCRAP
+    RETURN_TO_SCRAP,
+
+    // Retrieved-stock movements (PLT/RES technician retrieval → ZM collection)
+    RETRIEVED_STOCK_DECLARED,
+    RETRIEVED_STOCK_COLLECTED
 }

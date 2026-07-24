@@ -78,6 +78,14 @@ public class EquipmentInstance {
     private String returnId;
     private String returnCode;
 
+    /**
+     * Linked {@code RetrievedStockItem} id when this unit was retrieved from a client through the
+     * technician Retrieved-Stock workflow (PLT/RES), as opposed to the older RES-only
+     * {@code MaterialReturnRequest} recovery path (which uses {@link #returnId}/{@link #returnCode}
+     * instead). Null for units that never went through that workflow.
+     */
+    private String retrievedStockItemId;
+
     // ── Movement history (append-only) ───────────────────────────────────────
     @Builder.Default
     private List<InstanceMovementEvent> movements = new ArrayList<>();
