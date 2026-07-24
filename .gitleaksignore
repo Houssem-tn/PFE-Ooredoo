@@ -6,6 +6,14 @@
 # (gitleaks v8.30.1) and verified by hand. A new secret anywhere else,
 # even matching the same rule, still fails CI.
 #
+# IMPORTANT: comments in this file intentionally describe each finding
+# in plain English rather than quoting the matched text verbatim — an
+# earlier version of this file quoted the actual matched strings (e.g.
+# "mongodb://${VAR}:${VAR}@...") for documentation purposes, which
+# gitleaks then flagged as 10 brand-new findings in .gitleaksignore
+# itself on the very next pull_request-triggered scan. Do not reintroduce
+# secret-shaped substrings here, even as illustrative quotes.
+#
 # Regenerate/verify with: gitleaks detect --config .gitleaks.toml -v
 
 # Gmail App Password committed to src/main/resources/application.properties
@@ -20,29 +28,31 @@
 # blanket allowlist for the mongodb-uri-with-credentials or
 # app-jwt-secret-literal rules.
 
-# `--uri="mongodb://${MONGODB_USERNAME}:${MONGODB_PASSWORD}@..."` — plain
-# shell parameter expansion, not a literal URI; the actual username/password
-# only ever exist as pod env vars sourced from the mongodb Secret.
+# mongodb-dump.sh's mongodump --uri argument: composed entirely from shell
+# parameter expansion of MONGODB_USERNAME/MONGODB_PASSWORD env vars, not a
+# literal URI; those values only ever exist as pod env vars sourced from
+# the mongodb Secret.
 0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/scripts/mongodb-dump.sh:mongodb-uri-with-credentials:13
 
-# `MONGODB_URI="mongodb://user:pass@host:27017/db?authSource=admin"` inside
-# this script's own `# Usage:` comment block — "user"/"pass" are literal
-# placeholder words in documentation, not a real credential.
+# mongodb-restore.sh's own `# Usage:` comment block, illustrating the
+# MONGODB_URI env var an operator should export before running the
+# script. Uses the literal placeholder words "user"/"pass", not a real
+# credential.
 0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/scripts/mongodb-restore.sh:mongodb-uri-with-credentials:12
 
-# `# mongodb://<user>:<password>@mongodb:<port>/<database>?authSource=admin`
-# — a YAML comment documenting the composed format with angle-bracket
-# placeholders, immediately above the real (also-suppressed) template line.
+# A YAML comment in deployment-backend.yaml documenting the composed
+# MONGODB_URI format with angle-bracket placeholders, immediately above
+# the real (also-suppressed) template line below.
 0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/templates/deployment-backend.yaml:mongodb-uri-with-credentials:93
 
-# `value: "mongodb://$(MONGODB_USERNAME):$(MONGODB_PASSWORD)@mongodb:..."` —
-# Kubernetes container-spec `$(VAR)` env-var reference syntax, composing
-# from Secret/ConfigMap-sourced env vars defined earlier in this same
-# container spec; no literal credential is present in the manifest.
+# deployment-backend.yaml's actual MONGODB_URI env value: Kubernetes
+# container-spec $(VAR) env-var reference syntax, composing from
+# Secret/ConfigMap-sourced env vars defined earlier in the same container
+# spec; no literal credential is present in the manifest.
 0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/templates/deployment-backend.yaml:mongodb-uri-with-credentials:97
 
-# `--set-string backend.secrets.jwtSecret=ci-only-dummy-jwt-secret-not-real-0000000000`
-# — the same fixed, clearly-named, low-entropy CI-only dummy value used
+# k8s-validate.yml's `helm template --set-string backend.secrets.jwtSecret=...`
+# step: a fixed, clearly-named, low-entropy CI-only dummy value used
 # solely to satisfy Helm's `required()` guard when this workflow renders
 # the chart with no real secrets supplied (see ci.yml's env-validate job,
 # which excludes this same file from its own JWT-pattern check for the
@@ -56,32 +66,32 @@
 # commit c1676f66 / 0341f035. Each re-inspected by hand; none is a real
 # credential.
 
-# `APP_JWT_SECRET=` — blank placeholder value (operator fills this in
-# before use); gitleaks attributes the entropy of the following line
-# (APP_JWT_EXPIRATION=86400000) to this match, but the actual line 28
-# value is empty. Not a secret.
+# .env.example line 28: a blank APP_JWT_SECRET= placeholder value
+# (operator fills this in before use). gitleaks attributes the entropy of
+# the following line's value to this match, but the actual line 28 value
+# is empty. Not a secret.
 0341f0359df8a73c776468d71df83f109adc2d1e:.env.example:app-jwt-secret-literal:28
 
-# `$env:APP_JWT_SECRET = "ci-local-test-only-jwt-secret-0000000000"` — a
-# developer helper script's local-only fallback (only used when running
-# `ci-local.ps1` outside of CI, mirrors mvnw's own test profile), never
-# used for anything reachable outside the developer's own machine.
+# scripts/ci-local.ps1: a developer helper script's local-only JWT
+# fallback (only used when running that script outside of CI, mirrors
+# mvnw's own test profile), clearly named as test-only, never used for
+# anything reachable outside the developer's own machine.
 c1676f66a57e6295b861c91149ec8ffa05db309e:scripts/ci-local.ps1:app-jwt-secret-literal:16
 
-# `MONGODB_URI: mongodb://${MONGODB_USERNAME}:${MONGODB_PASSWORD}@mongodb:27017/...`
-# in the deploy/ mirror of the root docker-compose.yml — same shell
-# parameter expansion as the root file, not a literal credential.
+# deploy/docker-compose.yml (the deploy/ mirror of the root
+# docker-compose.yml): its MONGODB_URI env value, same shell parameter
+# expansion of MONGODB_USERNAME/MONGODB_PASSWORD as the root file, not a
+# literal credential.
 c1676f66a57e6295b861c91149ec8ffa05db309e:deploy/docker-compose.yml:mongodb-uri-with-credentials:129
 
-# `MINIO_ACCESS_KEY=ci-minio-access-not-real` / `MINIO_SECRET_KEY=ci-minio-secret-not-real-$(date +%s)`
-# — integration.yml's compose-smoke-test job writing explicitly-fake,
-# timestamp-suffixed values into a throwaway `.env.docker` used only for
-# that job's own ephemeral Compose stack.
+# integration.yml's compose-smoke-test job: writes explicitly-fake,
+# clearly-named, timestamp-suffixed MinIO access/secret key values into a
+# throwaway .env.docker file used only for that job's own ephemeral
+# Compose stack.
 c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/integration.yml:minio-credential-assignment:99
 c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/integration.yml:minio-credential-assignment:100
 
-# `MONGODB_URI: "mongodb://ci_test_user:ci_test_password_not_real@localhost:27017/pfe_test..."`
-# — the validate job's own ephemeral MongoDB service container credential,
-# scoped to `localhost:27017` inside that one GitHub-hosted runner for the
-# duration of the job; never reachable outside it.
+# ci.yml's validate job: its ephemeral MongoDB service container's own
+# credential, scoped to localhost inside that one GitHub-hosted runner for
+# the duration of the job; never reachable outside it.
 c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/ci.yml:mongodb-uri-with-credentials:149
