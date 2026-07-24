@@ -120,3 +120,10 @@ d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-creden
 d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:app-jwt-secret-literal:65
 d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:minio-credential-assignment:76
 d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:83
+
+# Same story, one more generation: commit 1f39a53 (this branch's first
+# attempt at the prose rewrite above) still had one leftover illustrative
+# example in its top-of-file comment that itself matched the
+# connection-string shape -- removed in the very next commit, but 1f39a53
+# is likewise permanent history on this branch.
+1f39a5326575735b7c45206bb4b6ad101ed837c8:.gitleaksignore:mongodb-uri-with-credentials:12
