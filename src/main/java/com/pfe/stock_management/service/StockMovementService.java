@@ -13,6 +13,7 @@ import com.pfe.stock_management.model.DpmItem;
 import com.pfe.stock_management.model.DistributionItem;
 import com.pfe.stock_management.model.UsageItem;
 import com.pfe.stock_management.repository.StockMovementRepository;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -224,6 +225,58 @@ public class StockMovementService {
                     .performedBy(performedBy)
                     .build());
         }
+    }
+
+    /** Technician declares equipment retrieved from a client (PLT/RES Retrieved-Stock workflow). */
+    public void recordRetrievedStockDeclared(RetrievedStockItem item, String performedBy) {
+        if (item == null) {
+            return;
+        }
+        Instant now = Instant.now();
+        movementRepository.save(StockMovement.builder()
+                .movementType(StockMovementType.RETRIEVED_STOCK_DECLARED)
+                .fromActorId(item.getTechnicianId())
+                .fromActorRole("ROLE_TECH")
+                .toActorId(item.getZmId())
+                .toActorRole("ROLE_ZM")
+                .technicianId(item.getTechnicianId())
+                .caseId(item.getCaseId())
+                .equipmentId(item.getEquipmentId())
+                .equipmentName(item.getEquipmentName())
+                .quantity(item.getQuantity())
+                .referenceId(item.getId())
+                .comment("Retrieved from client (" + item.getDisposition() + ") — case " + item.getCrmCase())
+                .createdAt(now)
+                .createdBy(performedBy)
+                .performedAt(now)
+                .performedBy(performedBy)
+                .build());
+    }
+
+    /** ZM confirms physical collection of a technician's retrieved-stock item. */
+    public void recordRetrievedStockCollected(RetrievedStockItem item, String performedBy) {
+        if (item == null) {
+            return;
+        }
+        Instant now = Instant.now();
+        movementRepository.save(StockMovement.builder()
+                .movementType(StockMovementType.RETRIEVED_STOCK_COLLECTED)
+                .fromActorId(item.getTechnicianId())
+                .fromActorRole("ROLE_TECH")
+                .toActorId(item.getCollectedByZmId())
+                .toActorRole("ROLE_ZM")
+                .technicianId(item.getTechnicianId())
+                .caseId(item.getCaseId())
+                .equipmentId(item.getEquipmentId())
+                .equipmentName(item.getEquipmentName())
+                .quantity(item.getQuantity())
+                .referenceId(item.getId())
+                .comment("Collected by ZM from technician retrieved stock — case " + item.getCrmCase())
+                .createdAt(now)
+                .createdBy(performedBy)
+                .performedAt(now)
+                .performedBy(performedBy)
+                .build());
     }
 
     private StockMovementType resolveDestinationMovementType(ReturnDestination destination) {

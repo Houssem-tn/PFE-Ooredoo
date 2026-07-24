@@ -5,5 +5,6 @@ public enum FileEntityType {
     CASE,
     INTERVENTION,
     REPORT,
-    STOCK_EQUIPMENT
+    STOCK_EQUIPMENT,
+    RETRIEVED_STOCK_ITEM
 }

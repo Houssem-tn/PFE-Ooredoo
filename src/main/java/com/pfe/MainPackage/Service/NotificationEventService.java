@@ -6,6 +6,9 @@ import com.pfe.case_management.entity.CaseEntity;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
+
+import java.util.List;
 
 public interface NotificationEventService {
     void onUserRegistered(AppUser user);
@@ -73,4 +76,18 @@ public interface NotificationEventService {
 
     /** Return fully closed after ZM handover confirmation → notify ZM (audit closure in Alert Center) */
     void onReturnClosedForZm(MaterialReturnRequest returnRequest);
+
+    /**
+     * Technician declared one or more retrieved-stock items (PLT/RES retrieval) → notify the owning
+     * ZM. {@code items} is the whole batch from one declaration submission; one aggregated
+     * notification is sent for the batch, not one per item.
+     */
+    void onRetrievedStockDeclared(CaseEntity caseEntity, List<RetrievedStockItem> items);
+
+    /**
+     * ZM confirmed physical collection of retrieved-stock items → notify the technician.
+     * {@code collectedItems} must already be scoped to a single technician; the caller sends one
+     * call (and therefore one aggregated notification) per technician touched by the confirm batch.
+     */
+    void onRetrievedStockCollected(List<RetrievedStockItem> collectedItems);
 }

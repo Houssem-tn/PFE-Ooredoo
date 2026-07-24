@@ -28,5 +28,8 @@ public enum CaseTimelineEventType {
     MATERIAL_RETURN_REJECTED,
 
     // RES client material recovery (no stock consumption)
-    CLIENT_MATERIAL_RECOVERED
+    CLIENT_MATERIAL_RECOVERED,
+
+    // ZM physically collected retrieved stock from a technician
+    RETRIEVED_STOCK_COLLECTED
 }

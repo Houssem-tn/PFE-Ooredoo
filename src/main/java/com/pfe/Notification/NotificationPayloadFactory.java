@@ -11,6 +11,7 @@ import com.pfe.case_management.model.SlaTrackingInfo;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.SttDistribution;
 import com.pfe.stock_management.material_return.MaterialReturnRequest;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -723,6 +724,87 @@ public class NotificationPayloadFactory {
         dto.setRelatedStockRequestId(req.getId());
         if (req.getRelatedCaseId() != null) dto.setRelatedCaseId(req.getRelatedCaseId());
         return dto;
+    }
+
+    // ── Retrieved Stock payloads (PLT/RES technician retrieval → ZM collection) ──
+
+    /**
+     * One technician submission can produce several {@link RetrievedStockItem} lines (one per
+     * equipment/serial); this builds a single aggregated notification for the whole batch rather
+     * than one per item, mirroring {@link #buildCasesBulkAssignedToZm}'s "one notification per
+     * batch" approach.
+     */
+    public NotificationMessageDto buildRetrievedStockDeclared(CaseEntity caseEntity, List<RetrievedStockItem> items) {
+        RetrievedStockItem first = items.get(0);
+        int count = items.size();
+        String plural = count == 1 ? "item" : "items";
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("caseId", first.getCaseId());
+        data.put("crmCase", first.getCrmCase());
+        data.put("caseUsageContext", first.getCaseUsageContext());
+        data.put("technicianId", first.getTechnicianId());
+        data.put("technicianName", first.getTechnicianName());
+        data.put("itemCount", count);
+        // Collection is performed by the responsible STT.
+        data.put("routeHint", "/stt/stock/retrieved-collection");
+
+        NotificationMessageDto dto2 = new NotificationMessageDto();
+        dto2.setEventType("RETRIEVED_STOCK_DECLARED");
+        dto2.setTitle("Equipment retrieved from a client — awaiting collection");
+        dto2.setMessage("Technician " + safe(first.getTechnicianName()) + " retrieved " + count + " " + plural
+                + " from the client on case " + safe(first.getCrmCase()) + ". Ready for collection.");
+        dto2.setEntityType("RETRIEVED_STOCK");
+        dto2.setEntityId(first.getCaseId());
+        dto2.setStatus("PENDING_COLLECTION");
+        dto2.setTriggeredBy(first.getDeclaredBy());
+        dto2.setCreatedAt(Instant.now());
+        dto2.setData(data);
+        dto2.setLevel("INFO");
+        dto2.setCategory("STOCK");
+        dto2.setActionType("OPEN_STOCK");
+        if (caseEntity != null) {
+            dto2.setRelatedCaseId(caseEntity.getId());
+        }
+        return dto2;
+    }
+
+    /**
+     * One aggregated notification per technician per confirm-collection batch (not one per item) —
+     * the caller groups the collected items by technician before calling this once per group.
+     */
+    public NotificationMessageDto buildRetrievedStockCollected(List<RetrievedStockItem> collectedItems) {
+        RetrievedStockItem first = collectedItems.get(0);
+        int count = collectedItems.size();
+        String plural = count == 1 ? "item" : "items";
+
+        // Collector is the responsible STT (fall back to legacy ZM name for historical items).
+        String collectorName = first.getCollectedBySttName() != null
+                ? first.getCollectedBySttName() : first.getCollectedByZmName();
+        String collectorId = first.getCollectedBySttId() != null
+                ? first.getCollectedBySttId() : first.getCollectedByZmId();
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("itemCount", count);
+        data.put("collectionBatchId", first.getCollectionBatchId());
+        data.put("collectedByName", collectorName);
+        data.put("routeHint", "/tech/stock/my-stock");
+
+        NotificationMessageDto dto3 = new NotificationMessageDto();
+        dto3.setEventType("RETRIEVED_STOCK_COLLECTED");
+        dto3.setTitle("Retrieved stock collected");
+        dto3.setMessage("STT " + safe(collectorName) + " confirmed collection of " + count + " "
+                + plural + " from your retrieved stock.");
+        dto3.setEntityType("RETRIEVED_STOCK");
+        dto3.setEntityId(first.getCollectionBatchId());
+        dto3.setStatus("COLLECTED");
+        dto3.setTriggeredBy(collectorId);
+        dto3.setCreatedAt(Instant.now());
+        dto3.setData(data);
+        dto3.setLevel("INFO");
+        dto3.setCategory("STOCK");
+        dto3.setActionType("OPEN_STOCK");
+        return dto3;
     }
 
     private String buildItemSummary(List<com.pfe.stock_management.material_return.ReturnedItem> items) {
