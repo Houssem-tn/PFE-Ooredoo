@@ -64,6 +64,16 @@ public class EquipmentInstanceService {
      * cannot confirm reception with missing / mismatched / duplicate tracking data.
      */
     public void validateUnitsForConfirmation(Equipment eq, int confirmedQty, List<UnitTrackingInput> units) {
+        validateUnitsForConfirmation(eq, confirmedQty, units, null);
+    }
+
+    /**
+     * Overload used by the DPM confirmation flow. When {@code currentDpmId} is non-null the
+     * "already exists in stock" checks ignore units this same DPM already materialised, so a
+     * re-run of a partially completed confirmation is not wrongly rejected by its own instances.
+     */
+    public void validateUnitsForConfirmation(Equipment eq, int confirmedQty,
+                                             List<UnitTrackingInput> units, String currentDpmId) {
         TrackingMode mode = trackingMode(eq);
         if (!mode.isTracked() || confirmedQty <= 0) {
             return;
@@ -100,18 +110,36 @@ public class EquipmentInstanceService {
                 throw bad(eq.getName() + ": Serial Number '" + u.getSerialNumber() + "' is repeated in this reception.");
             }
 
-            if (imei != null && instanceRepository.existsByEquipmentIdAndNormalizedImei(eq.getId(), imei)) {
+            if (imei != null && imeiExistsElsewhere(eq.getId(), imei, currentDpmId)) {
                 throw bad(eq.getName() + ": IMEI '" + u.getImei() + "' already exists in stock.");
             }
-            if (serial != null && instanceRepository.existsByEquipmentIdAndNormalizedSerialNumber(eq.getId(), serial)) {
+            if (serial != null && serialExistsElsewhere(eq.getId(), serial, currentDpmId)) {
                 throw bad(eq.getName() + ": Serial Number '" + u.getSerialNumber() + "' already exists in stock.");
             }
         }
     }
 
+    private boolean imeiExistsElsewhere(String equipmentId, String normImei, String currentDpmId) {
+        return currentDpmId == null
+                ? instanceRepository.existsByEquipmentIdAndNormalizedImei(equipmentId, normImei)
+                : instanceRepository.existsByEquipmentIdAndNormalizedImeiAndSourceDpmIdNot(equipmentId, normImei, currentDpmId);
+    }
+
+    private boolean serialExistsElsewhere(String equipmentId, String normSerial, String currentDpmId) {
+        return currentDpmId == null
+                ? instanceRepository.existsByEquipmentIdAndNormalizedSerialNumber(equipmentId, normSerial)
+                : instanceRepository.existsByEquipmentIdAndNormalizedSerialNumberAndSourceDpmIdNot(equipmentId, normSerial, currentDpmId);
+    }
+
     /**
      * Materialises one {@link EquipmentInstance} (status IN_STT_STOCK, owner = DPM's STT) per
      * validated unit row. Call only after {@link #validateUnitsForConfirmation}. No-op for NONE.
+     *
+     * <p><b>Idempotent per DPM:</b> a unit whose IMEI/Serial was already materialised for this
+     * same {@code sourceDpmId} is skipped, so retrying a partially completed DPM confirmation
+     * never double-creates instances. A genuine duplicate that races past validation surfaces
+     * from the unique index as a {@link ResponseStatusException} CONFLICT (409) — a meaningful
+     * business error — rather than a generic 500.
      */
     public List<EquipmentInstance> createForDpm(Equipment eq, DpmRequest dpm,
                                                 List<UnitTrackingInput> units, String actor) {
@@ -120,9 +148,28 @@ public class EquipmentInstanceService {
             return List.of();
         }
 
+        // Already-materialised identifiers for this DPM+equipment (idempotency on retry).
+        Set<String> existingImei = new HashSet<>();
+        Set<String> existingSerial = new HashSet<>();
+        for (EquipmentInstance prior : instanceRepository.findBySourceDpmId(dpm.getId())) {
+            if (!eq.getId().equals(prior.getEquipmentId())) {
+                continue;
+            }
+            if (prior.getNormalizedImei() != null) existingImei.add(prior.getNormalizedImei());
+            if (prior.getNormalizedSerialNumber() != null) existingSerial.add(prior.getNormalizedSerialNumber());
+        }
+
         Instant now = Instant.now();
         List<EquipmentInstance> created = new ArrayList<>();
         for (UnitTrackingInput u : units) {
+            String normImei = normalize(u.getImei());
+            String normSerial = normalize(u.getSerialNumber());
+            if ((normImei != null && existingImei.contains(normImei))
+                    || (normSerial != null && existingSerial.contains(normSerial))) {
+                // This unit was already created for this DPM by an earlier (partial) attempt.
+                continue;
+            }
+
             EquipmentInstance inst = EquipmentInstance.builder()
                     .equipmentId(eq.getId())
                     .equipmentName(eq.getName())
@@ -156,7 +203,17 @@ public class EquipmentInstanceService {
                     .performedBy(actor)
                     .build());
 
-            created.add(instanceRepository.save(inst));
+            try {
+                created.add(instanceRepository.save(inst));
+            } catch (DuplicateKeyException dup) {
+                // The unique index rejected a real, non-null IMEI/Serial that slipped past
+                // validation (e.g. a concurrent confirmation). Surface a clear 409 business error.
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        eq.getName() + ": tracked unit " + unitLabel(inst)
+                                + " already exists in stock (duplicate IMEI/Serial).");
+            }
+            if (normImei != null) existingImei.add(normImei);
+            if (normSerial != null) existingSerial.add(normSerial);
         }
         log.info("equipment_instances_created dpmId={} equipmentId={} count={}",
                 dpm.getId(), eq.getId(), created.size());

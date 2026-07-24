@@ -87,6 +87,13 @@ public class SttStockService {
     private final BusinessMetrics businessMetrics;
 
     public void applyDpmConfirmation(DpmRequest dpm) {
+        // Idempotency guard: if this DPM's stock was already applied (its source balances exist),
+        // skip so a retry after a partially completed confirmation cannot double-count the counters.
+        if (dpm.getId() != null && dpmAllocationService.hasSourceBalances(dpm.getId())) {
+            log.info("dpm_stock_already_applied_skipping dpmId={}", dpm.getId());
+            return;
+        }
+
         SttStock stock = sttStockRepository.findBySttId(dpm.getSttId())
                 .orElseGet(() -> SttStock.builder().sttId(dpm.getSttId()).items(new ArrayList<>()).build());
 
@@ -654,6 +661,11 @@ public class SttStockService {
         distributionRepository.save(dist);
 
         stockMovementService.recordTechConfirmation(dist, techEmail);
+
+        // Confirmation raises TECH stock (and may resolve an open low-stock alert). Re-evaluate
+        // so the alert lifecycle stays in sync; the tech's live stock refresh is driven by the
+        // STOCK_DISTRIBUTED notification the frontend already listens for.
+        stockAlertEvaluationService.evaluateTechStock(techId);
     }
 
     private PendingDistributionDto toDto(SttDistribution dist) {
