@@ -170,12 +170,11 @@ public class AuthService {
             throw new IllegalStateException("Assigned STT is not active");
         }
 
-        if (stt.getAssignedZmId() == null || stt.getAssignedZmId().isBlank()) {
-            throw new IllegalStateException("Assigned STT is not linked to any ZM");
-        }
-
-        if (stt.getAssignedZmEmail() == null || stt.getAssignedZmEmail().isBlank()) {
-            throw new IllegalStateException("Assigned STT has no responsible ZM");
+        // The anchoring ZM is the one recorded on the invitation when the STT sent it
+        // (resolved from shared governorate coverage). This ZM approves the registered
+        // technician; there is no longer a one-to-one STT→ZM link to rely on.
+        if (invitation.getZmId() == null || invitation.getZmId().isBlank()) {
+            throw new IllegalStateException("Invitation is not linked to any ZM");
         }
 
         AppUser user = AppUser.builder()
@@ -187,8 +186,8 @@ public class AuthService {
                 .roleRequested(UserRole.ROLE_TECH)
                 .assignedSttId(stt.getId())
                 .assignedSttEmail(stt.getEmail())
-                .assignedZmId(stt.getAssignedZmId())
-                .assignedZmEmail(stt.getAssignedZmEmail())
+                .assignedZmId(invitation.getZmId())
+                .assignedZmEmail(invitation.getZmEmail())
                 .status(AccountStatus.PENDING)
                 .enabled(false)
                 .build();
