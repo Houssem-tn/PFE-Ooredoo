@@ -93,7 +93,8 @@ FROM eclipse-temurin:17-jre-jammy AS runtime
 # every time an upstream package gets patched (confirmed in practice on
 # the sibling frontend image's Alpine base: a freshly-pulled image still
 # had an already-fixed OpenSSL CVE — see Pfe-Oreedoo-Front/Dockerfile).
-RUN apt-get update \
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
