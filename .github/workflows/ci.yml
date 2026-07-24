@@ -98,7 +98,14 @@ jobs:
           # intentionally-public test-only JWT secret by design (see that
           # file's own comment) — not a real secret, and this check would
           # otherwise flag it as a false positive on every run.
-          hits=$(git grep -nEi "(app\.jwt\.secret|jwt[._-]?secret)\s*=\s*[^\\\$\s][A-Za-z0-9/+=_-]{15,}" -- '*.properties' '*.yml' '*.yaml' ':!application-test.properties' ':!**/application-test.properties' || true)
+          # k8s-validate.yml is excluded for the same reason: its
+          # `helm template --set-string backend.secrets.jwtSecret=...` step
+          # passes a fixed, clearly-named CI-only dummy value
+          # ("ci-only-dummy-jwt-secret-not-real-...") purely to satisfy
+          # Helm's `required()` guard when rendering with no real secrets
+          # supplied — not a credential, low-entropy by design, never used
+          # outside this workflow's own ephemeral render.
+          hits=$(git grep -nEi "(app\.jwt\.secret|jwt[._-]?secret)\s*=\s*[^\\\$\s][A-Za-z0-9/+=_-]{15,}" -- '*.properties' '*.yml' '*.yaml' ':!application-test.properties' ':!**/application-test.properties' ':!.github/workflows/k8s-validate.yml' || true)
           if [ -n "$hits" ]; then
             echo "::error::Possible hardcoded JWT secret in a tracked config file:"
             echo "$hits"
@@ -299,6 +306,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # gitleaks-action calls the GitHub API to list the PR's commits on
+      # `pull_request` events (to know what range to scan); without this,
+      # that call 403s ("Resource not accessible by integration") and the
+      # job fails before it ever runs a scan — not a secret finding, a
+      # missing scope. `push` events don't need this (found 2026-07-24,
+      # the first pull_request-triggered run in a while to actually
+      # exercise this path).
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:

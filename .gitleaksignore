@@ -6,8 +6,124 @@
 # (gitleaks v8.30.1) and verified by hand. A new secret anywhere else,
 # even matching the same rule, still fails CI.
 #
+# IMPORTANT: comments in this file intentionally describe each finding
+# in plain English rather than quoting the matched text verbatim — an
+# earlier version of this file quoted the actual matched connection-string
+# and JWT-assignment shapes for documentation purposes, which gitleaks
+# then flagged as brand-new findings in .gitleaksignore itself on the
+# very next pull_request-triggered scan (its rules match on structural
+# shape, not on whether the placeholder is a real value). Do not
+# reintroduce anything resembling a credential-assignment or
+# connection-string shape here, even as an illustrative example — describe
+# it in prose instead.
+#
 # Regenerate/verify with: gitleaks detect --config .gitleaks.toml -v
 
 # Gmail App Password committed to src/main/resources/application.properties
 # on 2026-03-23, later rotated and externalized to MAIL_PASSWORD (env var).
 8bc85a0f908889a18fedd142ff12f9686dd10e3f:src/main/resources/application.properties:gmail-app-password:11
+
+# The 5 findings below were all introduced in commit 0fff245 (2026-07-11,
+# Helm backup/observability chart). Each was individually re-inspected by
+# hand against the current file content and confirmed to be a shell/K8s
+# variable interpolation or a documentation placeholder — never a literal
+# credential. Recorded here as proven, narrowly-scoped test fixtures, not a
+# blanket allowlist for the mongodb-uri-with-credentials or
+# app-jwt-secret-literal rules.
+
+# mongodb-dump.sh's mongodump --uri argument: composed entirely from shell
+# parameter expansion of MONGODB_USERNAME/MONGODB_PASSWORD env vars, not a
+# literal URI; those values only ever exist as pod env vars sourced from
+# the mongodb Secret.
+0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/scripts/mongodb-dump.sh:mongodb-uri-with-credentials:13
+
+# mongodb-restore.sh's own `# Usage:` comment block, illustrating the
+# MONGODB_URI env var an operator should export before running the
+# script. Uses the literal placeholder words "user"/"pass", not a real
+# credential.
+0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/scripts/mongodb-restore.sh:mongodb-uri-with-credentials:12
+
+# A YAML comment in deployment-backend.yaml documenting the composed
+# MONGODB_URI format with angle-bracket placeholders, immediately above
+# the real (also-suppressed) template line below.
+0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/templates/deployment-backend.yaml:mongodb-uri-with-credentials:93
+
+# deployment-backend.yaml's actual MONGODB_URI env value: Kubernetes
+# container-spec $(VAR) env-var reference syntax, composing from
+# Secret/ConfigMap-sourced env vars defined earlier in the same container
+# spec; no literal credential is present in the manifest.
+0fff245fdab86416fdaefc32b1e604e41a1fcde6:deploy/helm/ooredoo/templates/deployment-backend.yaml:mongodb-uri-with-credentials:97
+
+# k8s-validate.yml's `helm template --set-string backend.secrets.jwtSecret=...`
+# step: a fixed, clearly-named, low-entropy CI-only dummy value used
+# solely to satisfy Helm's `required()` guard when this workflow renders
+# the chart with no real secrets supplied (see ci.yml's env-validate job,
+# which excludes this same file from its own JWT-pattern check for the
+# identical reason).
+0fff245fdab86416fdaefc32b1e604e41a1fcde6:.github/workflows/k8s-validate.yml:app-jwt-secret-literal:38
+
+# The 6 findings below were found by a full-history `gitleaks detect` scan
+# (2026-07-24, Phase 1 CI recovery) — the gitleaks-action job in ci.yml only
+# scans the commits included in each individual push, so these were never
+# actually exercised by CI even though they've been in history since
+# commit c1676f66 / 0341f035. Each re-inspected by hand; none is a real
+# credential.
+
+# .env.example line 28: a blank APP_JWT_SECRET= placeholder value
+# (operator fills this in before use). gitleaks attributes the entropy of
+# the following line's value to this match, but the actual line 28 value
+# is empty. Not a secret.
+0341f0359df8a73c776468d71df83f109adc2d1e:.env.example:app-jwt-secret-literal:28
+
+# scripts/ci-local.ps1: a developer helper script's local-only JWT
+# fallback (only used when running that script outside of CI, mirrors
+# mvnw's own test profile), clearly named as test-only, never used for
+# anything reachable outside the developer's own machine.
+c1676f66a57e6295b861c91149ec8ffa05db309e:scripts/ci-local.ps1:app-jwt-secret-literal:16
+
+# deploy/docker-compose.yml (the deploy/ mirror of the root
+# docker-compose.yml): its MONGODB_URI env value, same shell parameter
+# expansion of MONGODB_USERNAME/MONGODB_PASSWORD as the root file, not a
+# literal credential.
+c1676f66a57e6295b861c91149ec8ffa05db309e:deploy/docker-compose.yml:mongodb-uri-with-credentials:129
+
+# integration.yml's compose-smoke-test job: writes explicitly-fake,
+# clearly-named, timestamp-suffixed MinIO access/secret key values into a
+# throwaway .env.docker file used only for that job's own ephemeral
+# Compose stack.
+c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/integration.yml:minio-credential-assignment:99
+c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/integration.yml:minio-credential-assignment:100
+
+# ci.yml's validate job: its ephemeral MongoDB service container's own
+# credential, scoped to localhost inside that one GitHub-hosted runner for
+# the duration of the job; never reachable outside it.
+c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/ci.yml:mongodb-uri-with-credentials:149
+
+# The 10 findings below are all in .gitleaksignore itself, all pointing at
+# commit d59e67e — an earlier version of this exact file (2026-07-24,
+# Phase 1 CI recovery) whose suppression comments quoted the matched
+# connection-string/JWT-assignment shapes verbatim for documentation
+# purposes, which is itself secret-shaped text and so was correctly
+# flagged. Fixed going forward in a later commit on this same branch (see
+# that commit's message), but d59e67e remains part of this branch's
+# commit history/PR diff, so gitleaks will always see its version of this
+# file when scanning the full range — fingerprinted here rather than
+# rewriting pushed history. Every one of these is prose *about* one of
+# the 11 real suppressions above, in a since-superseded wording; none was
+# ever a credential.
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:23
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:28
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:33
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:38
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:app-jwt-secret-literal:44
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:71
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:app-jwt-secret-literal:65
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:minio-credential-assignment:76
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:83
+
+# Same story, one more generation: commit 1f39a53 (this branch's first
+# attempt at the prose rewrite above) still had one leftover illustrative
+# example in its top-of-file comment that itself matched the
+# connection-string shape -- removed in the very next commit, but 1f39a53
+# is likewise permanent history on this branch.
+1f39a5326575735b7c45206bb4b6ad101ed837c8:.gitleaksignore:mongodb-uri-with-credentials:12
