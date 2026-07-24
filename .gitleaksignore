@@ -8,11 +8,14 @@
 #
 # IMPORTANT: comments in this file intentionally describe each finding
 # in plain English rather than quoting the matched text verbatim — an
-# earlier version of this file quoted the actual matched strings (e.g.
-# "mongodb://${VAR}:${VAR}@...") for documentation purposes, which
-# gitleaks then flagged as 10 brand-new findings in .gitleaksignore
-# itself on the very next pull_request-triggered scan. Do not reintroduce
-# secret-shaped substrings here, even as illustrative quotes.
+# earlier version of this file quoted the actual matched connection-string
+# and JWT-assignment shapes for documentation purposes, which gitleaks
+# then flagged as brand-new findings in .gitleaksignore itself on the
+# very next pull_request-triggered scan (its rules match on structural
+# shape, not on whether the placeholder is a real value). Do not
+# reintroduce anything resembling a credential-assignment or
+# connection-string shape here, even as an illustrative example — describe
+# it in prose instead.
 #
 # Regenerate/verify with: gitleaks detect --config .gitleaks.toml -v
 
@@ -95,3 +98,25 @@ c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/integration.yml:minio
 # credential, scoped to localhost inside that one GitHub-hosted runner for
 # the duration of the job; never reachable outside it.
 c1676f66a57e6295b861c91149ec8ffa05db309e:.github/workflows/ci.yml:mongodb-uri-with-credentials:149
+
+# The 10 findings below are all in .gitleaksignore itself, all pointing at
+# commit d59e67e — an earlier version of this exact file (2026-07-24,
+# Phase 1 CI recovery) whose suppression comments quoted the matched
+# connection-string/JWT-assignment shapes verbatim for documentation
+# purposes, which is itself secret-shaped text and so was correctly
+# flagged. Fixed going forward in a later commit on this same branch (see
+# that commit's message), but d59e67e remains part of this branch's
+# commit history/PR diff, so gitleaks will always see its version of this
+# file when scanning the full range — fingerprinted here rather than
+# rewriting pushed history. Every one of these is prose *about* one of
+# the 11 real suppressions above, in a since-superseded wording; none was
+# ever a credential.
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:23
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:28
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:33
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:38
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:app-jwt-secret-literal:44
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:71
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:app-jwt-secret-literal:65
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:minio-credential-assignment:76
+d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-credentials:83
