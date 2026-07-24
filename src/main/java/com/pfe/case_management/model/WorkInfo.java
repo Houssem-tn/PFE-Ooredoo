@@ -64,7 +64,11 @@ public class WorkInfo {
     private List<UsedEquipmentItem> usedEquipment;
     private String stockAppliedTechId;
 
-    /** RES only: equipment retrieved from the client (recovered material, not stock consumption). */
+    /**
+     * PLT + RES: equipment retrieved from the client (recovered material, not stock consumption).
+     * Accumulates across repeated declarations on the same case (append, not overwrite) so a
+     * technician can declare retrieval in more than one submission without losing earlier lines.
+     */
     private List<RecoveredEquipmentItem> recoveredEquipment;
     private Instant recoveredAt;
     private String recoveredBy;

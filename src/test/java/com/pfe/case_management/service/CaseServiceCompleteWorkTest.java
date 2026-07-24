@@ -14,7 +14,7 @@ import com.pfe.case_management.enums.ExecutorRole;
 import com.pfe.case_management.model.UsedEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.metrics.BusinessMetrics;
-import com.pfe.stock_management.material_return.MaterialReturnService;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockService;
 import com.pfe.stock_management.service.EquipmentUsagePolicyService;
 import com.pfe.stock_management.service.SttStockService;
 import org.junit.jupiter.api.AfterEach;
@@ -56,9 +56,9 @@ class CaseServiceCompleteWorkTest {
     @Mock
     private MongoTemplate mongoTemplate;
     @Mock
-    private MaterialReturnService materialReturnService;
-    @Mock
     private EquipmentUsagePolicyService equipmentUsagePolicy;
+    @Mock
+    private RetrievedStockService retrievedStockService;
     @Mock
     private BusinessMetrics businessMetrics;
 
@@ -116,8 +116,8 @@ class CaseServiceCompleteWorkTest {
                 fileStorageService,
                 casePdfExportService,
                 sttStockService,
-                materialReturnService,
                 equipmentUsagePolicy,
+                retrievedStockService,
                 businessMetrics
         );
 

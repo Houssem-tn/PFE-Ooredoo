@@ -47,8 +47,8 @@ import com.pfe.case_management.dto.DeclareClientRecoveryRequest;
 import com.pfe.case_management.model.RecoveredEquipmentItem;
 import com.pfe.case_management.repository.CaseRepository;
 import com.pfe.metrics.BusinessMetrics;
-import com.pfe.stock_management.material_return.MaterialReturnRequest;
-import com.pfe.stock_management.material_return.MaterialReturnService;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockService;
 import com.pfe.stock_management.service.EquipmentUsagePolicyService;
 import com.pfe.stock_management.service.SttStockService;
 import com.pfe.support.TunisiaGovernorateSupport;
@@ -83,6 +83,7 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 @Service
 @RequiredArgsConstructor
@@ -196,8 +197,8 @@ public class CaseService {
     private final FileStorageService fileStorageService;
     private final CasePdfExportService casePdfExportService;
     private final SttStockService sttStockService;
-    private final MaterialReturnService materialReturnService;
     private final EquipmentUsagePolicyService equipmentUsagePolicy;
+    private final RetrievedStockService retrievedStockService;
     private final BusinessMetrics businessMetrics;
 
     public CaseEntity createCase(CreateCaseRequest request) {
@@ -1333,10 +1334,11 @@ public class CaseService {
     }
 
     /**
-     * RES only: the executor declares equipment retrieved from the client. No TECH/STT stock is
-     * consumed — instead the items are recorded on the case and linked to a material return
-     * (source = résiliation recovery) so the STT hands them back to the ZM/depot through the
-     * existing scheduled-handover workflow.
+     * PLT (complaint) or RES (résiliation): the executor declares equipment retrieved from the
+     * client. No TECH/STT Available Stock is touched — instead each physically-held line
+     * (RETRIEVED/DAMAGED) is recorded in the technician Retrieved-Stock bucket, pending direct ZM
+     * collection ({@link RetrievedStockService}); non-physical dispositions (MISSING/NOT_FOUND/
+     * ALREADY_RETURNED) are mirrored on the case for visibility but create no stock record.
      */
     public CaseEntity declareClientRecovery(String caseId, DeclareClientRecoveryRequest request) {
         CaseEntity c = getCaseOrThrow(caseId);
@@ -1349,64 +1351,76 @@ public class CaseService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Declare at least one recovered item.");
         }
 
-        // Enforces RES context + recoverableFromClient classification (server-side, frontend-independent).
-        List<String> equipmentIds = request.items().stream()
-                .filter(i -> i != null && i.equipmentId() != null && !i.equipmentId().isBlank())
-                .map(i -> i.equipmentId().trim())
-                .distinct()
-                .collect(Collectors.toList());
-        equipmentUsagePolicy.assertRecoverable(c, equipmentIds);
-
         AppUser declarer = userRepository.findByEmail(actor)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User not found"));
 
-        // Create the linked material return (resolves STT/ZM from the case, no stock touched).
-        MaterialReturnRequest createdReturn =
-                materialReturnService.createCaseRecoveryReturn(c, declarer, request.items(), request.comment());
+        // Enforces PLT/RES context + recoverableFromClient classification internally, materialises
+        // a RetrievedStockItem per physically-held line, and returns a list the same size/order as
+        // request.items() (null at non-physical positions) so it can be zipped back below.
+        List<RetrievedStockItem> results =
+                retrievedStockService.recordRetrieval(c, declarer, request.items(), request.comment());
 
-        // Mirror the recovered items onto the case work block for audit / case detail.
-        List<RecoveredEquipmentItem> recovered = createdReturn.getItems().stream()
-                .map(item -> RecoveredEquipmentItem.builder()
-                        .equipmentId(item.getEquipmentId())
-                        .equipmentName(item.getEquipmentName())
-                        .articleCode(item.getArticleCode())
-                        .unit(item.getUnit())
-                        .quantity(item.getQuantity())
-                        .serialNumber(item.getSerialNumber())
-                        .macAddress(item.getMacAddress())
-                        .imei(item.getImei())
-                        .condition(item.getCondition() != null ? item.getCondition().name() : null)
-                        .returnCode(createdReturn.getReturnCode())
-                        .instanceId(item.getInstanceId())
-                        .build())
+        List<RecoveredEquipmentItem> declaredNow = IntStream.range(0, request.items().size())
+                .mapToObj(idx -> {
+                    var reqItem = request.items().get(idx);
+                    RetrievedStockItem created = results.get(idx);
+                    String disposition = created != null && created.getDisposition() != null
+                            ? created.getDisposition().name()
+                            : normalizeDisposition(reqItem.disposition());
+                    return RecoveredEquipmentItem.builder()
+                            .equipmentId(reqItem.equipmentId())
+                            .equipmentName(created != null ? created.getEquipmentName() : reqItem.equipmentName())
+                            .articleCode(created != null ? created.getArticleCode() : null)
+                            .unit(created != null ? created.getUnit() : reqItem.unit())
+                            .quantity(reqItem.quantity())
+                            .serialNumber(reqItem.serialNumber())
+                            .macAddress(reqItem.macAddress())
+                            .imei(reqItem.imei())
+                            .condition(created != null && created.getCondition() != null
+                                    ? created.getCondition().name() : reqItem.condition())
+                            .instanceId(created != null ? created.getInstanceId() : null)
+                            .disposition(disposition)
+                            .dispositionNote(request.comment())
+                            .retrievedStockItemId(created != null ? created.getId() : null)
+                            .build();
+                })
                 .collect(Collectors.toList());
 
+        // Accumulate across repeated declarations on the same case rather than overwriting —
+        // see WorkInfo.recoveredEquipment's javadoc.
         WorkInfo work = c.getWork() != null ? c.getWork() : new WorkInfo();
-        work.setRecoveredEquipment(recovered);
+        List<RecoveredEquipmentItem> accumulated = new ArrayList<>(
+                work.getRecoveredEquipment() != null ? work.getRecoveredEquipment() : List.of());
+        accumulated.addAll(declaredNow);
+        work.setRecoveredEquipment(accumulated);
         work.setRecoveredAt(now);
         work.setRecoveredBy(actor);
         c.setWork(work);
         c.setUpdatedAt(now);
 
-        int totalUnits = recovered.stream().mapToInt(RecoveredEquipmentItem::getQuantity).sum();
+        int totalUnits = declaredNow.stream().mapToInt(RecoveredEquipmentItem::getQuantity).sum();
+        long physicallyHeldCount = results.stream().filter(java.util.Objects::nonNull).count();
         caseTimelineService.append(
                 c,
                 CaseTimelineEventType.CLIENT_MATERIAL_RECOVERED,
                 "Client material recovered",
-                recovered.size() + " item type(s) (" + totalUnits + " unit(s)) recovered from the client and "
-                        + "linked to material return " + createdReturn.getReturnCode() + " for handover to the ZM/depot.",
+                declaredNow.size() + " item(s) declared (" + totalUnits + " unit(s) total); "
+                        + physicallyHeldCount + " physically retrieved and awaiting ZM collection.",
                 actor,
                 c.getStatus(),
                 c.getStatus(),
                 timelineData(
-                        "returnId", createdReturn.getId(),
-                        "returnCode", createdReturn.getReturnCode(),
-                        "recoveredItemTypes", recovered.size(),
-                        "recoveredUnits", totalUnits
+                        "declaredItemCount", declaredNow.size(),
+                        "physicallyHeldCount", physicallyHeldCount,
+                        "declaredUnits", totalUnits
                 )
         );
 
         return sanitizeCaseForCurrentViewer(repository.save(c));
+    }
+
+    private String normalizeDisposition(String raw) {
+        return raw != null && !raw.isBlank() ? raw.trim().toUpperCase(Locale.ROOT) : "RETRIEVED";
     }
 
     public CaseEntity uploadWorkProof(
