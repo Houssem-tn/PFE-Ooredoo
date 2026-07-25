@@ -27,4 +27,47 @@
     </suppress>
     -->
 
+    <suppress>
+        <notes>
+            Justification: CVE-2026-53914 (NVD/JetBrains advisory) is unsafe
+            deserialization in the Kotlin Gradle build cache's metadata
+            handling — a build-time/compiler-tooling vulnerability, fixed in
+            the Kotlin build tooling at 2.4.20. kotlin-stdlib /
+            kotlin-stdlib-common are runtime jars pulled in transitively by
+            okhttp (see pom.xml, direct okhttp dependency) purely as a
+            runtime classpath dependency; this project is Java/Maven, never
+            invokes the Kotlin compiler or a Gradle build cache, so the
+            vulnerable code path (build-cache metadata deserialization) has
+            no reachable attack surface here. Confirmed false-positive CPE
+            match against the Kotlin product line as a whole, not the
+            runtime stdlib artifact. No fixed *stable* kotlin-stdlib release
+            exists yet (2.4.20 line is still pre-release as of this triage);
+            revisit once one ships, or if kotlin-stdlib ever becomes more
+            than a transitive runtime dependency here.
+        </notes>
+        <packageUrl regex="true">^pkg:maven/org\.jetbrains\.kotlin/kotlin-stdlib.*@.*$</packageUrl>
+        <cve>CVE-2026-53914</cve>
+    </suppress>
+
+    <suppress>
+        <notes>
+            Justification: CVE-2026-41717 (Spring Data MongoDB SpEL
+            expression-injection in @Query capture-all placeholder binding)
+            affects the spring-data-mongodb artifact versions 5.0.0-5.0.5,
+            fixed in 5.0.6 per the vendor advisory
+            (spring.io/security/cve-2026-41717). This project's actual
+            spring-data-mongodb runtime version is 5.0.6 (confirmed via
+            `mvnw dependency:tree`) — already the fixed release. The finding
+            is a CPE mismatch: dependency-check flagged
+            spring-boot-data-mongodb-4.0.7.jar, which is Spring Boot's own
+            autoconfig wrapper module (versioned along Spring Boot's release
+            train, currently 4.0.7) — a different artifact from
+            spring-data-mongodb that happens to get matched against the same
+            CPE. Confirmed false positive; the real vulnerable library is
+            already on the patched version.
+        </notes>
+        <packageUrl regex="true">^pkg:maven/org\.springframework\.boot/spring-boot-data-mongodb@.*$</packageUrl>
+        <cve>CVE-2026-41717</cve>
+    </suppress>
+
 </suppressions>
