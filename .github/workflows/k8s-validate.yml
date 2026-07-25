@@ -123,6 +123,65 @@ jobs:
             --set backup.destination.pvc.enabled=true \
             > rendered-backup-pvc.yaml
 
+      # Asymmetric backup state — only MongoDB's backup enabled, MinIO's
+      # still at its false default. This is the exact regression case for
+      # the `ooredoo.backup` PrometheusRule group defect fixed in this
+      # phase: the group's rendering must not silently depend on both
+      # flags moving together. See templates/prometheusrule.yaml's own
+      # comment on why the whole group (not just its rules) is gated.
+      - name: helm template — MongoDB backup enabled only (asymmetric)
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            --set monitoring.enabled=true \
+            --set monitoring.prometheusRules.enabled=true \
+            --set backup.enabled=true \
+            --set backup.mongodb.enabled=true \
+            --set backup.minio.enabled=false \
+            --set backup.destination.type=s3 \
+            --set backup.destination.s3.endpoint=https://s3.example.com \
+            --set backup.destination.s3.bucket=ooredoo-backups \
+            --set backup.destination.s3.existingSecret=backup-s3-creds \
+            > rendered-mongo-backup-only.yaml
+
+      # Mirror of the above with the flags flipped — MinIO's backup
+      # enabled, MongoDB's disabled.
+      - name: helm template — MinIO backup enabled only (asymmetric)
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            --set monitoring.enabled=true \
+            --set monitoring.prometheusRules.enabled=true \
+            --set backup.enabled=true \
+            --set backup.mongodb.enabled=false \
+            --set backup.minio.enabled=true \
+            --set backup.destination.type=s3 \
+            --set backup.destination.s3.endpoint=https://s3.example.com \
+            --set backup.destination.s3.bucket=ooredoo-backups \
+            --set backup.destination.s3.existingSecret=backup-s3-creds \
+            > rendered-minio-backup-only.yaml
+
+      # Validation matrix item: monitoring and backups enabled together —
+      # not exercised by any of the renders above (each of those flips only
+      # one axis), and the combination is real (an operator running both
+      # at once in a real cluster).
+      - name: helm template — monitoring and backup enabled together
+        run: |
+          helm template ooredoo "${CHART_DIR}" -n ooredoo-staging \
+            -f "${CHART_DIR}/values-staging.yaml" ${DUMMY_SECRETS} \
+            --set monitoring.enabled=true \
+            --set monitoring.serviceMonitor.enabled=true \
+            --set monitoring.prometheusRules.enabled=true \
+            --set monitoring.grafanaDashboards.enabled=true \
+            --set backup.enabled=true \
+            --set backup.mongodb.enabled=true \
+            --set backup.minio.enabled=true \
+            --set backup.destination.type=s3 \
+            --set backup.destination.s3.endpoint=https://s3.example.com \
+            --set backup.destination.s3.bucket=ooredoo-backups \
+            --set backup.destination.s3.existingSecret=backup-s3-creds \
+            > rendered-monitoring-and-backup.yaml
+
       - name: Confirm no Prometheus CRDs render when monitoring is disabled
         run: |
           set -euo pipefail
@@ -169,6 +228,70 @@ jobs:
       - name: kubeconform — backup (pvc)
         run: kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" rendered-backup-pvc.yaml
 
+      # These three renders all carry a PrometheusRule (mongo/minio-backup-
+      # only via monitoring.prometheusRules.enabled, monitoring-and-backup
+      # via all monitoring flags) — same CRD-schema validation as the
+      # "monitoring enabled" render above, since this is exactly what
+      # would have caught the `rules: null` defect fixed this phase.
+      - name: kubeconform — MongoDB backup only (asymmetric, validates PrometheusRule CRD)
+        run: |
+          kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered-mongo-backup-only.yaml
+
+      - name: kubeconform — MinIO backup only (asymmetric, validates PrometheusRule CRD)
+        run: |
+          kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered-minio-backup-only.yaml
+
+      - name: kubeconform — monitoring and backup enabled together (validates ServiceMonitor/PrometheusRule CRDs)
+        run: |
+          kubeconform -strict -summary -kubernetes-version "${KUBE_TARGET_VERSION}" \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered-monitoring-and-backup.yaml
+
+      # Direct structural regression guard for the exact defect fixed this
+      # phase: a `rules:` (or any other mandatory list-typed) key in any
+      # rendered manifest with nothing but blank lines/another YAML
+      # document boundary after it renders as YAML null, which kubeconform
+      # already catches via schema — this is a second, schema-independent
+      # check so the failure mode is obvious even if a schema URL is ever
+      # unreachable in CI.
+      - name: "Confirm no rendered mandatory list field is empty (rules-is-null class of defect)"
+        run: |
+          set -euo pipefail
+          python3 - rendered-*.yaml <<'PYEOF'
+          import sys, re
+          bad = []
+          for path in sys.argv[1:]:
+              lines = open(path, encoding="utf-8").readlines()
+              for i, line in enumerate(lines):
+                  m = re.match(r'^(\s*)rules:\s*$', line)
+                  if not m:
+                      continue
+                  indent = len(m.group(1))
+                  j = i + 1
+                  while j < len(lines) and lines[j].strip() == "":
+                      j += 1
+                  if j >= len(lines):
+                      bad.append((path, i + 1, "EOF"))
+                      continue
+                  nxt = lines[j]
+                  nxt_indent = len(nxt) - len(nxt.lstrip(" "))
+                  if nxt.lstrip().startswith("- ") and nxt_indent >= indent:
+                      continue
+                  bad.append((path, i + 1, nxt.rstrip()))
+          if bad:
+              for b in bad:
+                  print(f"::error::{b[0]}:{b[1]} — 'rules:' has no list items after it (renders as null): next non-blank line was {b[2]!r}")
+              sys.exit(1)
+          print(f"Confirmed: no empty/null 'rules:' fields in any of {len(sys.argv) - 1} rendered files.")
+          PYEOF
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -194,10 +317,19 @@ jobs:
       - name: Policy check — backup (pvc)
         run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-backup-pvc.yaml
 
+      - name: Policy check — MongoDB backup only (asymmetric)
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-mongo-backup-only.yaml
+
+      - name: Policy check — MinIO backup only (asymmetric)
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-minio-backup-only.yaml
+
+      - name: Policy check — monitoring and backup enabled together
+        run: python3 "${CHART_DIR}/ci/policy-check.py" rendered-monitoring-and-backup.yaml
+
       - name: Validate CronJob schedules and restart policies
         run: |
           set -euo pipefail
-          python3 - "rendered-backup-s3.yaml" "rendered-backup-pvc.yaml" <<'PYEOF'
+          python3 - "rendered-backup-s3.yaml" "rendered-backup-pvc.yaml" "rendered-mongo-backup-only.yaml" "rendered-minio-backup-only.yaml" "rendered-monitoring-and-backup.yaml" <<'PYEOF'
           import sys, yaml
           for path in sys.argv[1:]:
               for doc in yaml.safe_load_all(open(path, encoding="utf-8")):
@@ -226,7 +358,7 @@ jobs:
           # rendered CronJob/Job references one, which would mean a
           # restore got wired into automatic scheduling.
           found=0
-          for f in rendered-backup-s3.yaml rendered-backup-pvc.yaml rendered-monitoring.yaml rendered-staging.yaml rendered-production.yaml; do
+          for f in rendered-backup-s3.yaml rendered-backup-pvc.yaml rendered-monitoring.yaml rendered-staging.yaml rendered-production.yaml rendered-mongo-backup-only.yaml rendered-minio-backup-only.yaml rendered-monitoring-and-backup.yaml; do
             if grep -qE "mongodb-restore\.sh|minio-restore\.sh|backup-verify\.sh" "$f"; then
               echo "::error::$f references a manual restore/verify script from a rendered workload — these must never be automated"
               found=1
@@ -276,7 +408,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
-          scan-ref: rendered-backup-s3.yaml
+          scan-ref: rendered-monitoring-and-backup.yaml
           severity: CRITICAL,HIGH
           exit-code: "0" # advisory, same reasoning as above
 
@@ -291,4 +423,7 @@ jobs:
             rendered-monitoring.yaml
             rendered-backup-s3.yaml
             rendered-backup-pvc.yaml
+            rendered-mongo-backup-only.yaml
+            rendered-minio-backup-only.yaml
+            rendered-monitoring-and-backup.yaml
           retention-days: 14
