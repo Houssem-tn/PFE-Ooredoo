@@ -98,6 +98,20 @@ jobs:
           cp APPSTOCK/PFE-Ooredoo/deploy/docker-compose.debug.yml .
           cp APPSTOCK/PFE-Ooredoo/deploy/.env.docker.example .env.docker.example
 
+      # environment.production.ts is git-ignored (see the frontend repo's own
+      # .gitignore and Dockerfile comments) and MUST exist on disk before the
+      # frontend image builds — angular.json's production fileReplacements
+      # swaps it in for environment.ts. A fresh checkout of that repo never
+      # has it, by design, the same way a human developer copies it locally
+      # before their first build (see that repo's DOCKER.md). The example's
+      # mapTilerKey is already an empty, non-secret placeholder — nothing
+      # here needs a real value.
+      - name: Generate frontend production environment file
+        working-directory: pfe
+        run: |
+          cp Pfe-Oreedoo-Front/src/environments/environment.production.example.ts \
+             Pfe-Oreedoo-Front/src/environments/environment.production.ts
+
       - name: Generate a CI-only .env.docker
         working-directory: pfe
         run: |
