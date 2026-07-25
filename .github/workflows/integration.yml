@@ -452,9 +452,15 @@ jobs:
           # mongosh's --eval printer may quote a bare string result
           # ('pfe-files' vs pfe-files depending on version) — strip
           # surrounding quotes/CR defensively rather than assume either way.
+          #
+          # _id must be wrapped in ObjectId(): Spring Data MongoDB stores a
+          # String @Id field as a real BSON ObjectId by default (confirmed
+          # against a live document: findOne({_id: '<hex>'}) returns null,
+          # findOne({_id: ObjectId('<hex>')}) finds it) — a plain string
+          # comparison never matches.
           bucket=$(docker compose --env-file .env.docker exec -T mongodb mongosh \
             --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
-            --eval "db.getSiblingDB('$MONGODB_DATABASE').file_metadata.findOne({_id: '$file_id'}).bucket" \
+            --eval "db.getSiblingDB('$MONGODB_DATABASE').file_metadata.findOne({_id: ObjectId('$file_id')}).bucket" \
             | tr -d '\r' | sed "s/^'//; s/'\$//")
           echo "Stored in bucket: $bucket"
           [ "$bucket" = "$MINIO_BUCKET" ] || { echo "::error::Expected the object to land in MinIO bucket '$MINIO_BUCKET', but file_metadata.bucket was '$bucket' (LOCAL_FS means it silently fell back off MinIO)"; exit 1; }
