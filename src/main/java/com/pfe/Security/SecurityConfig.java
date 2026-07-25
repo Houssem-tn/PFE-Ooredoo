@@ -61,7 +61,18 @@ public class SecurityConfig {
                 .requestMatchers("/api/v1/files/*/view").permitAll()
                 .requestMatchers("/api/v1/tech-invitations/stt/**").hasRole("STT")
                 .requestMatchers("/api/v1/tech-invitations/zm/**").hasRole("ZM")
-                .requestMatchers("/ws-notifications/**").permitAll()
+                // Both the native STOMP endpoint and its SockJS fallback need to
+                // be reachable pre-auth at the HTTP layer: STOMP's own auth
+                // happens later, inside the CONNECT frame (see
+                // WebSocketAuthChannelInterceptor), not via the initial HTTP
+                // request. SockJS additionally opens an unauthenticated
+                // GET .../info handshake before any transport (WS or XHR) is
+                // established at all — found missing here via Phase 2 Docker
+                // Compose integration testing: /ws-notifications-sockjs/info
+                // 401'd because only /ws-notifications/** was ever added,
+                // never the SockJS path (a different literal prefix, not a
+                // sub-path of the first pattern).
+                .requestMatchers("/ws-notifications/**", "/ws-notifications-sockjs/**").permitAll()
                 .requestMatchers(
                         "/swagger-ui/**",
                         "/swagger-ui.html",
