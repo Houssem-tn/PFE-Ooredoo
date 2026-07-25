@@ -492,9 +492,15 @@ public class UserService {
             throw new AccessDeniedException("You are not allowed to update this profile image");
         }
 
-        if (targetUser.getProfileImageFileId() != null && !targetUser.getProfileImageFileId().isBlank()) {
-            fileStorageService.softDelete(targetUser.getProfileImageFileId());
-        }
+        // Upload (and its validateImage() check) must run BEFORE the old file
+        // is touched: deleting first meant a rejected upload (wrong type,
+        // over the size limit) silently destroyed the user's existing
+        // profile image as a side effect of the failed request, and a
+        // retry then failed again with a confusing "File not found" trying
+        // to re-delete an already-soft-deleted id instead of surfacing the
+        // real validation error. Found via Phase 2 Docker Compose
+        // integration testing (oversized-upload rejection test).
+        String oldFileId = targetUser.getProfileImageFileId();
 
         FileMetadata savedFile = fileStorageService.upload(
                 file,
@@ -503,6 +509,21 @@ public class UserService {
                 FileRole.PROFILE_IMAGE,
                 currentEmail
         );
+
+        if (oldFileId != null && !oldFileId.isBlank()) {
+            // Best-effort: the new image is already stored and must not be
+            // lost just because cleaning up the old one failed (e.g. it was
+            // already deleted by some earlier request). Worst case is one
+            // orphaned blob left in storage, which is far better than
+            // discarding a successful upload or leaving the user record
+            // pointing at neither file.
+            try {
+                fileStorageService.softDelete(oldFileId);
+            } catch (Exception e) {
+                log.warn("profile_image_old_file_cleanup_failed userId={} oldFileId={} error={}",
+                        targetUser.getId(), oldFileId, e.getClass().getSimpleName());
+            }
+        }
 
         String imageUrl = fileStorageService.buildViewUrl(savedFile.getId());
 
