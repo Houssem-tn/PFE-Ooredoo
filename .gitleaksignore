@@ -127,3 +127,18 @@ d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-creden
 # connection-string shape -- removed in the very next commit, but 1f39a53
 # is likewise permanent history on this branch.
 1f39a5326575735b7c45206bb4b6ad101ed837c8:.gitleaksignore:mongodb-uri-with-credentials:12
+
+# The 4 findings below (commit 7133b1b, 2026-07-25, Phase 2 Docker Compose
+# integration testing) are all in deploy/.env.docker.example — a
+# byte-for-byte copy of the canonical example file at the Pfe/ repo root
+# (see deploy/README.md's own re-sync procedure), added here because
+# integration.yml's "Assemble Compose files" step needs a copy inside this
+# repo to check out. Same story as .env.example's own already-suppressed
+# finding above: every value on every flagged line is one of this file's
+# own documented placeholder tokens, never a real credential. The
+# canonical root copy was never previously scanned by gitleaks at all
+# (that directory has no git repo of its own).
+7133b1b73e12b01821cb126a02e00f2863b5ddb5:deploy/.env.docker.example:app-jwt-secret-literal:59
+7133b1b73e12b01821cb126a02e00f2863b5ddb5:deploy/.env.docker.example:mongodb-uri-with-credentials:45
+7133b1b73e12b01821cb126a02e00f2863b5ddb5:deploy/.env.docker.example:minio-credential-assignment:82
+7133b1b73e12b01821cb126a02e00f2863b5ddb5:deploy/.env.docker.example:minio-credential-assignment:83
