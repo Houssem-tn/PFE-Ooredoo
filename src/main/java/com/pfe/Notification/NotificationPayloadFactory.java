@@ -53,6 +53,37 @@ public class NotificationPayloadFactory {
         return dto;
     }
 
+    /**
+     * Security notification for a completed password reset. Recipient-scoped to
+     * the owning user. Contains no password and no reset token — only the fact of
+     * the change, its timestamp, and support guidance (surfaced via translations
+     * on the client). Category USER, level WARNING so it stands out.
+     */
+    public NotificationMessageDto buildPasswordChanged(AppUser user) {
+        Instant changedAt = Instant.now();
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("userId", user.getId());
+        data.put("changedAt", changedAt);
+        data.put("routeHint", "/profile");
+
+        NotificationMessageDto dto = new NotificationMessageDto();
+        dto.setEventType("PASSWORD_CHANGED");
+        dto.setTitle("Your password was changed");
+        dto.setMessage("Your account password was changed on " + OPERATION_DATE_FORMAT.format(changedAt)
+                + ". If you did not perform this change, contact support immediately.");
+        dto.setEntityType("USER");
+        dto.setEntityId(user.getId());
+        dto.setStatus("PASSWORD_CHANGED");
+        dto.setTriggeredBy(user.getEmail());
+        dto.setCreatedAt(changedAt);
+        dto.setData(data);
+        dto.setLevel("WARNING");
+        dto.setCategory("USER");
+        dto.setActionType("NONE");
+        return dto;
+    }
+
     public NotificationMessageDto buildCaseAssignedToZm(CaseEntity caseEntity, String triggeredBy) {
         NotificationMessageDto dto = buildCasePayload(
                 "CASE_ASSIGNED_TO_ZM",

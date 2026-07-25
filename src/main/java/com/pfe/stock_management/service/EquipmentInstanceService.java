@@ -64,6 +64,16 @@ public class EquipmentInstanceService {
      * cannot confirm reception with missing / mismatched / duplicate tracking data.
      */
     public void validateUnitsForConfirmation(Equipment eq, int confirmedQty, List<UnitTrackingInput> units) {
+        validateUnitsForConfirmation(eq, confirmedQty, units, null);
+    }
+
+    /**
+     * Overload used by the DPM confirmation flow. When {@code currentDpmId} is non-null the
+     * "already exists in stock" checks ignore units this same DPM already materialised, so a
+     * re-run of a partially completed confirmation is not wrongly rejected by its own instances.
+     */
+    public void validateUnitsForConfirmation(Equipment eq, int confirmedQty,
+                                             List<UnitTrackingInput> units, String currentDpmId) {
         TrackingMode mode = trackingMode(eq);
         if (!mode.isTracked() || confirmedQty <= 0) {
             return;
@@ -100,18 +110,36 @@ public class EquipmentInstanceService {
                 throw bad(eq.getName() + ": Serial Number '" + u.getSerialNumber() + "' is repeated in this reception.");
             }
 
-            if (imei != null && instanceRepository.existsByEquipmentIdAndNormalizedImei(eq.getId(), imei)) {
+            if (imei != null && imeiExistsElsewhere(eq.getId(), imei, currentDpmId)) {
                 throw bad(eq.getName() + ": IMEI '" + u.getImei() + "' already exists in stock.");
             }
-            if (serial != null && instanceRepository.existsByEquipmentIdAndNormalizedSerialNumber(eq.getId(), serial)) {
+            if (serial != null && serialExistsElsewhere(eq.getId(), serial, currentDpmId)) {
                 throw bad(eq.getName() + ": Serial Number '" + u.getSerialNumber() + "' already exists in stock.");
             }
         }
     }
 
+    private boolean imeiExistsElsewhere(String equipmentId, String normImei, String currentDpmId) {
+        return currentDpmId == null
+                ? instanceRepository.existsByEquipmentIdAndNormalizedImei(equipmentId, normImei)
+                : instanceRepository.existsByEquipmentIdAndNormalizedImeiAndSourceDpmIdNot(equipmentId, normImei, currentDpmId);
+    }
+
+    private boolean serialExistsElsewhere(String equipmentId, String normSerial, String currentDpmId) {
+        return currentDpmId == null
+                ? instanceRepository.existsByEquipmentIdAndNormalizedSerialNumber(equipmentId, normSerial)
+                : instanceRepository.existsByEquipmentIdAndNormalizedSerialNumberAndSourceDpmIdNot(equipmentId, normSerial, currentDpmId);
+    }
+
     /**
      * Materialises one {@link EquipmentInstance} (status IN_STT_STOCK, owner = DPM's STT) per
      * validated unit row. Call only after {@link #validateUnitsForConfirmation}. No-op for NONE.
+     *
+     * <p><b>Idempotent per DPM:</b> a unit whose IMEI/Serial was already materialised for this
+     * same {@code sourceDpmId} is skipped, so retrying a partially completed DPM confirmation
+     * never double-creates instances. A genuine duplicate that races past validation surfaces
+     * from the unique index as a {@link ResponseStatusException} CONFLICT (409) — a meaningful
+     * business error — rather than a generic 500.
      */
     public List<EquipmentInstance> createForDpm(Equipment eq, DpmRequest dpm,
                                                 List<UnitTrackingInput> units, String actor) {
@@ -120,9 +148,28 @@ public class EquipmentInstanceService {
             return List.of();
         }
 
+        // Already-materialised identifiers for this DPM+equipment (idempotency on retry).
+        Set<String> existingImei = new HashSet<>();
+        Set<String> existingSerial = new HashSet<>();
+        for (EquipmentInstance prior : instanceRepository.findBySourceDpmId(dpm.getId())) {
+            if (!eq.getId().equals(prior.getEquipmentId())) {
+                continue;
+            }
+            if (prior.getNormalizedImei() != null) existingImei.add(prior.getNormalizedImei());
+            if (prior.getNormalizedSerialNumber() != null) existingSerial.add(prior.getNormalizedSerialNumber());
+        }
+
         Instant now = Instant.now();
         List<EquipmentInstance> created = new ArrayList<>();
         for (UnitTrackingInput u : units) {
+            String normImei = normalize(u.getImei());
+            String normSerial = normalize(u.getSerialNumber());
+            if ((normImei != null && existingImei.contains(normImei))
+                    || (normSerial != null && existingSerial.contains(normSerial))) {
+                // This unit was already created for this DPM by an earlier (partial) attempt.
+                continue;
+            }
+
             EquipmentInstance inst = EquipmentInstance.builder()
                     .equipmentId(eq.getId())
                     .equipmentName(eq.getName())
@@ -156,7 +203,17 @@ public class EquipmentInstanceService {
                     .performedBy(actor)
                     .build());
 
-            created.add(instanceRepository.save(inst));
+            try {
+                created.add(instanceRepository.save(inst));
+            } catch (DuplicateKeyException dup) {
+                // The unique index rejected a real, non-null IMEI/Serial that slipped past
+                // validation (e.g. a concurrent confirmation). Surface a clear 409 business error.
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        eq.getName() + ": tracked unit " + unitLabel(inst)
+                                + " already exists in stock (duplicate IMEI/Serial).");
+            }
+            if (normImei != null) existingImei.add(normImei);
+            if (normSerial != null) existingSerial.add(normSerial);
         }
         log.info("equipment_instances_created dpmId={} equipmentId={} count={}",
                 dpm.getId(), eq.getId(), created.size());
@@ -556,6 +613,117 @@ public class EquipmentInstanceService {
         }
     }
 
+    /**
+     * Correct collection step: the responsible STT physically collects retrieved tracked units from
+     * the technician. Transitions each pending unit (TECH → STT) into {@code COLLECTED_BY_STT}.
+     * Units not in the pending-collection state are skipped (idempotent / safe against double-collect).
+     */
+    public void markCollectedByStt(List<String> instanceIds, String sttId, String sttName, String actor) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (String id : dedupe(instanceIds)) {
+            EquipmentInstance inst = load(id);
+            if (inst.getStatus() != InstanceStatus.PENDING_ZM_COLLECTION) {
+                continue;
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("COLLECTED_BY_STT")
+                    .fromOwnerType(InstanceOwnerType.TECH)
+                    .fromOwnerId(inst.getCurrentOwnerId())
+                    .fromOwnerName(inst.getCurrentOwnerName())
+                    .toOwnerType(InstanceOwnerType.STT)
+                    .toOwnerId(sttId)
+                    .toOwnerName(sttName)
+                    .resultingStatus(InstanceStatus.COLLECTED_BY_STT)
+                    .caseId(inst.getCaseId())
+                    .caseReference(inst.getCaseReference())
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setStatus(InstanceStatus.COLLECTED_BY_STT);
+            inst.setCurrentOwnerType(InstanceOwnerType.STT);
+            inst.setCurrentOwnerId(sttId);
+            inst.setCurrentOwnerName(sttName);
+            instanceRepository.save(inst);
+        }
+    }
+
+    /**
+     * Associates tracked units with an active material return request so the exact physical unit
+     * stays traceable until the handover is completed or the request is released.
+     *
+     * <p>The unit keeps its current owner/status; this only reserves the link and appends an audit
+     * movement. Physical ownership changes only when the handover completes.
+     */
+    public void reserveForReturn(String returnId, String returnCode, List<String> instanceIds, String actor) {
+        if (returnId == null || instanceIds == null || instanceIds.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (String id : dedupe(instanceIds)) {
+            EquipmentInstance inst = load(id);
+            if (returnId.equals(inst.getReturnId())) {
+                continue;
+            }
+            if (inst.getMovements() == null) {
+                inst.setMovements(new ArrayList<>());
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("ASSIGNED_TO_RETURN_REQUEST")
+                    .fromOwnerType(inst.getCurrentOwnerType())
+                    .fromOwnerId(inst.getCurrentOwnerId())
+                    .fromOwnerName(inst.getCurrentOwnerName())
+                    .toOwnerType(InstanceOwnerType.RETURN)
+                    .toOwnerId(returnId)
+                    .toOwnerName(returnCode)
+                    .resultingStatus(inst.getStatus())
+                    .returnId(returnId)
+                    .returnCode(returnCode)
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setReturnId(returnId);
+            inst.setReturnCode(returnCode);
+            instanceRepository.save(inst);
+        }
+    }
+
+    /** Releases previously reserved tracked units when an active return request is rejected/cancelled. */
+    public void releaseReturnReservation(String returnId, String actor) {
+        if (returnId == null) {
+            return;
+        }
+        List<EquipmentInstance> instances = instanceRepository.findByReturnId(returnId);
+        if (instances.isEmpty()) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (EquipmentInstance inst : instances) {
+            if (inst.getMovements() == null) {
+                inst.setMovements(new ArrayList<>());
+            }
+            inst.getMovements().add(InstanceMovementEvent.builder()
+                    .type("RELEASED_FROM_RETURN_REQUEST")
+                    .fromOwnerType(InstanceOwnerType.RETURN)
+                    .fromOwnerId(returnId)
+                    .fromOwnerName(inst.getReturnCode())
+                    .toOwnerType(inst.getCurrentOwnerType())
+                    .toOwnerId(inst.getCurrentOwnerId())
+                    .toOwnerName(inst.getCurrentOwnerName())
+                    .resultingStatus(inst.getStatus())
+                    .returnId(returnId)
+                    .returnCode(inst.getReturnCode())
+                    .occurredAt(now)
+                    .performedBy(actor)
+                    .build());
+            inst.setReturnId(null);
+            inst.setReturnCode(null);
+            instanceRepository.save(inst);
+        }
+    }
+
     /** On material-return handover/approval, flips the return's tracked units to RETURNED_TO_DEPOT. */
     public void markReturnedToDepot(String returnId, String actor) {
         if (returnId == null) {
@@ -653,6 +821,7 @@ public class EquipmentInstanceService {
     public List<EquipmentInstanceDto> listOwnedAvailable(InstanceOwnerType ownerType, String ownerId, String equipmentId) {
         InstanceStatus status = expectedStockStatus(ownerType);
         return instanceRepository.findByCurrentOwnerTypeAndCurrentOwnerIdAndStatus(ownerType, ownerId, status).stream()
+                .filter(i -> i.getReturnId() == null || i.getReturnId().isBlank())
                 .filter(i -> !notBlank(equipmentId) || equipmentId.equals(i.getEquipmentId()))
                 .map(EquipmentInstanceDto::from)
                 .collect(Collectors.toList());
@@ -709,6 +878,9 @@ public class EquipmentInstanceService {
         }
         if (inst.getStatus() != expectedStatus) {
             throw bad("Tracked unit " + unitLabel(inst) + " is not available (status " + inst.getStatus() + ").");
+        }
+        if (inst.getReturnId() != null && !inst.getReturnId().isBlank()) {
+            throw bad("Tracked unit " + unitLabel(inst) + " is already reserved in an active material return.");
         }
     }
 

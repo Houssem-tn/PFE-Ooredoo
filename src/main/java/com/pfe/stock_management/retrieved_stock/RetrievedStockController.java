@@ -17,7 +17,8 @@ import java.util.List;
  * The technician Retrieved-Stock → ZM collection workflow (PLT/RES). Declaration itself happens
  * through {@code CaseController}'s {@code /api/v1/cases/{id}/res-recovery} endpoint (unchanged URL,
  * now backed by {@link RetrievedStockService#recordRetrieval}); this controller covers reading the
- * technician/ZM buckets, the second-phase proof upload, and the ZM's direct collection confirmation.
+ * technician/STT buckets, the second-phase proof upload, and the STT's direct collection confirmation
+ * (the responsible STT collects; the ZM/Admin only track read-only).
  */
 @RestController
 @RequestMapping("/api/v1/stock/retrieved-stock")
@@ -46,27 +47,43 @@ public class RetrievedStockController {
         return retrievedStockService.uploadProof(itemId, currentUser(), file);
     }
 
-    // ── ZM ─────────────────────────────────────────────────────────────────────
+    // ── STT (the responsible collector) ─────────────────────────────────────────
 
-    /** ZM's pending-collection queue, grouped by technician. */
-    @GetMapping("/zm/pending")
-    @PreAuthorize("hasRole('ZM')")
-    public List<TechnicianRetrievedStockGroupDto> getPendingForZm() {
-        return retrievedStockService.getPendingForZmGroupedByTechnician(currentUser().getId());
+    /** STT's pending-collection queue, grouped by technician (only their own technicians' items). */
+    @GetMapping("/stt/pending")
+    @PreAuthorize("hasRole('STT')")
+    public List<TechnicianRetrievedStockGroupDto> getPendingForStt() {
+        return retrievedStockService.getPendingForSttGroupedByTechnician(currentUser().getId());
     }
 
-    /** ZM's own collected-stock bucket (post-collection). */
-    @GetMapping("/zm/collected")
-    @PreAuthorize("hasRole('ZM')")
-    public List<RetrievedStockItemDto> getCollectedForZm() {
-        return retrievedStockService.getCollectedForZm(currentUser().getId());
+    /** STT Collected Stock — physically collected, not distributable, awaiting Material Return. */
+    @GetMapping("/stt/collected")
+    @PreAuthorize("hasRole('STT')")
+    public List<RetrievedStockItemDto> getCollectedForStt() {
+        return retrievedStockService.getCollectedForStt(currentUser().getId());
     }
 
-    /** The one atomic multi-select action: confirm physical collection of one or more items. */
-    @PostMapping("/zm/confirm-collection")
+    /** Collected items eligible to be added to a Material Return Request. */
+    @GetMapping("/stt/return-eligible")
+    @PreAuthorize("hasRole('STT')")
+    public List<RetrievedStockItemDto> getReturnEligibleForStt() {
+        return retrievedStockService.getReturnEligibleForStt(currentUser().getId());
+    }
+
+    /** The one atomic multi-select action: STT confirms physical collection of one or more items. */
+    @PostMapping("/stt/confirm-collection")
+    @PreAuthorize("hasRole('STT')")
+    public ConfirmCollectionResponse confirmCollectionByStt(@Valid @RequestBody ConfirmCollectionRequest request) {
+        return retrievedStockService.confirmCollectionByStt(currentUser(), request);
+    }
+
+    // ── ZM (read-only tracking — no collection action) ──────────────────────────
+
+    /** ZM read-only tracking of retrieved & collected stock across their territory. */
+    @GetMapping("/zm/tracking")
     @PreAuthorize("hasRole('ZM')")
-    public ConfirmCollectionResponse confirmCollection(@Valid @RequestBody ConfirmCollectionRequest request) {
-        return retrievedStockService.confirmCollection(currentUser(), request);
+    public List<RetrievedStockItemDto> getTrackingForZm() {
+        return retrievedStockService.getTrackingForZm(currentUser().getId());
     }
 
     // ── Shared ─────────────────────────────────────────────────────────────────

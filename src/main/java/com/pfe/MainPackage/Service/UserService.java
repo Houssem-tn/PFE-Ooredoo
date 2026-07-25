@@ -9,6 +9,7 @@ import com.pfe.case_management.dto.PerformanceSummaryResponse;
 import com.pfe.case_management.service.CaseAnalyticsService;
 import com.pfe.exception.NotFoundException;
 import com.pfe.MainPackage.mapper.UserMapper;
+import com.pfe.support.CoverageMatchingSupport;
 import com.pfe.support.TunisiaGovernorateSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -251,7 +252,7 @@ public class UserService {
         return List.copyOf(combined);
     }
 
-    public List<UserDTO> findMySttCoverageRequests(String zmEmail) {
+    public List<SttCoverageRequestResponse> findMySttCoverageRequests(String zmEmail) {
         AppUser zm = repo.findByEmail(zmEmail.toLowerCase())
                 .orElseThrow(() -> new NotFoundException("ZM not found: " + zmEmail));
 
@@ -259,13 +260,23 @@ public class UserService {
             throw new AccessDeniedException("Current user is not a ZM");
         }
 
-        List<String> territory = safeGovernorates(zm.getAssignedGovernorates());
-
+        // Pending = STT-declared governorates inside this ZM's *effective* territory
+        // (assignedGovernorates + every coverageByModule entry) that this ZM has not yet
+        // decided. Filtering is per-ZM, so ZM X approving Sousse/ACT never removes the
+        // same STT from ZM Y's pending list for Sousse/PLT.
         return repo.findByRoleOrderByFullNameAsc(UserRole.ROLE_STT).stream()
                 .filter(stt -> stt.getStatus() == AccountStatus.APPROVED)
                 .filter(AppUser::isEnabled)
-                .filter(stt -> hasGovernorateOverlap(territory, stt.getRequestedGovernorates()))
-                .map(mapper::toDto)
+                .map(stt -> new SttCoverageRequestResponse(mapper.toDto(stt), pendingCoverageFor(zm, stt)))
+                .filter(response -> !response.pending().isEmpty())
+                .toList();
+    }
+
+    private List<SttCoverageRequestResponse.PendingGovernorateCoverage> pendingCoverageFor(AppUser zm, AppUser stt) {
+        return CoverageMatchingSupport.pendingGovernoratesForZm(zm, stt).stream()
+                .map(governorate -> new SttCoverageRequestResponse.PendingGovernorateCoverage(
+                        governorate,
+                        CoverageMatchingSupport.modulesForGovernorate(zm, governorate)))
                 .toList();
     }
 
@@ -328,10 +339,61 @@ public class UserService {
         ensureGovernoratesHaveOwningZm(pendingRequest);
 
         stt.setRequestedGovernorates(pendingRequest);
+        // Re-requesting a governorate re-opens it for any ZM that previously declined it,
+        // so the pending confirmation surfaces again for that ZM.
+        reopenDeclinedGovernorates(stt, pendingRequest);
         return mapper.toDto(repo.save(stt));
     }
 
+    /**
+     * A ZM approves some of the governorates the STT declared inside the ZM's territory.
+     * The decision is recorded per-ZM so it stays independent from every other ZM, while
+     * {@code coveredGovernorates} (the union used by stock scoping / the team view) grows.
+     */
     public UserDTO validateCoverageAreas(String zmEmail, String sttId, List<String> approvedGovernorates) {
+        AppUser zm = loadDecidingZm(zmEmail);
+        AppUser stt = loadSttForDecision(sttId);
+
+        List<String> normalizedGovernorates = normalizeGovernoratesRequireSelection(approvedGovernorates);
+        ensureGovernoratesPendingForZm(zm, stt, normalizedGovernorates);
+
+        LinkedHashSet<String> updatedCoverage = new LinkedHashSet<>(safeGovernorates(stt.getCoveredGovernorates()));
+        updatedCoverage.addAll(normalizedGovernorates);
+        stt.setCoveredGovernorates(orderGovernorates(updatedCoverage));
+
+        // Drop the approved zones from the shared "still pending for everyone" pool; the
+        // STT-declared coverage now lives in coveredGovernorates, keeping them visible to
+        // other ZMs who have not decided yet.
+        stt.setRequestedGovernorates(
+                safeGovernorates(stt.getRequestedGovernorates()).stream()
+                        .filter(governorate -> !normalizedGovernorates.contains(governorate))
+                        .toList()
+        );
+
+        stt.setCoverageApprovedByZm(mergeZmDecision(stt.getCoverageApprovedByZm(), zm.getId(), normalizedGovernorates));
+        stt.setCoverageDeclinedByZm(removeZmDecision(stt.getCoverageDeclinedByZm(), zm.getId(), normalizedGovernorates));
+
+        return mapper.toDto(repo.save(stt));
+    }
+
+    /**
+     * A ZM declines some pending governorates for the STT. Only this ZM's view changes:
+     * the STT's global {@code coveredGovernorates} and every other ZM's pending list are
+     * left untouched.
+     */
+    public UserDTO declineCoverageAreas(String zmEmail, String sttId, List<String> declinedGovernorates) {
+        AppUser zm = loadDecidingZm(zmEmail);
+        AppUser stt = loadSttForDecision(sttId);
+
+        List<String> normalizedGovernorates = normalizeGovernoratesRequireSelection(declinedGovernorates);
+        ensureGovernoratesPendingForZm(zm, stt, normalizedGovernorates);
+
+        stt.setCoverageDeclinedByZm(mergeZmDecision(stt.getCoverageDeclinedByZm(), zm.getId(), normalizedGovernorates));
+
+        return mapper.toDto(repo.save(stt));
+    }
+
+    private AppUser loadDecidingZm(String zmEmail) {
         AppUser zm = repo.findByEmail(zmEmail.toLowerCase())
                 .orElseThrow(() -> new NotFoundException("ZM not found: " + zmEmail));
 
@@ -343,6 +405,10 @@ public class UserService {
             throw new AccessDeniedException("Your account is not active");
         }
 
+        return zm;
+    }
+
+    private AppUser loadSttForDecision(String sttId) {
         AppUser stt = repo.findById(sttId)
                 .orElseThrow(() -> new NotFoundException("STT not found: " + sttId));
 
@@ -350,31 +416,66 @@ public class UserService {
             throw new IllegalArgumentException("Selected user is not an STT");
         }
 
-        List<String> normalizedGovernorates = normalizeGovernoratesRequireSelection(approvedGovernorates);
-        List<String> zmTerritory = safeGovernorates(zm.getAssignedGovernorates());
-        List<String> pendingGovernorates = safeGovernorates(stt.getRequestedGovernorates());
+        return stt;
+    }
 
-        for (String governorate : normalizedGovernorates) {
-            if (!zmTerritory.contains(governorate)) {
+    private void ensureGovernoratesPendingForZm(AppUser zm, AppUser stt, List<String> governorates) {
+        List<String> territory = CoverageMatchingSupport.effectiveZmGovernorates(zm);
+        List<String> pending = CoverageMatchingSupport.pendingGovernoratesForZm(zm, stt);
+
+        for (String governorate : governorates) {
+            if (!territory.contains(governorate)) {
                 throw new AccessDeniedException("Governorate " + governorate + " is outside your territory");
             }
 
-            if (!pendingGovernorates.contains(governorate)) {
-                throw new IllegalArgumentException("Governorate " + governorate + " is not pending validation for this STT");
+            if (!pending.contains(governorate)) {
+                throw new IllegalArgumentException("Governorate " + governorate + " is not pending your decision for this STT");
             }
         }
+    }
 
-        LinkedHashSet<String> updatedCoverage = new LinkedHashSet<>(safeGovernorates(stt.getCoveredGovernorates()));
-        updatedCoverage.addAll(normalizedGovernorates);
+    private Map<String, List<String>> mergeZmDecision(Map<String, List<String>> decisions, String zmId, List<String> governorates) {
+        Map<String, List<String>> result = decisions != null ? new LinkedHashMap<>(decisions) : new LinkedHashMap<>();
+        LinkedHashSet<String> merged = new LinkedHashSet<>(safeGovernorates(result.get(zmId)));
+        merged.addAll(governorates);
+        result.put(zmId, orderGovernorates(merged));
+        return result;
+    }
 
-        stt.setCoveredGovernorates(orderGovernorates(updatedCoverage));
-        stt.setRequestedGovernorates(
-                pendingGovernorates.stream()
-                        .filter(governorate -> !normalizedGovernorates.contains(governorate))
-                        .toList()
-        );
+    private Map<String, List<String>> removeZmDecision(Map<String, List<String>> decisions, String zmId, List<String> governorates) {
+        if (decisions == null || decisions.isEmpty() || !decisions.containsKey(zmId)) {
+            return decisions;
+        }
 
-        return mapper.toDto(repo.save(stt));
+        Map<String, List<String>> result = new LinkedHashMap<>(decisions);
+        List<String> remaining = safeGovernorates(result.get(zmId)).stream()
+                .filter(governorate -> !governorates.contains(governorate))
+                .toList();
+
+        if (remaining.isEmpty()) {
+            result.remove(zmId);
+        } else {
+            result.put(zmId, remaining);
+        }
+        return result;
+    }
+
+    private void reopenDeclinedGovernorates(AppUser stt, List<String> governorates) {
+        Map<String, List<String>> declined = stt.getCoverageDeclinedByZm();
+        if (declined == null || declined.isEmpty() || governorates.isEmpty()) {
+            return;
+        }
+
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : declined.entrySet()) {
+            List<String> remaining = safeGovernorates(entry.getValue()).stream()
+                    .filter(governorate -> !governorates.contains(governorate))
+                    .toList();
+            if (!remaining.isEmpty()) {
+                result.put(entry.getKey(), remaining);
+            }
+        }
+        stt.setCoverageDeclinedByZm(result);
     }
 
     public UserDTO uploadProfileImage(String userId, MultipartFile file, Authentication authentication) {
@@ -391,9 +492,15 @@ public class UserService {
             throw new AccessDeniedException("You are not allowed to update this profile image");
         }
 
-        if (targetUser.getProfileImageFileId() != null && !targetUser.getProfileImageFileId().isBlank()) {
-            fileStorageService.softDelete(targetUser.getProfileImageFileId());
-        }
+        // Upload (and its validateImage() check) must run BEFORE the old file
+        // is touched: deleting first meant a rejected upload (wrong type,
+        // over the size limit) silently destroyed the user's existing
+        // profile image as a side effect of the failed request, and a
+        // retry then failed again with a confusing "File not found" trying
+        // to re-delete an already-soft-deleted id instead of surfacing the
+        // real validation error. Found via Phase 2 Docker Compose
+        // integration testing (oversized-upload rejection test).
+        String oldFileId = targetUser.getProfileImageFileId();
 
         FileMetadata savedFile = fileStorageService.upload(
                 file,
@@ -402,6 +509,21 @@ public class UserService {
                 FileRole.PROFILE_IMAGE,
                 currentEmail
         );
+
+        if (oldFileId != null && !oldFileId.isBlank()) {
+            // Best-effort: the new image is already stored and must not be
+            // lost just because cleaning up the old one failed (e.g. it was
+            // already deleted by some earlier request). Worst case is one
+            // orphaned blob left in storage, which is far better than
+            // discarding a successful upload or leaving the user record
+            // pointing at neither file.
+            try {
+                fileStorageService.softDelete(oldFileId);
+            } catch (Exception e) {
+                log.warn("profile_image_old_file_cleanup_failed userId={} oldFileId={} error={}",
+                        targetUser.getId(), oldFileId, e.getClass().getSimpleName());
+            }
+        }
 
         String imageUrl = fileStorageService.buildViewUrl(savedFile.getId());
 

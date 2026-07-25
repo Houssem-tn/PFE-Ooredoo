@@ -92,7 +92,9 @@ class AuthServiceTest {
 
         when(userRepository.findByEmail("stt@example.com")).thenReturn(Optional.of(user));
         when(userRepository.save(any(AppUser.class))).thenAnswer(inv -> inv.getArgument(0));
-        when(jwtService.generateToken("stt@example.com", UserRole.ROLE_STT)).thenReturn("jwt-token");
+        // Login now embeds the account's live tokenVersion (0 for a fresh user)
+        // in the JWT so a later password reset can invalidate old tokens.
+        when(jwtService.generateToken("stt@example.com", UserRole.ROLE_STT, 0L)).thenReturn("jwt-token");
         when(userMapper.toDto(any(AppUser.class))).thenReturn(
                 dummyDto("user-1", "stt@example.com", UserRole.ROLE_STT)
         );

@@ -22,5 +22,7 @@ public enum InstanceStatus {
     PENDING_ZM_COLLECTION,
     /** @deprecated Physically collected by a ZM (legacy flow). Kept for historical documents. */
     @Deprecated
-    COLLECTED_BY_ZM
+    COLLECTED_BY_ZM,
+    /** Physically collected by the responsible STT through the Retrieved-Stock collection workflow. */
+    COLLECTED_BY_STT
 }

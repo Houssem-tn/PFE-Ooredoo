@@ -121,6 +121,7 @@ public class CaseService {
 
     private static final Set<CaseStatus> COMPLAINT_ASSIGN_TECH_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_STT,   // PLT-imported complaints skip diagnosis and assign TECH directly
+        CaseStatus.RDV_SET,
         CaseStatus.DIAGNOSIS_STEP,
         CaseStatus.ASSIGNED_TO_TECH,
         CaseStatus.RETURNED_TO_STT,
@@ -136,6 +137,7 @@ public class CaseService {
     );
 
     private static final Set<CaseStatus> COMPLAINT_SELF_EXECUTION_ALLOWED_STATUSES = EnumSet.of(
+        CaseStatus.RDV_SET,
         CaseStatus.DIAGNOSIS_STEP,
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.RETURNED_TO_STT,
@@ -152,6 +154,7 @@ public class CaseService {
     private static final Set<CaseStatus> COMPLAINT_SET_RDV_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
         CaseStatus.NOT_REACHABLE,
         CaseStatus.DIAGNOSIS_STEP
     );
@@ -165,6 +168,7 @@ public class CaseService {
     private static final Set<CaseStatus> COMPLAINT_COMPLETE_WORK_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
         CaseStatus.DIAGNOSIS_STEP,
         CaseStatus.RETURNED_TO_STT,
         CaseStatus.REOPENED
@@ -182,6 +186,7 @@ public class CaseService {
     private static final Set<CaseStatus> COMPLAINT_WORK_PROOF_ALLOWED_STATUSES = EnumSet.of(
         CaseStatus.ASSIGNED_TO_STT,
         CaseStatus.ASSIGNED_TO_TECH,
+        CaseStatus.RDV_SET,
         CaseStatus.DIAGNOSIS_STEP,
         CaseStatus.RESOLUTION_SUBMITTED,
         CaseStatus.RETURNED_TO_STT,
@@ -1018,11 +1023,6 @@ public class CaseService {
             "Case cannot be assigned to TECH in current state"
         );
 
-        // PLT/RES-imported complaints skip the mandatory diagnosis step and go directly to TECH like ACT cases.
-        if (isComplaint(c) && !isFieldTodoImportSource(c)) {
-            ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before TECH assignment");
-        }
-
         if (isBlank(c.getSttId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must be assigned to an STT first");
         }
@@ -1093,11 +1093,6 @@ public class CaseService {
                 selfExecutionAllowedStatuses(c),
                 "Case cannot switch to STT self-execution in current state"
         );
-
-        // PLT/RES-imported complaints skip the mandatory diagnosis step — STT may self-execute directly.
-        if (isComplaint(c) && !isFieldTodoImportSource(c)) {
-            ensureComplaintRequiresFieldExecution(c, "A complaint must be diagnosed for field intervention before STT self-execution");
-        }
 
         if (isBlank(c.getSttId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Case must be assigned to an STT first");
@@ -1173,7 +1168,7 @@ public class CaseService {
                 triggerImmediateBreachNotification = true;
             }
         } else {
-            c.setStatus(isComplaint(c) ? CaseStatus.DIAGNOSIS_STEP : CaseStatus.RDV_SET);
+            c.setStatus(CaseStatus.RDV_SET);
             Instant rdvSetAt = Instant.now();
             slaTrackingService.completeOnRdv(c, rdvSetAt);
 
@@ -1234,10 +1229,6 @@ public class CaseService {
         ensureCurrentUserCanExecuteCase(c);
 
         ensureStatusIn(c, completeWorkAllowedStatuses(c), "Work completion is not allowed in current state");
-        // PLT/RES-imported complaints skip the diagnosis prerequisite — work can be completed like ACT.
-        if (isComplaint(c) && !isFieldTodoImportSource(c)) {
-            ensureComplaintRequiresFieldExecution(c, "Complaint work can only be submitted after a diagnosis requiring field intervention");
-        }
         validateLocationSnapshot(
                 request.locationLatitude(),
                 request.locationLongitude(),
@@ -1285,17 +1276,26 @@ public class CaseService {
                 executingTechnician != null && !usedEquipment.isEmpty() ? executingTechnician.getId() : null
         );
 
-        TechnicalMetrics metrics = new TechnicalMetrics();
-        metrics.setMetrageCable(request.metrageCable());
-        metrics.setNombrePv(request.nombrePv());
-        metrics.setDebitDl(request.debitDl());
-        metrics.setDebitUl(request.debitUl());
-        metrics.setRsrp(request.rsrp());
-        metrics.setRsrq(request.rsrq());
-        metrics.setSinr(request.sinr());
+        // Merge metrics onto any previously-saved values instead of replacing the whole object:
+        // a metric is only overwritten when this submission actually carries it (non-null), so a
+        // later Complaint step (e.g. re-completion) never wipes earlier OCR-extracted metrics.
+        // Applies to Activation and Complaint alike; a valid 0 is a real value and is written.
+        TechnicalMetrics metrics = c.getMetrics() != null ? c.getMetrics() : new TechnicalMetrics();
+        if (request.metrageCable() != null) metrics.setMetrageCable(request.metrageCable());
+        if (request.nombrePv() != null)     metrics.setNombrePv(request.nombrePv());
+        if (request.debitDl() != null)      metrics.setDebitDl(request.debitDl());
+        if (request.debitUl() != null)      metrics.setDebitUl(request.debitUl());
+        if (request.rsrp() != null)         metrics.setRsrp(request.rsrp());
+        if (request.rsrq() != null)         metrics.setRsrq(request.rsrq());
+        if (request.sinr() != null)         metrics.setSinr(request.sinr());
 
         c.setWork(work);
         c.setMetrics(metrics);
+
+        // Non-sensitive diagnostics: which metrics this completion persisted (no images/customer data).
+        log.debug("completeWork case={} type={} metrics[dl={}, ul={}, rsrp={}, rsrq={}, sinr={}, pv={}]",
+                c.getId(), c.getType(), metrics.getDebitDl(), metrics.getDebitUl(), metrics.getRsrp(),
+                metrics.getRsrq(), metrics.getSinr(), metrics.getNombrePv());
         if (isComplaint(c)) {
             ComplaintResolutionInfo resolution = ensureComplaintResolution(c);
             resolution.setResolutionComment(trimToNull(request.cmtTrvStt()));

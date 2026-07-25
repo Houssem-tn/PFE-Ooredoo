@@ -23,8 +23,12 @@ public class CorsConfig {
         config.setAllowedOriginPatterns(resolveAllowedOrigins());
 
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("Authorization","Content-Type"));
+        config.setAllowedHeaders(List.of(
+                "Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"));
         config.setExposedHeaders(List.of("Authorization"));
+        // Exact origins (see resolveAllowedOrigins) — never "*" — because
+        // credentials are allowed. A wildcard origin with credentials is
+        // rejected by the browser and by Spring's CORS processor.
         config.setAllowCredentials(true);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

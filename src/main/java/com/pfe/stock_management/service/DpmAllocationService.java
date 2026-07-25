@@ -63,6 +63,11 @@ public class DpmAllocationService {
      * if balances already exist for this DPM it does nothing, so re-confirmation or
      * retries never inflate the source pool.
      */
+    /** Whether stock source balances have already been materialised for this DPM (idempotency guard). */
+    public boolean hasSourceBalances(String dpmId) {
+        return dpmId != null && balanceRepository.existsByDpmId(dpmId);
+    }
+
     public void createSourceBalances(DpmRequest dpm) {
         if (dpm == null || dpm.getId() == null || dpm.getSttId() == null) return;
         if (balanceRepository.existsByDpmId(dpm.getId())) return;

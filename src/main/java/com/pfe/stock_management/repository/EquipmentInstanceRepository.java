@@ -15,6 +15,17 @@ public interface EquipmentInstanceRepository extends MongoRepository<EquipmentIn
 
     boolean existsByEquipmentIdAndNormalizedSerialNumber(String equipmentId, String normalizedSerialNumber);
 
+    /**
+     * Same per-equipment uniqueness checks but ignoring units that originated from a given DPM.
+     * Lets a re-run of a DPM confirmation validate against everyone else's stock without tripping
+     * over the instances a previous (partially completed) attempt already materialised for it.
+     */
+    boolean existsByEquipmentIdAndNormalizedImeiAndSourceDpmIdNot(
+            String equipmentId, String normalizedImei, String sourceDpmId);
+
+    boolean existsByEquipmentIdAndNormalizedSerialNumberAndSourceDpmIdNot(
+            String equipmentId, String normalizedSerialNumber, String sourceDpmId);
+
     // ── Lifecycle lookups ─────────────────────────────────────────────────────
     List<EquipmentInstance> findByCurrentOwnerTypeAndCurrentOwnerIdAndStatus(
             InstanceOwnerType ownerType, String ownerId, InstanceStatus status);

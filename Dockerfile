@@ -93,7 +93,8 @@ FROM eclipse-temurin:17-jre-jammy AS runtime
 # every time an upstream package gets patched (confirmed in practice on
 # the sibling frontend image's Alpine base: a freshly-pulled image still
 # had an already-fixed OpenSSL CVE — see Pfe-Oreedoo-Front/Dockerfile).
-RUN apt-get update \
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
@@ -141,4 +142,16 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
 # Exec form so SIGTERM (docker stop / compose down) reaches the JVM
 # directly as PID 1, enabling server.shutdown=graceful to actually drain
 # in-flight requests instead of being swallowed by a shell wrapper.
-ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+#
+# `java -jar app.jar`, not `java org.springframework.boot.loader.launch.JarLauncher`:
+# confirmed by inspecting the actual `extracted/` output of the `layers`
+# stage's `-Djarmode=tools ... extract --layers` (Spring Boot 4.0.7) — the
+# `spring-boot-loader` layer is empty and `application/app.jar` is already
+# a directly-executable thin jar with a real manifest (Main-Class:
+# com.pfe.PfeApplication, Class-Path: lib/*.jar). The loader-class launch
+# command documented for older Spring Boot layered-jar images no longer
+# applies to whatever jarmode-tools version ships with 4.0.7 — running it
+# here just re-launched the full application with jarmode ignored,
+# crash-looping on ProductionSafetyEnvironmentPostProcessor instead of
+# ever finding the (nonexistent) loader class.
+ENTRYPOINT ["java", "-jar", "app.jar"]

@@ -13,12 +13,16 @@ import com.pfe.stock_management.material_return.MaterialReturnRequest;
 import com.pfe.stock_management.model.InstanceMovementEvent;
 import com.pfe.stock_management.repository.EquipmentInstanceRepository;
 import com.pfe.stock_management.repository.EquipmentRepository;
+import com.pfe.stock_management.retrieved_stock.RecoveryDisposition;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
@@ -34,6 +38,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -224,6 +229,71 @@ class EquipmentInstanceServiceTest {
         assertEquals("RECEIVED_FROM_DPM", first.getMovements().get(0).getType());
     }
 
+    @Test
+    void createForDpm_allowsMultipleUnitsWithNullImei_forSerialOnlyEquipment() {
+        // Regression for the E11000 on {equipmentId, normalizedImei: null}: serial-only units
+        // all have a null IMEI and must coexist for the same equipment.
+        EquipmentInstanceService service = newService();
+        Equipment idu = equipment("idu", "IDU", TrackingMode.SERIAL_ONLY);
+        DpmRequest dpm = DpmRequest.builder().id("dpm-9").dpmNumber("DPM-9").sttId("stt-1").sttName("STT One").build();
+        when(instanceRepository.findBySourceDpmId("dpm-9")).thenReturn(new ArrayList<>());
+        when(instanceRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        List<EquipmentInstance> created = service.createForDpm(idu, dpm,
+                List.of(unit(null, "SN-1"), unit(null, "SN-2")), "stt@x.com");
+
+        assertEquals(2, created.size());
+        assertNull(created.get(0).getNormalizedImei());
+        assertNull(created.get(1).getNormalizedImei());
+        verify(instanceRepository, times(2)).save(any());
+    }
+
+    @Test
+    void createForDpm_isIdempotent_skipsUnitsAlreadyMaterialisedForSameDpm() {
+        EquipmentInstanceService service = newService();
+        Equipment odu = equipment("odu", "ODU P90", TrackingMode.SERIAL_ONLY);
+        DpmRequest dpm = DpmRequest.builder().id("dpm-7").dpmNumber("DPM-7").sttId("stt-1").sttName("STT One").build();
+        // SN-1 was already created for this DPM by an earlier (partial) attempt.
+        EquipmentInstance prior = EquipmentInstance.builder()
+                .id("prior-1").equipmentId("odu").normalizedSerialNumber("SN-1").build();
+        when(instanceRepository.findBySourceDpmId("dpm-7")).thenReturn(new ArrayList<>(List.of(prior)));
+        when(instanceRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        List<EquipmentInstance> created = service.createForDpm(odu, dpm,
+                List.of(unit(null, "SN-1"), unit(null, "SN-2")), "stt@x.com");
+
+        assertEquals(1, created.size());
+        assertEquals("SN-2", created.get(0).getNormalizedSerialNumber());
+        verify(instanceRepository, times(1)).save(any());
+    }
+
+    @Test
+    void createForDpm_translatesDuplicateKeyIntoConflict() {
+        EquipmentInstanceService service = newService();
+        Equipment modem = equipment("modem", "Modem", TrackingMode.IMEI_ONLY);
+        DpmRequest dpm = DpmRequest.builder().id("dpm-8").dpmNumber("DPM-8").sttId("stt-1").sttName("STT One").build();
+        when(instanceRepository.findBySourceDpmId("dpm-8")).thenReturn(new ArrayList<>());
+        when(instanceRepository.save(any())).thenThrow(new DuplicateKeyException("E11000 duplicate key"));
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class, () ->
+                service.createForDpm(modem, dpm, List.of(unit("IMEI-DUP", null)), "stt@x.com"));
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+    }
+
+    @Test
+    void validateUnits_ignoresThisDpmsOwnInstancesOnRetry() {
+        EquipmentInstanceService service = newService();
+        Equipment idu = equipment("idu", "IDU", TrackingMode.SERIAL_ONLY);
+        // Excluding this DPM's own already-materialised units, SN-1 is not a duplicate.
+        when(instanceRepository.existsByEquipmentIdAndNormalizedSerialNumberAndSourceDpmIdNot("idu", "SN-1", "dpm-1"))
+                .thenReturn(false);
+
+        assertDoesNotThrow(() ->
+                service.validateUnitsForConfirmation(idu, 1, List.of(unit(null, "SN-1")), "dpm-1"));
+        // The DPM-scoped exclusion variant is used, never the global one.
+        verify(instanceRepository, never()).existsByEquipmentIdAndNormalizedSerialNumber(anyString(), anyString());
+    }
+
     // ── STT → TECH distribution ───────────────────────────────────────────────
 
     @Test
@@ -354,6 +424,88 @@ class EquipmentInstanceServiceTest {
         String instanceId = service.recordClientRecovery(cable, null, "X", "Y", null, "tech@x.com");
 
         assertNull(instanceId);
+        verify(instanceRepository, never()).save(any());
+    }
+
+    // ── PLT/RES technician retrieval + ZM collection ─────────────────────────
+
+    @Test
+    void recordTechRetrieval_createsInstancePendingZmCollectionOwnedByTech() {
+        EquipmentInstanceService service = newService();
+        Equipment odu = equipment("odu", "ODU P90", TrackingMode.SERIAL_AND_IMEI);
+        when(instanceRepository.findByEquipmentId("odu")).thenReturn(new ArrayList<>());
+        ArgumentCaptor<EquipmentInstance> captor = ArgumentCaptor.forClass(EquipmentInstance.class);
+        when(instanceRepository.save(captor.capture())).thenAnswer(i -> {
+            EquipmentInstance e = i.getArgument(0);
+            e.setId("inst-new");
+            return e;
+        });
+
+        CaseEntity caseEntity = CaseEntity.builder().id("case-plt").crmCase("CRM-PLT").build();
+        RetrievedStockItem item = RetrievedStockItem.builder()
+                .id("rsi-1").technicianId("tech-1").technicianName("Tech One").sttId("stt-1")
+                .disposition(RecoveryDisposition.RETRIEVED)
+                .build();
+
+        String instanceId = service.recordTechRetrieval(odu, caseEntity, "IMEI-R", "SN-R", item, "tech@x.com");
+
+        assertEquals("inst-new", instanceId);
+        EquipmentInstance saved = captor.getValue();
+        // Unlike recordClientRecovery (owner jumps to RETURN), this stays owned by the TECH,
+        // pending ZM collection.
+        assertEquals(InstanceStatus.PENDING_ZM_COLLECTION, saved.getStatus());
+        assertEquals(InstanceOwnerType.TECH, saved.getCurrentOwnerType());
+        assertEquals("tech-1", saved.getCurrentOwnerId());
+        assertEquals("rsi-1", saved.getRetrievedStockItemId());
+        assertEquals("case-plt", saved.getCaseId());
+        assertEquals("stt-1", saved.getOriginSttId());
+    }
+
+    @Test
+    void recordTechRetrieval_noOpForNonTrackedEquipment() {
+        EquipmentInstanceService service = newService();
+        Equipment cable = equipment("cable", "Cable", TrackingMode.NONE);
+
+        String instanceId = service.recordTechRetrieval(cable, null, "X", "Y", null, "tech@x.com");
+
+        assertNull(instanceId);
+        verify(instanceRepository, never()).save(any());
+    }
+
+    @Test
+    void markCollectedByZm_transitionsPendingInstanceToCollectedOwnedByZm() {
+        EquipmentInstanceService service = newService();
+        EquipmentInstance pending = EquipmentInstance.builder()
+                .id("inst-1").equipmentId("odu")
+                .currentOwnerType(InstanceOwnerType.TECH).currentOwnerId("tech-1")
+                .status(InstanceStatus.PENDING_ZM_COLLECTION)
+                .movements(new ArrayList<>())
+                .build();
+        when(instanceRepository.findById("inst-1")).thenReturn(Optional.of(pending));
+        when(instanceRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        service.markCollectedByZm(List.of("inst-1"), "zm-1", "ZM One", "zm@x.com");
+
+        assertEquals(InstanceStatus.COLLECTED_BY_ZM, pending.getStatus());
+        assertEquals(InstanceOwnerType.ZM, pending.getCurrentOwnerType());
+        assertEquals("zm-1", pending.getCurrentOwnerId());
+        assertEquals("COLLECTED_BY_ZM", lastMovement(pending).getType());
+    }
+
+    @Test
+    void markCollectedByZm_leavesNonPendingInstanceUntouched() {
+        EquipmentInstanceService service = newService();
+        EquipmentInstance alreadyUsed = EquipmentInstance.builder()
+                .id("inst-2").equipmentId("odu")
+                .currentOwnerType(InstanceOwnerType.CLIENT)
+                .status(InstanceStatus.USED_ON_CASE)
+                .movements(new ArrayList<>())
+                .build();
+        when(instanceRepository.findById("inst-2")).thenReturn(Optional.of(alreadyUsed));
+
+        service.markCollectedByZm(List.of("inst-2"), "zm-1", "ZM One", "zm@x.com");
+
+        assertEquals(InstanceStatus.USED_ON_CASE, alreadyUsed.getStatus());
         verify(instanceRepository, never()).save(any());
     }
 

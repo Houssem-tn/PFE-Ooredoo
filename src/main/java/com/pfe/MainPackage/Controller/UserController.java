@@ -31,6 +31,12 @@ public class UserController {
     ) {
     }
 
+    public record CoverageDeclineRequest(
+            @NotEmpty(message = "declinedGovernorates is required")
+            List<@NotBlank(message = "Governorate names cannot be blank") String> declinedGovernorates
+    ) {
+    }
+
     private final UserService service;
 
     public UserController(UserService service) {
@@ -100,7 +106,7 @@ public class UserController {
 
     @GetMapping("/me/stts/coverage-requests")
     @PreAuthorize("hasAuthority('ROLE_ZM')")
-    public List<UserDTO> mySttCoverageRequests(Authentication authentication) {
+    public List<SttCoverageRequestResponse> mySttCoverageRequests(Authentication authentication) {
         return service.findMySttCoverageRequests(authentication.getName());
     }
 
@@ -129,6 +135,14 @@ public class UserController {
                                     Authentication authentication,
                                     @Valid @RequestBody CoverageValidationRequest req) {
         return service.validateCoverageAreas(authentication.getName(), sttId, req.approvedGovernorates());
+    }
+
+    @PutMapping("/me/stts/{sttId}/coverage-decline")
+    @PreAuthorize("hasAuthority('ROLE_ZM')")
+    public UserDTO declineCoverage(@PathVariable String sttId,
+                                   Authentication authentication,
+                                   @Valid @RequestBody CoverageDeclineRequest req) {
+        return service.declineCoverageAreas(authentication.getName(), sttId, req.declinedGovernorates());
     }
 
     @PatchMapping("/{userId}/coverage-import-permission")

@@ -79,6 +79,16 @@ public class NotificationEventServiceImpl implements NotificationEventService {
     }
 
     @Override
+    public void onPasswordChanged(AppUser user) {
+        if (user == null || isBlank(user.getEmail())) {
+            return;
+        }
+
+        NotificationMessageDto payload = payloadFactory.buildPasswordChanged(user);
+        sendToRecipient(user.getEmail(), payload);
+    }
+
+    @Override
     public void onCaseAssignedToZm(CaseEntity caseEntity, String triggeredBy) {
         if (caseEntity == null || isBlank(caseEntity.getZmEmail())) {
             return;

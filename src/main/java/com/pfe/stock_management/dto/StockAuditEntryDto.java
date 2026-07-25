@@ -89,6 +89,17 @@ public class StockAuditEntryDto {
         private int quantity;
         /** Returned-item condition (GOOD / DAMAGED / ...). Null for DPM items. */
         private String condition;
+        private String serialNumber;
+        private String imei;
+        private String retrievedStockItemId;
+        private String technicianName;
+        private String originalCaseReference;
+        private String originalCaseType;
+        private String originalCustomerName;
+        private Instant originalRecoveryDate;
+        private Instant sttCollectedAt;
+        private String currentReturnStatus;
+        private String proofViewUrl;
     }
 
     @Getter

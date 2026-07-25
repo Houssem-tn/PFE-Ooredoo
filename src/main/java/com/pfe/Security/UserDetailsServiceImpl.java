@@ -32,14 +32,12 @@ public class UserDetailsServiceImpl implements UserDetailsService {
                         ? List.of(new SimpleGrantedAuthority(u.getRole().name()))
                         : Collections.emptyList();
 
-        return new org.springframework.security.core.userdetails.User(
+        return new AppUserDetails(
                 u.getEmail(),
                 u.getPassword(),
                 enabled,
-                true,
-                true,
-                true,
-                authorities
+                authorities,
+                u.getTokenVersion()
         );
     }
 }

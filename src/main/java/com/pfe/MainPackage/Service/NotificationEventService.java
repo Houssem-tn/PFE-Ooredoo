@@ -13,6 +13,13 @@ import java.util.List;
 public interface NotificationEventService {
     void onUserRegistered(AppUser user);
 
+    /**
+     * Security notification after a successful password reset: informs the owning
+     * user (in-app) that their password was changed and when. Carries no password
+     * and no reset token.
+     */
+    void onPasswordChanged(AppUser user);
+
     void onCaseAssignedToZm(CaseEntity caseEntity, String triggeredBy);
 
     /**

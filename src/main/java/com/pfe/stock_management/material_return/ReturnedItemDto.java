@@ -20,5 +20,7 @@ public class ReturnedItemDto {
     private String serialNumber;
     private String macAddress;
     private String imei;
+    private String instanceId;
+    private String retrievedStockItemId;
     private ReturnCondition condition;
 }

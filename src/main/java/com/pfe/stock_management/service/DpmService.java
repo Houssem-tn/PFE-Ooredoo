@@ -285,7 +285,7 @@ public class DpmService {
             DpmItemConfirmation conf = confirmationMap.get(item.getEquipmentId());
             int confirmedQty = item.getConfirmedQuantity() != null ? item.getConfirmedQuantity() : 0;
             if (eq != null && confirmedQty > 0) {
-                equipmentInstanceService.validateUnitsForConfirmation(eq, confirmedQty, conf.getUnits());
+                equipmentInstanceService.validateUnitsForConfirmation(eq, confirmedQty, conf.getUnits(), dpm.getId());
             }
         }
 
@@ -302,22 +302,26 @@ public class DpmService {
                                : "DPM fully confirmed by STT " + stt.getFullName());
         addTimelineEvent(dpm, "DPM_CONFIRMED", eventDesc, callerEmail, "ROLE_STT");
 
-        DpmRequest saved = dpmRepository.save(dpm);
-        businessMetrics.recordDpmConfirmed(saved.getStatus() != null ? saved.getStatus().name() : "unknown");
-
-        sttStockService.applyDpmConfirmation(saved);
-
-        // Materialise per-unit instances for tracked equipment (validated above). Quantity
-        // counters above stay authoritative; instances add per-unit traceability.
-        for (DpmItem item : saved.getItems()) {
+        // ── Materialise per-unit instances FIRST, before any stock/status is persisted ──
+        // Instance creation is the only step that can raise a duplicate-key business error, so
+        // running it up-front means a genuine duplicate IMEI/Serial fails with a clean 409 and
+        // leaves the DPM fully re-confirmable — no partial stock or status write. createForDpm is
+        // idempotent per DPM, so retrying after any later failure never double-creates instances.
+        for (DpmItem item : dpm.getItems()) {
             Equipment eq = equipmentById.get(item.getEquipmentId());
             int confirmedQty = item.getConfirmedQuantity() != null ? item.getConfirmedQuantity() : 0;
             if (eq != null && confirmedQty > 0) {
                 DpmItemConfirmation conf = confirmationMap.get(item.getEquipmentId());
-                equipmentInstanceService.createForDpm(eq, saved, conf.getUnits(), callerEmail);
+                equipmentInstanceService.createForDpm(eq, dpm, conf.getUnits(), callerEmail);
             }
         }
 
+        // Apply quantity counters (idempotent per DPM via its source-balance guard), then commit
+        // the DPM status as the final persisted step.
+        sttStockService.applyDpmConfirmation(dpm);
+        DpmRequest saved = dpmRepository.save(dpm);
+
+        businessMetrics.recordDpmConfirmed(saved.getStatus() != null ? saved.getStatus().name() : "unknown");
         stockMovementService.recordDpmConfirmed(saved, callerEmail);
         notificationEventService.onDpmConfirmed(saved);
 

@@ -13,12 +13,17 @@ import com.pfe.case_management.service.CaseTimelineService;
 import com.pfe.metrics.BusinessMetrics;
 import com.pfe.stock_management.entity.DpmRequest;
 import com.pfe.stock_management.entity.Equipment;
+import com.pfe.stock_management.entity.EquipmentInstance;
 import com.pfe.stock_management.entity.SttStock;
 import com.pfe.stock_management.enums.DpmStatus;
+import com.pfe.stock_management.enums.TrackingMode;
 import com.pfe.stock_management.model.SttStockItem;
 import com.pfe.stock_management.repository.DpmRepository;
 import com.pfe.stock_management.repository.EquipmentRepository;
 import com.pfe.stock_management.repository.SttStockRepository;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItem;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItemRepository;
+import com.pfe.stock_management.retrieved_stock.RetrievedStockItemStatus;
 import com.pfe.stock_management.service.EquipmentInstanceService;
 import com.pfe.stock_management.service.StockMovementService;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +32,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
@@ -74,9 +80,24 @@ public class MaterialReturnService {
             MaterialReturnStatus.APPROVED
     );
 
+    private static final List<MaterialReturnStatus> ACTIVE_RETURN_STATUSES = List.of(
+            MaterialReturnStatus.PENDING,
+            MaterialReturnStatus.SUBMITTED,
+            MaterialReturnStatus.PENDING_ZM_REVIEW,
+            MaterialReturnStatus.SCHEDULE_PROPOSED,
+            MaterialReturnStatus.PENDING_STT_CONFIRMATION,
+            MaterialReturnStatus.WAITING_STT_CONFIRMATION,
+            MaterialReturnStatus.SCHEDULE_PROPOSED_BY_ZM,
+            MaterialReturnStatus.RESCHEDULE_REQUESTED,
+            MaterialReturnStatus.SCHEDULE_REJECTED_BY_STT,
+            MaterialReturnStatus.SCHEDULE_CONFIRMED,
+            MaterialReturnStatus.APPROVED
+    );
+
     private final MaterialReturnRepository returnRepository;
     private final SttStockRepository sttStockRepository;
     private final EquipmentRepository equipmentRepository;
+    private final RetrievedStockItemRepository retrievedStockItemRepository;
     private final UserRepository userRepository;
     private final DpmRepository dpmRepository;
     private final CaseRepository caseRepository;
@@ -99,9 +120,14 @@ public class MaterialReturnService {
 
     // ── STT: create return request ─────────────────────────────────────────────
 
+    @Transactional
     public MaterialReturnResponseDto createReturn(CreateMaterialReturnDto request) {
         String callerEmail = currentUserEmail();
         AppUser stt = findByEmail(callerEmail);
+        if (stt.getRole() != UserRole.ROLE_STT) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Only an STT can create a material return request.");
+        }
         log.info("[MaterialReturn] createReturn start sttId={} sttEmail={} zmSelection={} source={} reason={}",
                 stt.getId(), stt.getEmail(), request.getResponsibleZmId(), request.getReturnSource(), request.getReason());
 
@@ -113,17 +139,38 @@ public class MaterialReturnService {
 
         ReturnSource returnSource = request.getReturnSource() != null
                 ? request.getReturnSource() : ReturnSource.OTHER;
+        List<ReturnedItemDto> requestedItems = request.getItems() != null ? request.getItems() : List.of();
+        List<String> requestedCollectedIds = normalizeIds(request.getRetrievedStockItemIds());
 
         Optional<SttStock> sttStockOpt = sttStockRepository.findBySttId(stt.getId());
         Map<String, SttStockItem> stockIndex = sttStockOpt
                 .map(this::buildStockIndex).orElse(new HashMap<>());
+
+        if (returnSource == ReturnSource.COLLECTED_ITEM_STOCK) {
+            if (!requestedItems.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Manual equipment lines are not allowed for Collected Item Stock returns.");
+            }
+            if (requestedCollectedIds.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Select at least one collected item for this return.");
+            }
+        } else {
+            if (requestedItems.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At least one item is required.");
+            }
+            if (!requestedCollectedIds.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Collected item ids can only be used when the return source is COLLECTED_ITEM_STOCK.");
+            }
+        }
 
         if (returnSource == ReturnSource.STT_STOCK) {
             if (sttStockOpt.isEmpty()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "No stock found for your account. Select a different return source.");
             }
-            for (ReturnedItemDto itemDto : request.getItems()) {
+            for (ReturnedItemDto itemDto : requestedItems) {
                 SttStockItem si = stockIndex.get(itemDto.getEquipmentId());
                 if (si == null) {
                     throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -161,32 +208,40 @@ public class MaterialReturnService {
                 .map(DpmRequest::getId)
                 .findFirst().orElse(null);
 
-        List<String> equipmentIds = request.getItems().stream()
-                .map(ReturnedItemDto::getEquipmentId).toList();
+        List<RetrievedStockItem> selectedCollectedItems = returnSource == ReturnSource.COLLECTED_ITEM_STOCK
+                ? loadCollectedItemsForReturn(requestedCollectedIds, stt)
+                : List.of();
+
+        List<String> equipmentIds = returnSource == ReturnSource.COLLECTED_ITEM_STOCK
+                ? selectedCollectedItems.stream().map(RetrievedStockItem::getEquipmentId).toList()
+                : requestedItems.stream().map(ReturnedItemDto::getEquipmentId).toList();
         Map<String, Equipment> equipmentMap = new HashMap<>();
         equipmentRepository.findAllById(equipmentIds)
                 .forEach(e -> equipmentMap.put(e.getId(), e));
 
-        List<ReturnedItem> returnedItems = request.getItems().stream().map(dto -> {
-            SttStockItem si = stockIndex.get(dto.getEquipmentId());
-            Equipment    eq = equipmentMap.get(dto.getEquipmentId());
-            String name        = si != null ? si.getEquipmentName()
-                               : (eq != null ? eq.getName() : dto.getEquipmentId());
-            String unit        = si != null ? si.getUnit()
-                               : (eq != null && eq.getUnit() != null ? eq.getUnit().name() : null);
-            String articleCode = eq != null ? eq.getArticleCode() : null;
-            return ReturnedItem.builder()
-                    .equipmentId(dto.getEquipmentId())
-                    .equipmentName(name)
-                    .articleCode(articleCode)
-                    .unit(unit)
-                    .quantity(dto.getQuantity())
-                    .serialNumber(dto.getSerialNumber())
-                    .macAddress(dto.getMacAddress())
-                    .imei(dto.getImei())
-                    .condition(dto.getCondition() != null ? dto.getCondition() : request.getCondition())
-                    .build();
-        }).toList();
+        Map<String, EquipmentInstance> selectedStockInstances = returnSource == ReturnSource.STT_STOCK
+                ? validateAndResolveTrackedStockItems(stt, requestedItems, stockIndex, equipmentMap)
+                : Map.of();
+
+        List<ReturnedItem> returnedItems = returnSource == ReturnSource.COLLECTED_ITEM_STOCK
+                ? buildCollectedReturnItems(selectedCollectedItems)
+                : buildManualReturnItems(requestedItems, request.getCondition(), stockIndex, equipmentMap, selectedStockInstances);
+
+        String relatedCaseId = trimToNull(request.getRelatedCaseId());
+        String relatedCaseType = trimToNull(request.getRelatedCaseType());
+        String crmCase = trimToNull(request.getCrmCase());
+        if (returnSource == ReturnSource.COLLECTED_ITEM_STOCK && selectedCollectedItems.size() == 1) {
+            RetrievedStockItem single = selectedCollectedItems.get(0);
+            if (relatedCaseId == null) {
+                relatedCaseId = single.getCaseId();
+            }
+            if (relatedCaseType == null) {
+                relatedCaseType = single.getCaseUsageContext();
+            }
+            if (crmCase == null) {
+                crmCase = single.getCrmCase();
+            }
+        }
 
         Instant now = Instant.now();
         ReturnTimelineEvent submittedEvent = ReturnTimelineEvent.builder()
@@ -206,9 +261,9 @@ public class MaterialReturnService {
                 .zmName(resolvedZmName)
                 .zmEmail(resolvedZmEmail)
                 .sourceDpmId(sourceDpmId)
-                .relatedCaseId(request.getRelatedCaseId())
-                .relatedCaseType(request.getRelatedCaseType())
-                .crmCase(request.getCrmCase())
+                .relatedCaseId(relatedCaseId)
+                .relatedCaseType(relatedCaseType)
+                .crmCase(crmCase)
                 .returnSource(returnSource)
                 .reason(request.getReason())
                 .condition(request.getCondition())
@@ -223,6 +278,16 @@ public class MaterialReturnService {
                 .build();
 
         MaterialReturnRequest saved = returnRepository.save(returnRequest);
+        try {
+            if (returnSource == ReturnSource.COLLECTED_ITEM_STOCK) {
+                reserveCollectedItemsForReturn(saved, selectedCollectedItems);
+            }
+            reserveTrackedUnitsForReturn(saved, callerEmail);
+        } catch (RuntimeException ex) {
+            rollbackNewReturn(saved, callerEmail);
+            throw ex;
+        }
+
         businessMetrics.recordMaterialReturnCreated();
         log.info("[MaterialReturn] Created: id={} returnCode={} sttId={} zmId={} status={}",
                 saved.getId(), saved.getReturnCode(), saved.getSttId(), saved.getZmId(), saved.getStatus());
@@ -577,6 +642,7 @@ public class MaterialReturnService {
 
     // ── ZM: reject the return request itself ──────────────────────────────────
 
+    @Transactional
     public MaterialReturnResponseDto rejectReturn(String id, ReviewMaterialReturnDto body) {
         String callerEmail = currentUserEmail();
         AppUser zm = findByEmail(callerEmail);
@@ -615,6 +681,11 @@ public class MaterialReturnService {
                 .build());
 
         MaterialReturnRequest saved = returnRepository.save(req);
+        if (saved.getReturnSource() == ReturnSource.COLLECTED_ITEM_STOCK) {
+            releaseCollectedItems(saved, zm.getEmail());
+        }
+        runSideEffect("release tracked-unit reservation", () ->
+                equipmentInstanceService.releaseReturnReservation(saved.getId(), zm.getEmail()));
         runSideEffect("record rejected stock movement", () ->
                 stockMovementService.recordMaterialReturnRejected(saved, zm.getEmail()));
 
@@ -651,6 +722,7 @@ public class MaterialReturnService {
 
     // ── ZM: mark physical handover as complete ─────────────────────────────────
 
+    @Transactional
     public MaterialReturnResponseDto markHandedOver(String id, MarkHandedOverDto body) {
         String callerEmail = currentUserEmail();
         AppUser zm = findByEmail(callerEmail);
@@ -682,6 +754,9 @@ public class MaterialReturnService {
                 .build());
 
         MaterialReturnRequest saved = returnRepository.save(req);
+        if (saved.getReturnSource() == ReturnSource.COLLECTED_ITEM_STOCK) {
+            markCollectedItemsReturned(saved);
+        }
 
         // Per-unit tracking: tracked units linked to this return are now physically back at
         // the ZM/depot → status RETURNED_TO_DEPOT.
@@ -703,6 +778,275 @@ public class MaterialReturnService {
     }
 
     // ── Private helpers ────────────────────────────────────────────────────────
+
+    private List<String> normalizeIds(List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        return ids.stream()
+                .map(this::trimToNull)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+    }
+
+    private List<RetrievedStockItem> loadCollectedItemsForReturn(List<String> retrievedStockItemIds, AppUser stt) {
+        List<RetrievedStockItem> items = retrievedStockItemRepository.findAllById(retrievedStockItemIds);
+        if (items.size() != retrievedStockItemIds.size()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "One or more selected collected items were not found.");
+        }
+
+        Map<String, RetrievedStockItem> itemsById = new LinkedHashMap<>();
+        items.forEach(item -> itemsById.put(item.getId(), item));
+
+        List<RetrievedStockItem> orderedItems = new ArrayList<>();
+        for (String id : retrievedStockItemIds) {
+            RetrievedStockItem item = itemsById.get(id);
+            if (item == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Collected item " + id + " was not found.");
+            }
+            if (!Objects.equals(item.getSttId(), stt.getId())
+                    || !Objects.equals(item.getCollectedBySttId(), stt.getId())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                        "Collected item " + id + " does not belong to your STT collected stock.");
+            }
+            if (item.getStatus() != RetrievedStockItemStatus.COLLECTED_BY_STT) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Collected item " + id + " is not selectable for a return.");
+            }
+            if (item.getMaterialReturnRequestId() != null && !item.getMaterialReturnRequestId().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Collected item " + id + " is already linked to another active return request.");
+            }
+            orderedItems.add(item);
+        }
+        return orderedItems;
+    }
+
+    private Map<String, EquipmentInstance> validateAndResolveTrackedStockItems(AppUser stt,
+                                                                               List<ReturnedItemDto> requestedItems,
+                                                                               Map<String, SttStockItem> stockIndex,
+                                                                               Map<String, Equipment> equipmentMap) {
+        Map<String, EquipmentInstance> resolved = new HashMap<>();
+        for (ReturnedItemDto item : requestedItems) {
+            Equipment equipment = equipmentMap.get(item.getEquipmentId());
+            TrackingMode trackingMode = equipment != null && equipment.getTrackingMode() != null
+                    ? equipment.getTrackingMode()
+                    : TrackingMode.NONE;
+            if (trackingMode == TrackingMode.NONE) {
+                continue;
+            }
+
+            if (item.getQuantity() != 1) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Tracked equipment must be returned one physical unit at a time.");
+            }
+
+            String instanceId = trimToNull(item.getInstanceId());
+            if (instanceId == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Select the exact serial number or IMEI for tracked equipment.");
+            }
+            if (resolved.containsKey(instanceId)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "The same tracked item cannot be selected more than once in a return.");
+            }
+            if (!returnRepository.findByTrackedInstanceIdAndStatusIn(instanceId, ACTIVE_RETURN_STATUSES).isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "The selected tracked item is already linked to another active return request.");
+            }
+
+            List<EquipmentInstance> matched = equipmentInstanceService.assertDistributable(
+                    item.getEquipmentId(), List.of(instanceId), stt.getId());
+            EquipmentInstance selectedInstance = matched.stream()
+                    .findFirst()
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Tracked stock item " + instanceId + " is not available in your STT stock."));
+
+            assertTrackedIdentifierMatches(item, selectedInstance,
+                    equipment != null ? equipment.getName() : item.getEquipmentId());
+
+            SttStockItem stockItem = stockIndex.get(item.getEquipmentId());
+            if (stockItem == null || stockItem.getAvailableQuantity() < 1) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Tracked stock item is no longer available in your STT stock.");
+            }
+
+            resolved.put(instanceId, selectedInstance);
+        }
+        return resolved;
+    }
+
+    private void assertTrackedIdentifierMatches(ReturnedItemDto item,
+                                                EquipmentInstance selectedInstance,
+                                                String equipmentName) {
+        String requestedSerial = trimToNull(item.getSerialNumber());
+        if (requestedSerial != null && !requestedSerial.equalsIgnoreCase(trimToNull(selectedInstance.getSerialNumber()))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Selected serial number does not match the tracked stock unit for " + equipmentName + ".");
+        }
+
+        String requestedImei = trimToNull(item.getImei());
+        if (requestedImei != null && !requestedImei.equalsIgnoreCase(trimToNull(selectedInstance.getImei()))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Selected IMEI does not match the tracked stock unit for " + equipmentName + ".");
+        }
+    }
+
+    private List<ReturnedItem> buildManualReturnItems(List<ReturnedItemDto> requestedItems,
+                                                      ReturnCondition fallbackCondition,
+                                                      Map<String, SttStockItem> stockIndex,
+                                                      Map<String, Equipment> equipmentMap,
+                                                      Map<String, EquipmentInstance> selectedStockInstances) {
+        List<ReturnedItem> items = new ArrayList<>();
+        for (ReturnedItemDto dto : requestedItems) {
+            Equipment equipment = equipmentMap.get(dto.getEquipmentId());
+            SttStockItem stockItem = stockIndex.get(dto.getEquipmentId());
+            EquipmentInstance instance = selectedStockInstances.get(trimToNull(dto.getInstanceId()));
+
+            String unit = equipment != null && equipment.getUnit() != null
+                    ? equipment.getUnit().name()
+                    : (stockItem != null ? stockItem.getUnit() : null);
+
+            ReturnedItem item = ReturnedItem.builder()
+                    .equipmentId(dto.getEquipmentId())
+                    .equipmentName(stockItem != null ? stockItem.getEquipmentName()
+                            : equipment != null ? equipment.getName() : dto.getEquipmentId())
+                    .articleCode(equipment != null ? equipment.getArticleCode() : null)
+                    .unit(unit)
+                    .quantity(dto.getQuantity())
+                    .condition(dto.getCondition() != null ? dto.getCondition() : fallbackCondition)
+                    .serialNumber(instance != null ? trimToNull(instance.getSerialNumber()) : trimToNull(dto.getSerialNumber()))
+                    .imei(instance != null ? trimToNull(instance.getImei()) : trimToNull(dto.getImei()))
+                    .macAddress(trimToNull(dto.getMacAddress()))
+                    .instanceId(instance != null ? instance.getId() : trimToNull(dto.getInstanceId()))
+                    .build();
+            items.add(item);
+        }
+        return items;
+    }
+
+    private List<ReturnedItem> buildCollectedReturnItems(List<RetrievedStockItem> selectedCollectedItems) {
+        return selectedCollectedItems.stream()
+                .map(item -> ReturnedItem.builder()
+                        .equipmentId(item.getEquipmentId())
+                        .equipmentName(item.getEquipmentName())
+                        .articleCode(item.getArticleCode())
+                        .unit(item.getUnit())
+                        .quantity(item.getQuantity())
+                        .serialNumber(trimToNull(item.getSerialNumber()))
+                        .imei(trimToNull(item.getImei()))
+                        .macAddress(trimToNull(item.getMacAddress()))
+                        .condition(item.getCondition())
+                        .instanceId(trimToNull(item.getInstanceId()))
+                        .retrievedStockItemId(item.getId())
+                        .originalTechnicianId(item.getTechnicianId())
+                        .originalTechnicianName(item.getTechnicianName())
+                        .originalTechnicianEmail(item.getTechnicianEmail())
+                        .originalCaseId(item.getCaseId())
+                        .originalCaseReference(item.getCrmCase())
+                        .originalCaseType(item.getCaseUsageContext())
+                        .originalCustomerName(item.getClientName())
+                        .originalCustomerPhone(item.getClientPhone())
+                        .originalRecoveryDate(item.getRetrievedAt())
+                        .sttCollectedAt(item.getCollectedAt())
+                        .proofFileId(item.getProofFileId())
+                        .proofViewUrl(item.getProofFileId() != null ? "/api/v1/files/" + item.getProofFileId() + "/view" : null)
+                        .proofDownloadUrl(item.getProofFileId() != null ? "/api/v1/files/" + item.getProofFileId() + "/download" : null)
+                        .build())
+                .toList();
+    }
+
+    private void reserveCollectedItemsForReturn(MaterialReturnRequest request,
+                                                List<RetrievedStockItem> selectedCollectedItems) {
+        Instant now = Instant.now();
+        for (RetrievedStockItem item : selectedCollectedItems) {
+            item.setStatus(RetrievedStockItemStatus.IN_RETURN_REQUEST);
+            item.setMaterialReturnRequestId(request.getId());
+            item.setAddedToReturnAt(now);
+            item.setUpdatedAt(now);
+        }
+        retrievedStockItemRepository.saveAll(selectedCollectedItems);
+    }
+
+    private void releaseCollectedItems(MaterialReturnRequest request, String actor) {
+        List<RetrievedStockItem> items = retrievedStockItemRepository.findByMaterialReturnRequestId(request.getId());
+        if (items.isEmpty()) {
+            return;
+        }
+
+        Instant now = Instant.now();
+        for (RetrievedStockItem item : items) {
+            item.setStatus(RetrievedStockItemStatus.COLLECTED_BY_STT);
+            item.setMaterialReturnRequestId(null);
+            item.setAddedToReturnAt(null);
+            item.setUpdatedAt(now);
+        }
+        retrievedStockItemRepository.saveAll(items);
+        log.info("[MaterialReturn] released {} collected items for return {} by {}",
+                items.size(), request.getReturnCode(), actor);
+    }
+
+    private void markCollectedItemsReturned(MaterialReturnRequest request) {
+        List<RetrievedStockItem> items = retrievedStockItemRepository.findByMaterialReturnRequestId(request.getId());
+        if (items.isEmpty()) {
+            return;
+        }
+
+        Instant now = Instant.now();
+        for (RetrievedStockItem item : items) {
+            item.setStatus(RetrievedStockItemStatus.RETURNED);
+            item.setReturnedAt(now);
+            item.setUpdatedAt(now);
+        }
+        retrievedStockItemRepository.saveAll(items);
+    }
+
+    private void reserveTrackedUnitsForReturn(MaterialReturnRequest request, String actor) {
+        List<String> instanceIds = request.getItems().stream()
+                .map(ReturnedItem::getInstanceId)
+                .map(this::trimToNull)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (instanceIds.isEmpty()) {
+            return;
+        }
+        equipmentInstanceService.reserveForReturn(request.getId(), request.getReturnCode(), instanceIds, actor);
+    }
+
+    private void rollbackNewReturn(MaterialReturnRequest request, String actor) {
+        if (request == null || request.getId() == null) {
+            return;
+        }
+        try {
+            releaseCollectedItems(request, actor);
+        } catch (RuntimeException ex) {
+            log.warn("[MaterialReturn] failed to release collected items while rolling back return {}",
+                    request.getId(), ex);
+        }
+        try {
+            equipmentInstanceService.releaseReturnReservation(request.getId(), actor);
+        } catch (RuntimeException ex) {
+            log.warn("[MaterialReturn] failed to release tracked units while rolling back return {}",
+                    request.getId(), ex);
+        }
+        try {
+            returnRepository.deleteById(request.getId());
+        } catch (RuntimeException ex) {
+            log.warn("[MaterialReturn] failed to delete partially-created return {}", request.getId(), ex);
+        }
+    }
+
+    private String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
 
     private void applySttStockDecrement(MaterialReturnRequest req) {
         SttStock stock = sttStockRepository.findBySttId(req.getSttId())

@@ -66,6 +66,7 @@ build_run.log
 .env
 .env.*
 !.env.example
+!deploy/.env.docker.example
 application-local.properties
 application-local.yml
 application-local.yaml

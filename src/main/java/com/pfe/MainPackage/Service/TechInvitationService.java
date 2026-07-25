@@ -19,6 +19,7 @@ public class TechInvitationService {
     private final TechInvitationRepository repo;
     private final UserRepository userRepo;
     private final EmailService emailService;
+    private final SttZmCoverageService coverageService;
 
     @Value("${app.frontend-url}")
     private String frontendUrl;
@@ -26,11 +27,13 @@ public class TechInvitationService {
     public TechInvitationService(
             TechInvitationRepository repo,
             UserRepository userRepo,
-            EmailService emailService
+            EmailService emailService,
+            SttZmCoverageService coverageService
     ) {
         this.repo = repo;
         this.userRepo = userRepo;
         this.emailService = emailService;
+        this.coverageService = coverageService;
     }
 
     // =============================
@@ -46,9 +49,13 @@ public class TechInvitationService {
             throw new IllegalStateException("Only STT can invite technicians");
         }
 
-        if (stt.getAssignedZmId() == null || stt.getAssignedZmId().isBlank()) {
-            throw new IllegalStateException("STT is not assigned to a ZM");
-        }
+        // New coverage model: an STT may invite technicians once at least one ZM has
+        // approved it through shared governorate coverage. The anchoring ZM (who will
+        // later approve the registered technician) is resolved from that coverage, not
+        // from the removed one-to-one assignedZm link.
+        AppUser zm = coverageService.findPrimaryZmForStt(stt)
+                .orElseThrow(() -> new IllegalStateException(
+                        "No ZM has approved your coverage yet. Ask a ZM to validate your governorates before inviting technicians."));
 
         userRepo.findByEmail(normalizedEmail).ifPresent(user -> {
             throw new IllegalArgumentException("A user with this email already exists");
@@ -60,9 +67,6 @@ public class TechInvitationService {
         if (existingInvitation.isPresent()) {
             throw new IllegalArgumentException("An active invitation already exists for this email");
         }
-
-        AppUser zm = userRepo.findById(stt.getAssignedZmId())
-                .orElseThrow(() -> new IllegalStateException("Assigned ZM not found"));
 
         Instant now = Instant.now();
         String token = UUID.randomUUID().toString();

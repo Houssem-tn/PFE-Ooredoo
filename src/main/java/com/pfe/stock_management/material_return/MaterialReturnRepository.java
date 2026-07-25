@@ -35,6 +35,10 @@ public interface MaterialReturnRepository extends MongoRepository<MaterialReturn
 
     List<MaterialReturnRequest> findByStatusOrderByCreatedAtDesc(MaterialReturnStatus status);
 
+    @Query(value = "{ 'items.instanceId': ?0, 'status': { '$in': ?1 } }")
+    List<MaterialReturnRequest> findByTrackedInstanceIdAndStatusIn(
+            String instanceId, Collection<MaterialReturnStatus> statuses);
+
     Optional<MaterialReturnRequest> findByReturnCode(String returnCode);
 
     long countByStatus(MaterialReturnStatus status);

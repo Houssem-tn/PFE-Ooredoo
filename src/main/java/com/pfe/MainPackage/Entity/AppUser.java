@@ -78,6 +78,21 @@ public class AppUser {
 
     private String password;
 
+    // Set whenever the password changes (e.g. via a completed password reset).
+    // Stored for audit/notification display only — it is NOT used to validate
+    // JWTs (tokenVersion is the single source of truth for invalidation). Legacy
+    // users predating this field simply have null here and keep working.
+    private Instant passwordChangedAt;
+
+    // Monotonic session/JWT epoch. Every issued access token embeds the value
+    // current at issue time (JWT "ver" claim); a password reset increments it so
+    // all previously issued tokens (REST and WebSocket) stop validating at once.
+    // Primitive long so legacy Mongo documents without the field deserialize to
+    // 0, which matches the 0 default embedded in tokens issued before this field
+    // existed — existing logins are therefore never invalidated by the upgrade.
+    @Builder.Default
+    private long tokenVersion = 0L;
+
     private UserRole role;
 
     private CrmBoutiqueProfile crmBoutiqueProfile;
