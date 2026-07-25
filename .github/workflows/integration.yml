@@ -400,7 +400,7 @@ jobs:
           # then deletes it in a `finally` block regardless of outcome (see
           # OcrController.java) — after the successful extract above, none
           # should remain in the container's own tmpdir.
-          leftover=$(docker compose exec -T backend sh -c "find /tmp -maxdepth 1 -name 'ocr-*' | wc -l" | tr -d '\r')
+          leftover=$(docker compose --env-file .env.docker exec -T backend sh -c "find /tmp -maxdepth 1 -name 'ocr-*' | wc -l" | tr -d '\r')
           echo "Leftover ocr-* temp files: $leftover"
           [ "$leftover" -eq 0 ] || { echo "::error::$leftover OCR temp file(s) were not cleaned up"; exit 1; }
 
@@ -439,7 +439,11 @@ jobs:
           admin_id=$(curl -fsS http://localhost/api/v1/users/me -H "Authorization: Bearer ${admin_token}" | jq -r '.id')
           [ -n "$admin_id" ] && [ "$admin_id" != "null" ] || { echo "::error::Could not resolve the seed admin's own id"; exit 1; }
 
-          convert -size 10x10 xc:blue /tmp/ci-profile-test.jpg
+          # ubuntu-latest has no ImageMagick `convert` by default (see the
+          # earlier upload smoke test's identical fix) — same base64-embed
+          # approach, blue instead of white only so this probe image is
+          # visibly distinct from that other test's.
+          echo "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAKAAoDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDxyiiiv3E8w//Z" | base64 -d > /tmp/ci-profile-test.jpg
           file_id=$(curl -fsS -X POST "http://localhost/api/v1/users/${admin_id}/profile-image" \
             -H "Authorization: Bearer ${admin_token}" \
             -F "file=@/tmp/ci-profile-test.jpg;type=image/jpeg" | jq -r '.profileImageFileId')
@@ -448,7 +452,7 @@ jobs:
           # mongosh's --eval printer may quote a bare string result
           # ('pfe-files' vs pfe-files depending on version) — strip
           # surrounding quotes/CR defensively rather than assume either way.
-          bucket=$(docker compose exec -T mongodb mongosh \
+          bucket=$(docker compose --env-file .env.docker exec -T mongodb mongosh \
             --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
             --eval "db.getSiblingDB('$MONGODB_DATABASE').file_metadata.findOne({_id: '$file_id'}).bucket" \
             | tr -d '\r' | sed "s/^'//; s/'\$//")
@@ -490,7 +494,7 @@ jobs:
           # (steps.minio-upload-test.outputs.file-id) rather than writing a
           # fresh one here.
           source .env.docker
-          docker compose exec -T mongodb mongosh \
+          docker compose --env-file .env.docker exec -T mongodb mongosh \
             --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
             --eval "db.getSiblingDB('$MONGODB_DATABASE').ci_persistence_probe.insertOne({probe: 'ci', at: new Date()})"
 
@@ -499,16 +503,16 @@ jobs:
           # frontend) — not just mongodb, so this actually exercises the
           # named volumes (mongodb_data, minio_data) end to end rather than
           # only MongoDB's.
-          docker compose restart mongodb minio backend frontend
+          docker compose --env-file .env.docker restart mongodb minio backend frontend
 
           wait_for_healthy() {
             local service="$1"
             for i in $(seq 1 15); do
-              status=$(docker compose ps "$service" --format '{{.Health}}')
+              status=$(docker compose --env-file .env.docker ps "$service" --format '{{.Health}}')
               [ "$status" = "healthy" ] && return 0
               if [ "$i" -eq 15 ]; then
                 echo "::error::$service did not become healthy again after restart"
-                docker compose logs "$service" --no-color | tail -50
+                docker compose --env-file .env.docker logs "$service" --no-color | tail -50
                 exit 1
               fi
               sleep 5
@@ -519,7 +523,7 @@ jobs:
           wait_for_healthy backend
           wait_for_healthy frontend
 
-          count=$(docker compose exec -T mongodb mongosh \
+          count=$(docker compose --env-file .env.docker exec -T mongodb mongosh \
             --username "$MONGODB_USERNAME" --password "$MONGODB_PASSWORD" --authenticationDatabase admin --quiet \
             --eval "db.getSiblingDB('$MONGODB_DATABASE').ci_persistence_probe.countDocuments({probe: 'ci'})")
           echo "Persisted probe count after restart: $count"
