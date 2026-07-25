@@ -197,14 +197,18 @@ jobs:
           # run, see the .env.docker generation step above), not hardcoded —
           # a fixed "pfe_internal" would either miss this run's real network
           # or, worse, collide with a concurrent run's.
-          docker run --rm --network "${COMPOSE_PROJECT_NAME}_internal" --entrypoint /bin/sh minio/mc:RELEASE.2025-04-08T15-39-49Z -c "
+          # minio/mc's image has no `grep` binary (confirmed: exit 127
+          # piping to it inside this container) — capture this run's stdout
+          # and check it on the runner's own shell instead.
+          output=$(docker run --rm --network "${COMPOSE_PROJECT_NAME}_internal" --entrypoint /bin/sh minio/mc:RELEASE.2025-04-08T15-39-49Z -c "
             mc alias set local http://minio:9000 '$MINIO_ACCESS_KEY' '$MINIO_SECRET_KEY' &&
             mc ls local/$MINIO_BUCKET >/dev/null &&
             echo 'ci-smoke-test' > /tmp/probe.txt &&
             mc cp /tmp/probe.txt local/$MINIO_BUCKET/ci-smoke-test.txt &&
-            mc cat local/$MINIO_BUCKET/ci-smoke-test.txt | grep -q ci-smoke-test &&
+            mc cat local/$MINIO_BUCKET/ci-smoke-test.txt &&
             mc rm local/$MINIO_BUCKET/ci-smoke-test.txt
-          "
+          ")
+          echo "$output" | grep -q ci-smoke-test
 
       - name: 'Smoke test: frontend-to-backend proxy + auth endpoint behavior'
         run: |
