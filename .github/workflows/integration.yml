@@ -349,9 +349,17 @@ jobs:
         if: steps.ocr-checkout.outcome == 'success'
         working-directory: pfe
         run: |
-          docker compose --env-file .env.docker --profile ocr up -d --build ocr
+          # -f docker-compose.yml -f docker-compose.debug.yml, matching
+          # every other docker compose invocation in this workflow: without
+          # debug.yml's port mapping, OCR has no host-published port at all
+          # (see docker-compose.yml's own comment on the ocr service) — the
+          # container's own internal healthcheck still passed (it hits its
+          # own localhost:8000 from inside the container either way), which
+          # is why the retry loop below broke out as "healthy" even though
+          # the final host-side curl then failed to connect at all.
+          docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.debug.yml --profile ocr up -d --build ocr
           for i in $(seq 1 30); do
-            status=$(docker compose --env-file .env.docker ps ocr --format '{{.Health}}' || echo "")
+            status=$(docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.debug.yml ps ocr --format '{{.Health}}' || echo "")
             [ "$status" = "healthy" ] && break
             [ "$i" -eq 30 ] && { echo "::error::OCR service did not become healthy"; exit 1; }
             sleep 10
