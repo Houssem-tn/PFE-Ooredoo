@@ -375,7 +375,13 @@ jobs:
         if: steps.ocr-checkout.outcome == 'success'
         run: |
           set -euo pipefail
-          convert -size 10x10 xc:white /tmp/ci-smoke-test.jpg
+          # ubuntu-latest runners don't ship ImageMagick's `convert` by
+          # default (confirmed: exit 127) — a real, valid 10x10 white JPEG,
+          # base64-embedded here instead of generated with an extra tool,
+          # since `base64` itself is always present. A heredoc would need
+          # its terminator unindented, breaking this step's YAML block
+          # scalar — kept on one variable-assignment line instead.
+          echo "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAKAAoDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q==" | base64 -d > /tmp/ci-smoke-test.jpg
           status=$(curl -s -o /tmp/ocr-response.json -w '%{http_code}' \
             -X POST http://localhost/api/v1/ocr/extract \
             -F "files=@/tmp/ci-smoke-test.jpg;type=image/jpeg")
