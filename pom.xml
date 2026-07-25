@@ -57,6 +57,13 @@
         <!-- NVD_API_KEY is read from the environment by the dependency-check
              plugin itself (nvdApiKeyEnvironmentVariable below) — never set a
              literal key here. -->
+        <!-- Pinned above Spring Boot 4.0.7's managed 11.0.22: fixes real,
+             actively-flagged CVEs in the rewrite valve and EncryptInterceptor
+             docs (CVE-2026-53434, CVE-2026-55276, CVE-2026-59083,
+             CVE-2026-59084, CVE-2026-53404 — all fixed by 11.0.23/11.0.24).
+             Remove this override once spring-boot-starter-parent ships a
+             patch release that pins >= 11.0.24 on its own. -->
+        <tomcat.version>11.0.24</tomcat.version>
     </properties>
     <dependencies>
         <!-- Web (correct starter) -->
