@@ -463,6 +463,22 @@
                     <suppressionFiles>
                         <suppressionFile>config/dependency-check/suppressions.xml</suppressionFile>
                     </suppressionFiles>
+                    <!-- Sonatype OSS Index is a supplementary, unauthenticated
+                         vulnerability data source layered on top of the NVD
+                         analyzer above. GitHub-hosted runners share IP pools
+                         across every public CI job worldwide, and OSS Index's
+                         anonymous quota is small enough that shared pool
+                         reliably exhausts it — confirmed 2026-07-25: every
+                         single dependency 401'd, escalating to a hard
+                         MojoExecutionException that aborted the scan before
+                         it ever reached CVE matching. The NVD analyzer
+                         (authenticated via NVD_API_KEY above) is the actual
+                         CVE/CPE-matching engine and is unaffected — it's what
+                         found every real finding fixed/suppressed in this
+                         project so far. Revisit if OSS Index credentials
+                         (OSSINDEX_USERNAME/OSSINDEX_TOKEN, free registration
+                         at ossindex.sonatype.org) are ever configured. -->
+                    <ossindexAnalyzerEnabled>false</ossindexAnalyzerEnabled>
                 </configuration>
             </plugin>
         </plugins>
