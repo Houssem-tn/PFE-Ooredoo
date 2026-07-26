@@ -1,6 +1,7 @@
 package com.pfe.case_management.service;
 
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pfe.case_management.dto.OcrResponse;
@@ -88,7 +89,7 @@ public class OcrClientService {
             if (detail != null && !detail.isBlank()) {
                 return detail;
             }
-        } catch (Exception ignored) {
+        } catch (JsonProcessingException ignored) {
             // Fall through to the generic message below — this is a
             // best-effort enrichment, not something that itself should be
             // able to fail the request.
