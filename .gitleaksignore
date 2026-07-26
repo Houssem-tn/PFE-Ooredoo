@@ -154,3 +154,12 @@ d59e67e8acef3e3341ac0fa8531b5a0a55d9ea48:.gitleaksignore:mongodb-uri-with-creden
 # suppression (see that file's comment) — but bffd7c0 itself remains
 # permanent history on this branch. Never a real credential.
 bffd7c0eb2afa88e05ee7591fbe04302700b11fa:.github/workflows/deploy-staging.yml:app-jwt-secret-literal:208
+
+# commit b60b1a0 (the very next commit, same day) — fixing bffd7c0 by
+# switching to the ci-only-dummy-jwt-secret-not-real-... convention
+# introduces a fresh finding at the same file/line/rule under its own new
+# commit SHA, since gitleaks fingerprints by exact commit rather than by
+# matched value. Same value, same reasoning as k8s-validate.yml's own
+# already-suppressed instance of this exact string. Never a real
+# credential.
+b60b1a0eb82457e1d8f271ecd5dee9d523a7171f:.github/workflows/deploy-staging.yml:app-jwt-secret-literal:208
