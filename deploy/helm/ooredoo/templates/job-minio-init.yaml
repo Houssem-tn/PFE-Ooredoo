@@ -50,6 +50,17 @@ spec:
             capabilities:
               drop: ["ALL"]
           env:
+            # mc has no /etc/passwd entry for UID 1000 in this image, so
+            # $HOME resolves to "/" by default — `mc alias set` then tries
+            # to create /.mc, which UID 1000 has no permission to write
+            # (readOnlyRootFilesystem: false only lifts the container-level
+            # restriction, it doesn't grant Unix write permission on /).
+            # Confirmed via a real k3d deployment: every mc invocation
+            # failed with "mkdir /.mc: permission denied" until this was
+            # set. /tmp is writable regardless of the image's own user
+            # setup.
+            - name: HOME
+              value: /tmp
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
