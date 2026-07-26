@@ -246,6 +246,20 @@ spec:
             description: "cert-manager should auto-renew before this fires under normal operation — a firing alert means renewal itself is failing, not just 'a cert is aging'."
         {{- end }}
 
+    {{- /*
+    This entire group is conditional on the outer if below, not just its
+    rules — every rule inside it is itself gated on backup.mongodb.enabled
+    / backup.minio.enabled, so with both at their chart default (false),
+    "rules:" would have nothing after it, rendering as `rules: null`
+    (Prometheus Operator's real CRD schema requires `rules` to be a JSON
+    array; a null fails schema validation outright — confirmed via
+    kubeconform against the CRDs-catalog PrometheusRule schema:
+    "/spec/groups/4/rules ... expected array, but got null"). Omitting the
+    whole group when neither backup is enabled is correct here rather than
+    inventing a placeholder rule: an alert group with no real rules isn't
+    meaningful monitoring, it's a schema workaround.
+    */}}
+    {{- if or .Values.backup.mongodb.enabled .Values.backup.minio.enabled }}
     - name: ooredoo.backup
       rules:
         {{- if .Values.backup.mongodb.enabled }}
@@ -290,4 +304,5 @@ spec:
           annotations:
             summary: "No successful MinIO backup in over 25 hours"
         {{- end }}
+    {{- end }}
 {{- end }}

@@ -95,6 +95,11 @@ spec:
                 capabilities:
                   drop: ["ALL"]
               env:
+                # See templates/job-minio-init.yaml's comment: mc has no
+                # /etc/passwd entry for this non-root UID, so $HOME
+                # defaults to "/" and `mc alias set` fails to create /.mc.
+                - name: HOME
+                  value: /tmp
                 - name: DEST_ACCESS_KEY
                   valueFrom:
                     secretKeyRef:

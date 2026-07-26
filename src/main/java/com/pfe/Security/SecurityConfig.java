@@ -51,11 +51,19 @@ public class SecurityConfig {
                 // and short-circuits preflight, but permit it explicitly so it
                 // can never fall through to .anyRequest().authenticated().
                 .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
-                // Container/orchestrator health checks (no JWT available). Only
-                // /actuator/health* is ever mapped — management.endpoints.web
-                // .exposure.include=health keeps every other Actuator endpoint
-                // unmapped regardless of this permitAll.
-                .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+                // Container/orchestrator health checks (no JWT available), and
+                // the Prometheus scrape endpoint (no JWT available either — a
+                // ServiceMonitor has no way to carry one). Both are safe to
+                // expose without auth here because neither is ever reachable
+                // outside the cluster: the backend Service is ClusterIP-only
+                // and the Ingress never routes to it (see KUBERNETES.md
+                // "Kubernetes monitoring resources"). management.endpoints.web
+                // .exposure.include=health,prometheus,info keeps every other
+                // Actuator endpoint unmapped regardless of this permitAll.
+                // Found via a real k3d deployment with monitoring enabled
+                // (Phase 4): Prometheus's own target list showed backend as
+                // "down" with a 401 until /actuator/prometheus was added here.
+                .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus").permitAll()
                 .requestMatchers("/api/v1/auth/**", "/api/v1/public/**").permitAll()
                 .requestMatchers("/api/v1/tech-invitations/validate").permitAll()
                 .requestMatchers("/api/v1/files/*/view").permitAll()

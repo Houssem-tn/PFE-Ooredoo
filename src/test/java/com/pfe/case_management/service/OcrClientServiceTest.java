@@ -7,11 +7,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
+
+import java.nio.charset.StandardCharsets;
 
 import java.io.File;
 
@@ -76,6 +80,21 @@ class OcrClientServiceTest {
         assertThatThrownBy(() -> service.extract(new File("dummy.png")))
                 .isInstanceOf(RuntimeException.class)
                 .hasMessageContaining("OCR extraction failed");
+    }
+
+    @Test
+    void extract_shouldTranslateOcrRejectionIntoIllegalArgumentExceptionWithRealReason() {
+        String ocrBody = "{\"detail\":\"Unsupported file extension\"}";
+        HttpClientErrorException rejection = HttpClientErrorException.create(
+                HttpStatus.BAD_REQUEST, "Bad Request", HttpHeaders.EMPTY,
+                ocrBody.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+
+        when(restTemplate.postForEntity(eq("http://ocr.invalid/extract"), any(), eq(OcrResponse.class)))
+                .thenThrow(rejection);
+
+        assertThatThrownBy(() -> service.extract(new File("dummy.png")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Unsupported file extension");
     }
 
     @Test
