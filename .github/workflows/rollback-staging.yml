@@ -1,0 +1,171 @@
+name: Rollback staging
+
+# Controlled rollback of the ooredoo-staging Helm release. Same trust
+# model as deploy-staging.yml: workflow_dispatch only, self-hosted runner
+# only, never pull_request/pull_request_target.
+on:
+  workflow_dispatch:
+    inputs:
+      target_revision:
+        description: "Helm revision to roll back to (must be a known-safe, post-immutable-fix revision - see the hard-coded minimum below)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same group as deploy-staging.yml on purpose: a rollback and a forward
+  # deployment must never run against the release at the same time.
+  group: ooredoo-staging-deployment
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Roll back ooredoo-staging
+    runs-on: [self-hosted, ooredoo-staging]
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: http://ooredoo.localhost:8081
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Routed through env instead of interpolating ${{ inputs.target_revision }}
+      # directly into run: script bodies - see deploy-staging.yml's
+      # identical comment for why.
+      TARGET_REVISION: ${{ inputs.target_revision }}
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm this is a trusted, non-PR trigger
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "::error::rollback-staging must only run from workflow_dispatch, got ${{ github.event_name }}"
+            exit 1
+          fi
+
+      - name: Assert Kubernetes context is k3d-ooredoo-staging
+        run: |
+          set -euo pipefail
+          ctx=$(kubectl config current-context)
+          echo "current-context: $ctx"
+          [ "$ctx" = "k3d-ooredoo-staging" ] || { echo "::error::context is '$ctx', expected k3d-ooredoo-staging"; exit 1; }
+
+      - name: Assert namespace ooredoo-staging exists
+        run: kubectl get namespace ooredoo-staging -o name
+
+      # Hard floor: revisions 1-9 on this release predate the Phase 4 fix
+      # for the volumeClaimTemplates-labels-are-immutable defect (fixed at
+      # chart commit 8285f33, first deployed as part of revision 10).
+      # Rolling back to any of those revisions would re-apply the old,
+      # broken volumeClaimTemplates labels and fail exactly the way
+      # Phase 4 documented. This number is deliberately hard-coded, not
+      # read from anywhere dynamic - the whole point is that it must never
+      # silently drift.
+      - name: Reject a rollback target older than the immutable-label fix
+        run: |
+          set -euo pipefail
+          MIN_SAFE_REVISION=10
+          if ! [[ "$TARGET_REVISION" =~ ^[0-9]+$ ]]; then
+            echo "::error::target_revision must be a positive integer, got '$TARGET_REVISION'"
+            exit 1
+          fi
+          if [ "$TARGET_REVISION" -lt "$MIN_SAFE_REVISION" ]; then
+            echo "::error::revision $TARGET_REVISION predates the Phase 4 volumeClaimTemplates immutable-label fix (safe floor: $MIN_SAFE_REVISION). Refusing to roll back to it."
+            exit 1
+          fi
+
+      - name: Confirm the requested revision exists
+        run: |
+          set -euo pipefail
+          helm history ooredoo-staging -n ooredoo-staging -o json | \
+            python -c "
+          import json, os, sys
+          revisions = {r['revision'] for r in json.load(sys.stdin)}
+          target = int(os.environ['TARGET_REVISION'])
+          if target not in revisions:
+              print(f'::error::revision {target} does not exist in this release history: {sorted(revisions)}')
+              sys.exit(1)
+          print(f'revision {target} exists in history')
+          "
+
+      - name: Confirm PVCs are Bound before rollback
+        run: |
+          set -euo pipefail
+          for pvc in mongodb-data-mongodb-0 minio-data-minio-0; do
+            phase=$(kubectl get pvc "$pvc" -n ooredoo-staging -o jsonpath='{.status.phase}')
+            echo "$pvc: $phase"
+            [ "$phase" = "Bound" ] || { echo "::error::$pvc is not Bound, refusing to roll back"; exit 1; }
+          done
+
+      - name: Record MongoDB/MinIO test data before rollback
+        id: before
+        run: |
+          set -euo pipefail
+          MONGO_USER=$(kubectl get secret mongodb-secret -n ooredoo-staging -o jsonpath='{.data.mongodb-username}' | base64 -d)
+          MONGO_PASS=$(kubectl get secret mongodb-secret -n ooredoo-staging -o jsonpath='{.data.mongodb-password}' | base64 -d)
+          count=$(kubectl exec -n ooredoo-staging mongodb-0 -- mongosh --quiet --username "$MONGO_USER" --password "$MONGO_PASS" \
+            --authenticationDatabase admin --eval "db.getSiblingDB('pfe').users.countDocuments({})")
+          echo "user_count_before=$count" >> "$GITHUB_OUTPUT"
+          echo "MongoDB user count before rollback: $count"
+          unset MONGO_USER MONGO_PASS
+
+      - name: Record current Helm revision before rollback
+        run: helm history ooredoo-staging -n ooredoo-staging
+
+      - name: Helm rollback
+        run: helm rollback ooredoo-staging "$TARGET_REVISION" -n ooredoo-staging --wait --timeout 10m
+
+      - name: Verify rollout after rollback
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/backend -n ooredoo-staging --timeout=300s
+          kubectl rollout status deployment/frontend -n ooredoo-staging --timeout=300s
+          kubectl rollout status deployment/ocr -n ooredoo-staging --timeout=300s
+          kubectl rollout status statefulset/mongodb -n ooredoo-staging --timeout=300s
+          kubectl rollout status statefulset/minio -n ooredoo-staging --timeout=300s
+          kubectl get pods -n ooredoo-staging
+
+      - name: Verify PVCs remain Bound after rollback
+        run: |
+          set -euo pipefail
+          for pvc in mongodb-data-mongodb-0 minio-data-minio-0; do
+            phase=$(kubectl get pvc "$pvc" -n ooredoo-staging -o jsonpath='{.status.phase}')
+            [ "$phase" = "Bound" ] || { echo "::error::$pvc is not Bound after rollback"; exit 1; }
+          done
+          echo "Both PVCs remain Bound after rollback."
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            deploy/ci-scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Verify backend readiness, authentication, MinIO, MongoDB, OCR
+        run: bash deploy/ci-scripts/smoke-test-staging.sh
+
+      - name: Verify WebSocket/STOMP through Ingress
+        run: bash deploy/ci-scripts/ws-stomp-test-staging.sh
+
+      - name: Verify MongoDB data survived the rollback
+        run: |
+          set -euo pipefail
+          MONGO_USER=$(kubectl get secret mongodb-secret -n ooredoo-staging -o jsonpath='{.data.mongodb-username}' | base64 -d)
+          MONGO_PASS=$(kubectl get secret mongodb-secret -n ooredoo-staging -o jsonpath='{.data.mongodb-password}' | base64 -d)
+          count=$(kubectl exec -n ooredoo-staging mongodb-0 -- mongosh --quiet --username "$MONGO_USER" --password "$MONGO_PASS" \
+            --authenticationDatabase admin --eval "db.getSiblingDB('pfe').users.countDocuments({})")
+          echo "MongoDB user count after rollback: $count (was ${{ steps.before.outputs.user_count_before }} before)"
+          if [ "$count" -lt "${{ steps.before.outputs.user_count_before }}" ]; then
+            echo "::error::user count decreased after rollback ($count < ${{ steps.before.outputs.user_count_before }}) - possible data loss"
+            exit 1
+          fi
+          unset MONGO_USER MONGO_PASS
+
+      - name: Verify Prometheus targets after rollback
+        run: bash deploy/ci-scripts/verify-monitoring-staging.sh
+
+      - name: Record final Helm revision
+        run: helm history ooredoo-staging -n ooredoo-staging

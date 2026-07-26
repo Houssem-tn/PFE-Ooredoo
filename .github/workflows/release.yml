@@ -1,0 +1,249 @@
+name: Release orchestrator
+
+# Phase 5 canonical release orchestrator. Never builds/rebuilds an image
+# itself - each of the three repos' own ci.yml remains the sole build+SBOM+
+# Trivy+push pipeline (already proven since Phase 1). This workflow only:
+#   1. verifies the three already-published GHCR images (by digest) exist
+#      and are pullable;
+#   2. generates a machine-readable release manifest recording exact
+#      source SHAs, image digests, Helm chart version and workflow run
+#      IDs;
+#   3. validates that manifest against deploy/releases/schema/release.schema.json;
+#   4. publishes the manifest as a workflow artifact and (optionally) a
+#      GitHub Release asset.
+# This is deliberately the only place a "release" is assembled from, so
+# the same verified image digest can be promoted staging -> production
+# later without ever being rebuilt (see deploy-staging.yml, which consumes
+# this manifest's images.*.digest fields, never a tag it resolves itself).
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "Unique release identifier (e.g. v1.0.0 or a run-based id). Must not already exist under deploy/releases/."
+        required: true
+        type: string
+      target_environment:
+        description: "Environment this release is intended for"
+        required: true
+        type: choice
+        options: [staging, production]
+        default: staging
+      previous_release_id:
+        description: "releaseId this one supersedes (blank if none)"
+        required: false
+        type: string
+      backend_sha:
+        description: "Backend source commit SHA (40 hex chars)"
+        required: true
+        type: string
+      backend_image_tag:
+        description: "Backend image tag actually published (e.g. sha-3c95bd1 or v1.0.0)"
+        required: true
+        type: string
+      backend_image_digest:
+        description: "Backend image digest (sha256:...)"
+        required: true
+        type: string
+      backend_ci_run_id:
+        description: "Backend ci.yml run ID that produced this image"
+        required: false
+        type: string
+      frontend_sha:
+        description: "Frontend source commit SHA (40 hex chars)"
+        required: true
+        type: string
+      frontend_image_tag:
+        required: true
+        type: string
+      frontend_image_digest:
+        required: true
+        type: string
+      frontend_ci_run_id:
+        required: false
+        type: string
+      ocr_sha:
+        description: "OCR source commit SHA (40 hex chars)"
+        required: true
+        type: string
+      ocr_image_tag:
+        required: true
+        type: string
+      ocr_image_digest:
+        required: true
+        type: string
+      ocr_ci_run_id:
+        required: false
+        type: string
+      create_github_release:
+        description: "Also create a GitHub Release with the manifest attached"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release manifest generation at a time - prevents two concurrent
+  # runs from racing to write the same releaseId.
+  group: ooredoo-release
+  cancel-in-progress: false
+
+env:
+  BACKEND_REPO: Houssem-tn/PFE-Ooredoo
+  FRONTEND_REPO: Houssem-tn/Pfe-Oreedoo-Front
+  OCR_REPO: Houssem-tn/ooredoo-ocr
+
+jobs:
+  release:
+    name: Assemble and validate release manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # only needed to create the optional GitHub Release
+      packages: read # only needed to verify GHCR digests are pullable
+    env:
+      # Every workflow_dispatch input routed through env instead of being
+      # interpolated as ${{ inputs.X }} directly into run: script bodies -
+      # GitHub Actions substitutes ${{ }} expressions as raw text before
+      # the shell ever runs, so a value containing shell metacharacters
+      # could break out of quoting. Env vars go through the runner's own
+      # environment mechanism instead, which isn't subject to that
+      # substitution step.
+      RELEASE_ID: ${{ inputs.release_id }}
+      TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+      PREVIOUS_RELEASE_ID: ${{ inputs.previous_release_id }}
+      BACKEND_SHA: ${{ inputs.backend_sha }}
+      BACKEND_IMAGE_TAG: ${{ inputs.backend_image_tag }}
+      BACKEND_IMAGE_DIGEST: ${{ inputs.backend_image_digest }}
+      BACKEND_CI_RUN_ID: ${{ inputs.backend_ci_run_id }}
+      FRONTEND_SHA: ${{ inputs.frontend_sha }}
+      FRONTEND_IMAGE_TAG: ${{ inputs.frontend_image_tag }}
+      FRONTEND_IMAGE_DIGEST: ${{ inputs.frontend_image_digest }}
+      FRONTEND_CI_RUN_ID: ${{ inputs.frontend_ci_run_id }}
+      OCR_SHA: ${{ inputs.ocr_sha }}
+      OCR_IMAGE_TAG: ${{ inputs.ocr_image_tag }}
+      OCR_IMAGE_DIGEST: ${{ inputs.ocr_image_digest }}
+      OCR_CI_RUN_ID: ${{ inputs.ocr_ci_run_id }}
+    steps:
+      - name: Validate SHA inputs look like real commit SHAs
+        run: |
+          set -euo pipefail
+          for sha in "$BACKEND_SHA" "$FRONTEND_SHA" "$OCR_SHA"; do
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::'$sha' is not a 40-character hex commit SHA"
+              exit 1
+            fi
+          done
+          for digest in "$BACKEND_IMAGE_DIGEST" "$FRONTEND_IMAGE_DIGEST" "$OCR_IMAGE_DIGEST"; do
+            if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::'$digest' is not a well-formed sha256 digest"
+              exit 1
+            fi
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            deploy/releases/schema
+            deploy/ci-scripts
+            deploy/helm/ooredoo/Chart.yaml
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install manifest validator dependency
+        run: pip install --quiet --disable-pip-version-check jsonschema
+
+      - name: Reject an already-used release id
+        run: |
+          set -euo pipefail
+          if [ -f "deploy/releases/release-${RELEASE_ID}.json" ]; then
+            echo "::error::deploy/releases/release-${RELEASE_ID}.json already exists - releaseId must be unique, never overwritten"
+            exit 1
+          fi
+
+      - name: Log in to GHCR (read-only verification)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Confirms each image genuinely exists at the exact digest claimed -
+      # never trusts the input digest without checking GHCR itself. A
+      # failure here means the workflow_dispatch inputs were wrong, not
+      # that anything gets deployed on faith.
+      - name: Verify backend image digest is pullable from GHCR
+        run: docker buildx imagetools inspect "ghcr.io/houssem-tn/ooredoo-backend@${BACKEND_IMAGE_DIGEST}"
+
+      - name: Verify frontend image digest is pullable from GHCR
+        run: docker buildx imagetools inspect "ghcr.io/houssem-tn/ooredoo-frontend@${FRONTEND_IMAGE_DIGEST}"
+
+      - name: Verify ocr image digest is pullable from GHCR
+        run: docker buildx imagetools inspect "ghcr.io/houssem-tn/ooredoo-ocr@${OCR_IMAGE_DIGEST}"
+
+      - name: Read chart version
+        id: chart
+        run: |
+          version=$(grep '^version:' deploy/helm/ooredoo/Chart.yaml | awk '{print $2}')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release manifest
+        env:
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/releases
+          python deploy/ci-scripts/generate-release-manifest.py \
+            --release-id "$RELEASE_ID" \
+            --target-environment "$TARGET_ENVIRONMENT" \
+            --previous-release-id "$PREVIOUS_RELEASE_ID" \
+            --backend-repo "$BACKEND_REPO" --backend-sha "$BACKEND_SHA" \
+            --backend-image-repo "ghcr.io/houssem-tn/ooredoo-backend" \
+            --backend-image-tag "$BACKEND_IMAGE_TAG" \
+            --backend-image-digest "$BACKEND_IMAGE_DIGEST" \
+            --backend-ci-run-id "$BACKEND_CI_RUN_ID" \
+            --backend-sbom-artifact "backend-sbom" \
+            --frontend-repo "$FRONTEND_REPO" --frontend-sha "$FRONTEND_SHA" \
+            --frontend-image-repo "ghcr.io/houssem-tn/ooredoo-frontend" \
+            --frontend-image-tag "$FRONTEND_IMAGE_TAG" \
+            --frontend-image-digest "$FRONTEND_IMAGE_DIGEST" \
+            --frontend-ci-run-id "$FRONTEND_CI_RUN_ID" \
+            --frontend-sbom-artifact "frontend-sbom" \
+            --ocr-repo "$OCR_REPO" --ocr-sha "$OCR_SHA" \
+            --ocr-image-repo "ghcr.io/houssem-tn/ooredoo-ocr" \
+            --ocr-image-tag "$OCR_IMAGE_TAG" \
+            --ocr-image-digest "$OCR_IMAGE_DIGEST" \
+            --ocr-ci-run-id "$OCR_CI_RUN_ID" \
+            --ocr-sbom-artifact "ocr-sbom" \
+            --chart-version "$CHART_VERSION" \
+            --release-run-id "${{ github.run_id }}" \
+            --output "deploy/releases/release-${RELEASE_ID}.json"
+
+      - name: Validate release manifest against schema
+        run: python deploy/ci-scripts/validate-release-manifest.py "deploy/releases/release-${RELEASE_ID}.json"
+
+      - name: Upload release manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-${{ inputs.release_id }}
+          path: deploy/releases/release-${{ inputs.release_id }}.json
+          retention-days: 90
+
+      - name: Create GitHub Release with manifest attached
+        if: inputs.create_github_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          is_prerelease=false
+          [ "$TARGET_ENVIRONMENT" = "staging" ] && is_prerelease=true
+          gh release create "release-${RELEASE_ID}" \
+            "deploy/releases/release-${RELEASE_ID}.json" \
+            --title "Release ${RELEASE_ID} (${TARGET_ENVIRONMENT})" \
+            --notes "Automated release manifest. Target: ${TARGET_ENVIRONMENT}. Backend ${BACKEND_SHA}, frontend ${FRONTEND_SHA}, ocr ${OCR_SHA}." \
+            --draft=false \
+            --prerelease=$is_prerelease

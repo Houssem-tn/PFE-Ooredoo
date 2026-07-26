@@ -54,6 +54,18 @@ def main():
 
     args = p.parse_args()
 
+    # GitHub Actions passes blank optional inputs as empty strings, not
+    # absent - normalize those back to None so the manifest matches the
+    # schema's intent ("null when not known/applicable"), not a stray "".
+    optional_fields = [
+        "previous_release_id",
+        "backend_ci_run_id", "frontend_ci_run_id", "ocr_ci_run_id",
+        "helm_release_revision", "release_run_id", "deploy_staging_run_id",
+    ]
+    for field in optional_fields:
+        if getattr(args, field) == "":
+            setattr(args, field, None)
+
     manifest = {
         "releaseId": args.release_id,
         "releaseTimestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
