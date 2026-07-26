@@ -205,10 +205,10 @@ jobs:
             --set-string backend.image.digest="$BACKEND_DIGEST" \
             --set-string frontend.image.digest="$FRONTEND_DIGEST" \
             --set-string ocr.image.digest="$OCR_DIGEST" \
-            --set-string backend.secrets.jwtSecret=ci-render-only-not-applied \
-            --set-string mongodb.auth.password=ci-render-only-not-applied \
-            --set-string minio.auth.accessKey=ci-render-only-not-applied \
-            --set-string minio.auth.secretKey=ci-render-only-not-applied \
+            --set-string backend.secrets.jwtSecret=ci-only-dummy-jwt-secret-not-real-0000000000 \
+            --set-string mongodb.auth.password=ci-only-dummy-mongo-password \
+            --set-string minio.auth.accessKey=ci-only-dummy-minio-access \
+            --set-string minio.auth.secretKey=ci-only-dummy-minio-secret \
             > rendered-staging-deploy.yaml
           grep -c '^kind:' rendered-staging-deploy.yaml
 
