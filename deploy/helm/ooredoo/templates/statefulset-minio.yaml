@@ -86,7 +86,12 @@ spec:
     - metadata:
         name: minio-data
         labels:
-          {{- include "ooredoo.labels" . | nindent 10 }}
+          # See templates/statefulset-mongodb.yaml's identical comment:
+          # volumeClaimTemplates is an immutable StatefulSet spec field,
+          # so it must use selectorLabels (name+instance only), never
+          # ooredoo.labels (chart version + commonLabels, either of which
+          # changing would break every future `helm upgrade`).
+          {{- include "ooredoo.selectorLabels" (dict "name" "minio" "context" $) | nindent 10 }}
       spec:
         accessModes:
           - {{ .Values.minio.persistence.accessMode }}

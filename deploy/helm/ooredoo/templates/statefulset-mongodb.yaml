@@ -101,7 +101,17 @@ spec:
     - metadata:
         name: mongodb-data
         labels:
-          {{- include "ooredoo.labels" . | nindent 10 }}
+          # selectorLabels, not ooredoo.labels: volumeClaimTemplates is an
+          # immutable StatefulSet spec field (Kubernetes only allows
+          # replicas/ordinals/template/updateStrategy/revisionHistoryLimit/
+          # persistentVolumeClaimRetentionPolicy/minReadySeconds to change
+          # post-creation) - ooredoo.labels includes the chart version
+          # string and commonLabels, either of which changing would make
+          # every future `helm upgrade` fail outright for any real
+          # deployment with existing data. Confirmed via a real k3d
+          # deployment (Phase 4): adding a commonLabels entry failed with
+          # "Forbidden: updates to statefulset spec ... are forbidden".
+          {{- include "ooredoo.selectorLabels" (dict "name" "mongodb" "context" $) | nindent 10 }}
       spec:
         accessModes:
           - {{ .Values.mongodb.persistence.accessMode }}
