@@ -1,6 +1,8 @@
 package com.pfe.case_management.service;
 
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pfe.case_management.dto.OcrResponse;
 import com.pfe.config.RequestCorrelationFilter;
 import com.pfe.metrics.BusinessMetrics;
@@ -12,6 +14,7 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import java.io.File;
 
@@ -61,8 +64,35 @@ public class OcrClientService {
 
             success = true;
             return response.getBody();
+        } catch (HttpClientErrorException e) {
+            // The OCR service already rejects invalid input (unsupported
+            // extension, empty/corrupted image, etc.) with its own 4xx +
+            // a real reason in the FastAPI HTTPException `detail` field —
+            // RestTemplate throws before reaching the manual status check
+            // above, so without this catch the real reason was discarded
+            // and every rejection surfaced to the actual API caller as an
+            // opaque 500 "An unexpected error occurred" instead of a 400
+            // naming the actual problem. Found via a real k3d deployment
+            // (Phase 4): a non-image file and an empty file both got a
+            // clean 400 from OCR's own access log, but the client saw 500.
+            throw new IllegalArgumentException(extractOcrRejectionReason(e));
         } finally {
             businessMetrics.recordOcrRequest(System.nanoTime() - started, success);
         }
+    }
+
+    private String extractOcrRejectionReason(HttpClientErrorException e) {
+        try {
+            JsonNode node = new ObjectMapper().readTree(e.getResponseBodyAsString());
+            String detail = node.path("detail").asText(null);
+            if (detail != null && !detail.isBlank()) {
+                return detail;
+            }
+        } catch (Exception ignored) {
+            // Fall through to the generic message below — this is a
+            // best-effort enrichment, not something that itself should be
+            // able to fail the request.
+        }
+        return "OCR rejected the file";
     }
 }
