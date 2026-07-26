@@ -31,7 +31,7 @@ spec:
         {{- toYaml .Values.ocr.podSecurityContext | nindent 8 }}
       containers:
         - name: ocr
-          image: "{{ .Values.ocr.image.repository }}:{{ .Values.ocr.image.tag }}"
+          image: "{{ include "ooredoo.image" .Values.ocr.image }}"
           imagePullPolicy: {{ .Values.ocr.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.ocr.securityContext | nindent 12 }}

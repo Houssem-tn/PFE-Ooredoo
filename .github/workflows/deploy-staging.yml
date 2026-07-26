@@ -1,0 +1,331 @@
+name: Deploy staging
+
+# Controlled, auditable staging deployment. Never triggered by
+# pull_request/pull_request_target - workflow_dispatch only, and the
+# actual cluster-touching job only ever runs on the dedicated self-hosted
+# runner (label ooredoo-staging), never a GitHub-hosted or PR-triggered
+# runner. See deploy/docs/CD_ARCHITECTURE.md for the full split rationale.
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "releaseId of the release manifest to deploy (must already exist as a GitHub Release asset, published by release.yml)"
+        required: true
+        type: string
+      helm_timeout:
+        description: "Helm --timeout for the upgrade/rollout wait"
+        required: false
+        type: string
+        default: "10m"
+      dry_run:
+        description: "Render and validate everything, but do not run helm upgrade --install"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  # Serializes every staging deployment - a second dispatch queues behind
+  # the first rather than racing it. Never cancel-in-progress: an
+  # in-flight helm upgrade must finish (or be rolled back deliberately),
+  # not be killed mid-rollout.
+  group: ooredoo-staging-deployment
+  cancel-in-progress: false
+
+env:
+  BACKEND_REPO: Houssem-tn/PFE-Ooredoo
+
+jobs:
+  # Everything that does NOT need cluster access happens here, on a
+  # GitHub-hosted runner - keeps the self-hosted runner's exposure to
+  # exactly "already-validated, already-verified inputs only".
+  validate-release:
+    name: Validate release manifest and image digests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Never run this (or anything in this workflow) for a fork PR - there
+    # is no pull_request trigger at all, but this is a second, explicit
+    # belt-and-braces guard in case a future edit ever adds one.
+    if: github.repository == 'Houssem-tn/PFE-Ooredoo' && github.event_name == 'workflow_dispatch'
+    env:
+      # Routed through env instead of interpolating ${{ inputs.release_id }}
+      # directly into run: script bodies - GitHub Actions substitutes
+      # ${{ }} expressions as raw text before the shell ever runs, so an
+      # input containing shell metacharacters could break out of quoting.
+      # An env var is passed through the runner's environment mechanism
+      # instead, which is not subject to that substitution step.
+      RELEASE_ID: ${{ inputs.release_id }}
+    outputs:
+      backend_repository: ${{ steps.manifest.outputs.backend_repository }}
+      backend_digest: ${{ steps.manifest.outputs.backend_digest }}
+      frontend_repository: ${{ steps.manifest.outputs.frontend_repository }}
+      frontend_digest: ${{ steps.manifest.outputs.frontend_digest }}
+      ocr_repository: ${{ steps.manifest.outputs.ocr_repository }}
+      ocr_digest: ${{ steps.manifest.outputs.ocr_digest }}
+      chart_version: ${{ steps.manifest.outputs.chart_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            deploy/releases/schema
+            deploy/ci-scripts
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install manifest validator dependency
+        run: pip install --quiet --disable-pip-version-check jsonschema
+
+      - name: Download release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "release-${RELEASE_ID}" \
+            --repo "${BACKEND_REPO}" \
+            -p "release-${RELEASE_ID}.json" \
+            -D manifest
+
+      - name: Validate release manifest against schema
+        run: python deploy/ci-scripts/validate-release-manifest.py "manifest/release-${RELEASE_ID}.json"
+
+      - name: Extract manifest fields
+        id: manifest
+        run: |
+          python - <<'PYEOF'
+          import json, os
+          m = json.load(open(f"manifest/release-{os.environ['RELEASE_ID']}.json"))
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a") as f:
+              for component in ("backend", "frontend", "ocr"):
+                  img = m["images"][component]
+                  f.write(f"{component}_repository={img['repository']}\n")
+                  f.write(f"{component}_digest={img['digest']}\n")
+              f.write(f"chart_version={m['helm']['chartVersion']}\n")
+          PYEOF
+
+      - name: Log in to GHCR (read-only verification)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify every image digest is pullable from GHCR
+        env:
+          BACKEND_REPOSITORY: ${{ steps.manifest.outputs.backend_repository }}
+          BACKEND_DIGEST: ${{ steps.manifest.outputs.backend_digest }}
+          FRONTEND_REPOSITORY: ${{ steps.manifest.outputs.frontend_repository }}
+          FRONTEND_DIGEST: ${{ steps.manifest.outputs.frontend_digest }}
+          OCR_REPOSITORY: ${{ steps.manifest.outputs.ocr_repository }}
+          OCR_DIGEST: ${{ steps.manifest.outputs.ocr_digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${BACKEND_REPOSITORY}@${BACKEND_DIGEST}"
+          docker buildx imagetools inspect "${FRONTEND_REPOSITORY}@${FRONTEND_DIGEST}"
+          docker buildx imagetools inspect "${OCR_REPOSITORY}@${OCR_DIGEST}"
+
+  deploy:
+    name: Deploy to k3d-ooredoo-staging
+    needs: validate-release
+    runs-on: [self-hosted, ooredoo-staging]
+    timeout-minutes: 30
+    environment:
+      name: staging
+      url: http://ooredoo.localhost:8081
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm this is a trusted, non-PR trigger
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "::error::deploy-staging must only run from workflow_dispatch, got ${{ github.event_name }}"
+            exit 1
+          fi
+
+      - name: Assert Kubernetes context is k3d-ooredoo-staging
+        run: |
+          set -euo pipefail
+          ctx=$(kubectl config current-context)
+          echo "current-context: $ctx"
+          if [ "$ctx" != "k3d-ooredoo-staging" ]; then
+            echo "::error::kubectl context is '$ctx', expected 'k3d-ooredoo-staging' - stopping, this runner must never touch another cluster"
+            exit 1
+          fi
+
+      - name: Assert namespace ooredoo-staging exists
+        run: |
+          set -euo pipefail
+          kubectl get namespace ooredoo-staging -o name
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            deploy/helm/ooredoo
+            deploy/ci-scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Record current Helm revision and image digests (pre-deploy)
+        id: before
+        run: |
+          set -euo pipefail
+          revision=$(helm list -n ooredoo-staging -f '^ooredoo-staging$' -o json | python -c "import json,sys; d=json.load(sys.stdin); print(d[0]['revision'] if d else 'none')")
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "Pre-deploy Helm revision: $revision"
+          echo "--- current pod images (imageID, not just tag) ---"
+          kubectl get pods -n ooredoo-staging -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+          echo "--- current pod/PVC state ---"
+          kubectl get pods,pvc -n ooredoo-staging -o wide
+
+      - name: Helm dependency build
+        run: helm dependency build deploy/helm/ooredoo
+
+      - name: Helm lint
+        run: helm lint deploy/helm/ooredoo -f deploy/helm/ooredoo/values-staging.yaml
+
+      - name: Render the exact deployment (digest-pinned images from the release manifest)
+        env:
+          BACKEND_DIGEST: ${{ needs.validate-release.outputs.backend_digest }}
+          FRONTEND_DIGEST: ${{ needs.validate-release.outputs.frontend_digest }}
+          OCR_DIGEST: ${{ needs.validate-release.outputs.ocr_digest }}
+        run: |
+          set -euo pipefail
+          helm template ooredoo-staging deploy/helm/ooredoo \
+            -n ooredoo-staging \
+            -f deploy/helm/ooredoo/values-staging.yaml \
+            --set-string backend.image.digest="$BACKEND_DIGEST" \
+            --set-string frontend.image.digest="$FRONTEND_DIGEST" \
+            --set-string ocr.image.digest="$OCR_DIGEST" \
+            --set-string backend.secrets.jwtSecret=ci-only-dummy-jwt-secret-not-real-0000000000 \
+            --set-string mongodb.auth.password=ci-only-dummy-mongo-password \
+            --set-string minio.auth.accessKey=ci-only-dummy-minio-access \
+            --set-string minio.auth.secretKey=ci-only-dummy-minio-secret \
+            > rendered-staging-deploy.yaml
+          grep -c '^kind:' rendered-staging-deploy.yaml
+
+      - name: Structural preflight - block unexpected destructive changes
+        run: |
+          set -euo pipefail
+          # A deliberately narrow, fast structural check (not a full
+          # `helm diff`, which isn't installed here): the exact class of
+          # regression this repo has actually hit before (Phase 4's
+          # immutable volumeClaimTemplates incident) is caught by
+          # confirming neither StatefulSet's volumeClaimTemplates PVC name
+          # or storage class changed versus what's already live.
+          for sts in mongodb minio; do
+            live_pvc_name=$(kubectl get statefulset "$sts" -n ooredoo-staging -o jsonpath='{.spec.volumeClaimTemplates[0].metadata.name}' 2>/dev/null || echo "MISSING")
+            rendered_pvc_name=$(python - "$sts" <<'PYEOF'
+          import sys, yaml
+          name = sys.argv[1]
+          for doc in yaml.safe_load_all(open("rendered-staging-deploy.yaml", encoding="utf-8")):
+              if doc and doc.get("kind") == "StatefulSet" and doc["metadata"]["name"] == name:
+                  print(doc["spec"]["volumeClaimTemplates"][0]["metadata"]["name"])
+          PYEOF
+          )
+            if [ "$live_pvc_name" != "MISSING" ] && [ "$live_pvc_name" != "$rendered_pvc_name" ]; then
+              echo "::error::$sts volumeClaimTemplates PVC name would change ($live_pvc_name -> $rendered_pvc_name) - this is an immutable StatefulSet field, the upgrade would fail or require a destructive migration. Stopping before helm upgrade."
+              exit 1
+            fi
+          done
+          echo "No destructive StatefulSet volumeClaimTemplates change detected."
+
+      - name: Dry-run stop
+        if: inputs.dry_run
+        run: |
+          echo "dry_run=true - rendered and validated only, not applying. Stopping here."
+          exit 0
+
+      - name: Helm upgrade --install
+        if: '!inputs.dry_run'
+        env:
+          BACKEND_DIGEST: ${{ needs.validate-release.outputs.backend_digest }}
+          FRONTEND_DIGEST: ${{ needs.validate-release.outputs.frontend_digest }}
+          OCR_DIGEST: ${{ needs.validate-release.outputs.ocr_digest }}
+          HELM_TIMEOUT: ${{ inputs.helm_timeout }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$HELM_TIMEOUT" =~ ^[0-9]+(s|m|h)$ ]]; then
+            echo "::error::helm_timeout '$HELM_TIMEOUT' is not a valid Go duration like 10m/600s/1h"
+            exit 1
+          fi
+          JWT_SECRET=$(kubectl get secret backend-secret -n ooredoo-staging -o jsonpath='{.data.jwt-secret}' | base64 -d)
+          MONGO_PASSWORD=$(kubectl get secret mongodb-secret -n ooredoo-staging -o jsonpath='{.data.mongodb-password}' | base64 -d)
+          MINIO_ACCESS=$(kubectl get secret minio-secret -n ooredoo-staging -o jsonpath='{.data.minio-access-key}' | base64 -d)
+          MINIO_SECRET=$(kubectl get secret minio-secret -n ooredoo-staging -o jsonpath='{.data.minio-secret-key}' | base64 -d)
+          helm upgrade --install ooredoo-staging deploy/helm/ooredoo \
+            -n ooredoo-staging \
+            -f deploy/helm/ooredoo/values-staging.yaml \
+            --set-string backend.image.digest="$BACKEND_DIGEST" \
+            --set-string frontend.image.digest="$FRONTEND_DIGEST" \
+            --set-string ocr.image.digest="$OCR_DIGEST" \
+            --set-string imagePullSecrets[0].name=ghcr-secret \
+            --set-string backend.secrets.jwtSecret="$JWT_SECRET" \
+            --set-string mongodb.auth.password="$MONGO_PASSWORD" \
+            --set-string minio.auth.accessKey="$MINIO_ACCESS" \
+            --set-string minio.auth.secretKey="$MINIO_SECRET" \
+            --wait --timeout "$HELM_TIMEOUT"
+          unset JWT_SECRET MONGO_PASSWORD MINIO_ACCESS MINIO_SECRET
+
+      - name: Verify rollout
+        if: '!inputs.dry_run'
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/backend -n ooredoo-staging --timeout=300s
+          kubectl rollout status deployment/frontend -n ooredoo-staging --timeout=300s
+          kubectl rollout status deployment/ocr -n ooredoo-staging --timeout=300s
+          kubectl rollout status statefulset/mongodb -n ooredoo-staging --timeout=300s
+          kubectl rollout status statefulset/minio -n ooredoo-staging --timeout=300s
+
+      - name: Verify PVCs remain Bound
+        if: '!inputs.dry_run'
+        run: |
+          set -euo pipefail
+          for pvc in mongodb-data-mongodb-0 minio-data-minio-0; do
+            phase=$(kubectl get pvc "$pvc" -n ooredoo-staging -o jsonpath='{.status.phase}')
+            echo "$pvc: $phase"
+            [ "$phase" = "Bound" ] || { echo "::error::$pvc is not Bound"; exit 1; }
+          done
+
+      - name: Verify deployed imageIDs match the release manifest digests
+        if: '!inputs.dry_run'
+        run: |
+          set -euo pipefail
+          kubectl get pods -n ooredoo-staging -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+
+      - name: Application smoke tests
+        if: '!inputs.dry_run'
+        run: bash deploy/ci-scripts/smoke-test-staging.sh
+
+      - name: WebSocket/STOMP/SockJS through Traefik Ingress
+        if: '!inputs.dry_run'
+        run: bash deploy/ci-scripts/ws-stomp-test-staging.sh
+
+      - name: Verify Prometheus targets
+        if: '!inputs.dry_run'
+        run: bash deploy/ci-scripts/verify-monitoring-staging.sh
+
+      - name: Record final Helm revision and image digests (post-deploy)
+        if: '!inputs.dry_run'
+        run: |
+          set -euo pipefail
+          helm list -n ooredoo-staging -f '^ooredoo-staging$'
+          kubectl get pods -n ooredoo-staging -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-staging-evidence-${{ github.run_id }}
+          path: |
+            rendered-staging-deploy.yaml
+          retention-days: 30
+          if-no-files-found: ignore

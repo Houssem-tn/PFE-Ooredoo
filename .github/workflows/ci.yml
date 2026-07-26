@@ -103,14 +103,17 @@ jobs:
           # intentionally-public test-only JWT secret by design (see that
           # file's own comment) — not a real secret, and this check would
           # otherwise flag it as a false positive on every run.
-          # k8s-validate.yml is excluded for the same reason: its
-          # `helm template --set-string backend.secrets.jwtSecret=...` step
-          # passes a fixed, clearly-named CI-only dummy value
-          # ("ci-only-dummy-jwt-secret-not-real-...") purely to satisfy
-          # Helm's `required()` guard when rendering with no real secrets
-          # supplied — not a credential, low-entropy by design, never used
-          # outside this workflow's own ephemeral render.
-          hits=$(git grep -nEi "(app\.jwt\.secret|jwt[._-]?secret)\s*=\s*[^\\\$\s][A-Za-z0-9/+=_-]{15,}" -- '*.properties' '*.yml' '*.yaml' ':!application-test.properties' ':!**/application-test.properties' ':!.github/workflows/k8s-validate.yml' || true)
+          # k8s-validate.yml and deploy-staging.yml are excluded for the
+          # same reason: each passes a fixed, clearly-named CI-only dummy
+          # value ("ci-only-dummy-jwt-secret-not-real-...") purely to
+          # satisfy Helm's `required()` guard when rendering the chart
+          # with no real secrets supplied (k8s-validate.yml's own
+          # DUMMY_SECRETS, and deploy-staging.yml's structural-preflight
+          # render, which is template-only — never applied to the
+          # cluster, see that workflow's own comment) — not a credential,
+          # low-entropy by design, never used outside each workflow's own
+          # ephemeral render.
+          hits=$(git grep -nEi "(app\.jwt\.secret|jwt[._-]?secret)\s*=\s*[^\\\$\s][A-Za-z0-9/+=_-]{15,}" -- '*.properties' '*.yml' '*.yaml' ':!application-test.properties' ':!**/application-test.properties' ':!.github/workflows/k8s-validate.yml' ':!.github/workflows/deploy-staging.yml' || true)
           if [ -n "$hits" ]; then
             echo "::error::Possible hardcoded JWT secret in a tracked config file:"
             echo "$hits"
@@ -424,14 +427,21 @@ jobs:
           sarif_file: trivy-backend.sarif
         continue-on-error: true
 
-      # Push only on develop/main pushes and version tags — never on pull_request
-      # events (this job only runs from `push`/`schedule`/`workflow_dispatch`
-      # triggers anyway, but the branch/ref check below is a second, explicit
-      # gate so a future trigger change can't silently start pushing from PRs).
+      # Push only on develop/main pushes, version tags, or an explicit manual
+      # workflow_dispatch — never on pull_request events (this job only runs
+      # from `push`/`schedule`/`workflow_dispatch` triggers anyway, but the
+      # branch/ref check below is a second, explicit gate so a future trigger
+      # change can't silently start pushing from PRs). workflow_dispatch is
+      # included so the Phase 5 release orchestrator can publish an
+      # immutable, deliberately-requested build from any trusted branch
+      # (e.g. a release-hardening branch under test) without waiting for a
+      # develop/main merge — it's already a manual, audited action (someone
+      # or something with repo write access explicitly triggered this run),
+      # not an automatic publish from arbitrary branch pushes.
       - name: Log in to ${{ env.REGISTRY }}
         if: |
           github.event_name != 'pull_request' &&
-          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -439,9 +449,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
+        id: push
         if: |
           github.event_name != 'pull_request' &&
-          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -450,3 +461,33 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
+
+      # Machine-readable record of exactly what was published — consumed by
+      # the release orchestrator (release.yml) instead of it ever rebuilding
+      # this image itself. Digest is the immutable reference Phase 5's
+      # release manifest and Helm deploys key off; the tag alone is not
+      # sufficient proof of exact content if a build were ever repeated.
+      - name: Record published image reference
+        if: steps.push.outcome == 'success'
+        run: |
+          mkdir -p image-info
+          cat > image-info/backend.json <<JSON
+          {
+            "component": "backend",
+            "repository": "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}",
+            "sourceRepository": "${{ github.repository }}",
+            "sourceSha": "${{ github.sha }}",
+            "tags": ${{ toJSON(steps.meta.outputs.tags) }},
+            "digest": "${{ steps.push.outputs.digest }}",
+            "workflowRunId": "${{ github.run_id }}"
+          }
+          JSON
+          cat image-info/backend.json
+
+      - name: Upload image reference
+        if: steps.push.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-image-info
+          path: image-info/backend.json
+          retention-days: 90

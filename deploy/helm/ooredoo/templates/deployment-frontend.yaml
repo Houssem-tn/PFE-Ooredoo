@@ -30,7 +30,7 @@ spec:
         {{- toYaml .Values.frontend.podSecurityContext | nindent 8 }}
       containers:
         - name: frontend
-          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          image: "{{ include "ooredoo.image" .Values.frontend.image }}"
           imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.frontend.securityContext | nindent 12 }}

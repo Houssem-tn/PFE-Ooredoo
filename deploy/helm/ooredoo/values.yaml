@@ -52,6 +52,11 @@ frontend:
     # Immutable, never "latest" — see CI.md for how this tag was produced
     # and verified (real Trivy scan, 0 Critical, real GHCR push).
     tag: sha-f3bf729
+    # When set (e.g. "sha256:..."), takes priority over tag - see
+    # templates/_helpers.tpl's ooredoo.image. Empty by default so plain
+    # tag-based deploys (local K3d imports, CI sha-<short> tags) keep
+    # working unchanged.
+    digest: ""
     pullPolicy: IfNotPresent
   # nginx-unprivileged listens on 8080 (see Pfe-Oreedoo-Front/Dockerfile) —
   # matches the image, not configurable without rebuilding it.
@@ -117,6 +122,8 @@ backend:
   image:
     repository: ghcr.io/houssem-tn/ooredoo-backend
     tag: sha-85e1fc9
+    # Same digest-priority behavior as frontend.image.digest above.
+    digest: ""
     pullPolicy: IfNotPresent
   containerPort: 8080
   service:
@@ -257,6 +264,8 @@ ocr:
   image:
     repository: ghcr.io/houssem-tn/ooredoo-ocr
     tag: sha-bd96b1a
+    # Same digest-priority behavior as frontend.image.digest above.
+    digest: ""
     pullPolicy: IfNotPresent
   containerPort: 8000
   service:

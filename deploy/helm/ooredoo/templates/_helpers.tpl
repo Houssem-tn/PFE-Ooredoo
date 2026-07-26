@@ -43,3 +43,28 @@ Namespace every resource is rendered into.
 {{- define "ooredoo.namespace" -}}
 {{- .Values.namespace.name -}}
 {{- end -}}
+
+{{/*
+Renders an image reference, preferring an immutable digest over a tag when
+both are available — needed so the exact same verified image (backend/
+frontend/ocr, published once to GHCR by each repo's own CI) can be
+promoted between environments without ever being rebuilt. Call as:
+  {{ include "ooredoo.image" .Values.backend.image }}
+- digest set (e.g. "sha256:...") -> "repository@sha256:..." (tag ignored:
+  a digest already pins the exact content, and Kubernetes doesn't accept
+  both an @digest and a :tag in the same reference).
+- digest empty, tag set -> "repository:tag" (the Phase 1-4 path — local
+  K3d image imports and CI-built sha-<short> tags both work unchanged).
+- both empty -> fails loudly via `required`, matching this chart's own
+  established pattern for secrets (see secrets.yaml) rather than silently
+  falling back to a mutable "latest".
+*/}}
+{{- define "ooredoo.image" -}}
+{{- $repository := required "image.repository is required" .repository -}}
+{{- if .digest -}}
+{{- printf "%s@%s" $repository .digest -}}
+{{- else -}}
+{{- $tag := required "image.tag is required when image.digest is not set" .tag -}}
+{{- printf "%s:%s" $repository $tag -}}
+{{- end -}}
+{{- end -}}
