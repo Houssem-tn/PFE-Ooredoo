@@ -162,7 +162,15 @@ backend:
     from: ""
 
   jwt:
-    expirationMs: 86400000
+    # Quoted deliberately: Helm's values decoding turns a bare numeric
+    # literal into a Go float64, and Sprig's `quote` (used in
+    # configmap.yaml) formats float64 via Go's default %v, which renders
+    # numbers this size in scientific notation ("8.64e+07") instead of
+    # "86400000" — Spring then fails to parse that string as a long.
+    # Confirmed via a real k3d deployment: the backend crash-looped on
+    # startup with "Failed to convert value of type 'String' to required
+    # type 'long'; For input string: '8.64e+07'" until this was quoted.
+    expirationMs: "86400000"
 
   # Secret material — see secrets.yaml. Intentionally left empty, not a
   # plausible-looking "CHANGE_ME_..." placeholder: secrets.yaml wraps
